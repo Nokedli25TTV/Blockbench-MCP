@@ -2,9 +2,12 @@
 
 import { io } from "socket.io-client";
 import { ToolType } from "@shared/types";
+import { getPalette } from "../../../packages/shared/src/palettes";
 
-// 전역 변수 선언
+// Global variable declarations
 let mcpPanel: Panel;
+let mcpSocket: ReturnType<typeof io> | null = null;
+let mcpInterval: ReturnType<typeof setInterval> | null = null;
 let commandListElement: HTMLElement;
 const commandHistory: Array<{ timestamp: Date; type: 'sent' | 'received'; command: string; data?: any }> = [];
 
@@ -24,13 +27,14 @@ const options: PluginOptions = {
   repository: "https://github.com/enfpdev/blockbench-mcp",
   onload: () => {
     const socket = io("http://localhost:9999");
+    mcpSocket = socket;
 
-    // 커맨드 기록 HTML 업데이트 함수
+    // Function to update the command history HTML
     const updateCommandDisplay = () => {
       if (!commandListElement) return;
-      
+
       if (commandHistory.length === 0) {
-        commandListElement.innerHTML = '<div class="mcp-empty">아직 커맨드 기록이 없습니다.</div>';
+        commandListElement.innerHTML = '<div class="mcp-empty">No command history yet.</div>';
         return;
       }
 
@@ -55,14 +59,14 @@ const options: PluginOptions = {
 
       commandListElement.innerHTML = commandsHtml;
       
-      // 스크롤을 맨 아래로
+      // Scroll to the bottom
       commandListElement.scrollTop = commandListElement.scrollHeight;
     };
 
-    // MCP 커맨드 기록 패널 생성
+    // Create the MCP command history panel
     mcpPanel = new Panel({
       id: 'mcp_command_history',
-      name: 'MCP 커맨드 기록',
+      name: 'MCP Command History',
       icon: 'history',
       growable: true,
       resizable: true,
@@ -80,11 +84,11 @@ const options: PluginOptions = {
         template: `
           <div class="mcp-command-history">
             <div class="mcp-header">
-              <h3>MCP 커맨드 기록</h3>
-              <div class="mcp-stats">총 ${commandHistory.length}개 커맨드</div>
+              <h3>MCP Command History</h3>
+              <div class="mcp-stats">${commandHistory.length} commands total</div>
             </div>
             <div class="mcp-content" ref="commandList">
-              <div class="mcp-empty">아직 커맨드 기록이 없습니다.</div>
+              <div class="mcp-empty">No command history yet.</div>
             </div>
           </div>
         `,
@@ -98,7 +102,7 @@ const options: PluginOptions = {
       }
     });
 
-    // 패널 스타일 추가
+    // Add panel styles
     const style = document.createElement('style');
     style.textContent = `
       .mcp-command-history {
@@ -178,12 +182,12 @@ const options: PluginOptions = {
     `;
     document.head.appendChild(style);
 
-    // 툴바에 패널 토글 버튼 추가
+    // Add a panel toggle button to the toolbar
     new Action('mcp_toggle_panel', {
-      name: 'MCP 커맨드 패널 토글',
+      name: 'Toggle MCP Command Panel',
       icon: 'history',
       click: () => {
-        // 패널 표시/숨김 토글
+        // Toggle panel visibility
         const panelElement = document.getElementById('panel_mcp_command_history');
         if (panelElement) {
           const isVisible = panelElement.style.display !== 'none';
@@ -192,18 +196,2998 @@ const options: PluginOptions = {
       }
     });
 
-    // 커맨드 기록 업데이트 함수
+    // Function to refresh the command history
     const updateCommandHistory = () => {
       updateCommandDisplay();
-      // 헤더의 통계 업데이트
+      // Update the stats in the header
       const statsElement = document.querySelector('.mcp-stats');
       if (statsElement) {
-        statsElement.textContent = `총 ${commandHistory.length}개 커맨드`;
+        statsElement.textContent = `${commandHistory.length} commands total`;
       }
     };
 
+    // Push a diagnostic line into the history panel so errors are visible in-UI too.
+    const logToHistory = (message: string, data?: any) => {
+      commandHistory.push({
+        timestamp: new Date(),
+        type: 'received',
+        command: message,
+        data,
+      });
+      updateCommandHistory();
+    };
+
+    // --- Shared Blockbench helpers (used by all tool handlers) -------------
+    const isVec3 = (v: any): v is [number, number, number] =>
+      Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && isFinite(n));
+
+    const nonZeroAxes = (v: number[]): number => v.filter((n) => Math.abs(n) > 1e-6).length;
+
+    const allCubes = (): any[] => (typeof Cube !== 'undefined' && (Cube as any).all) ? (Cube as any).all : [];
+    const allGroups = (): any[] => (typeof Group !== 'undefined' && (Group as any).all) ? (Group as any).all : [];
+
+    const nameTaken = (n: string): boolean =>
+      allCubes().some((c: any) => c.name === n) || allGroups().some((g: any) => g.name === n);
+
+    const findGroupByName = (n: string): any => allGroups().find((g: any) => g.name === n);
+    const findCubeByName = (n: string): any => allCubes().find((c: any) => c.name === n);
+
+    const hasProject = (): boolean => !(typeof Project === 'undefined' || !Project);
+
+    // Create a real cube in the current Blockbench project using the Blockbench API.
+    // Returns a result object that is sent back to the MCP server as an ack.
+    const createCube = (input: {
+      name?: string;
+      from?: [number, number, number];
+      to?: [number, number, number];
+      size?: number;
+      origin?: [number, number, number];
+      parent?: string;
+    }): { ok: boolean; name?: string; from?: number[]; to?: number[]; error?: string } => {
+      try {
+        console.log('[MCP Plugin] createCube called with', input);
+
+        // A project (and a loaded format) must exist before we can add elements.
+        if (typeof Project === 'undefined' || !Project) {
+          const msg = 'No project open — create or open a model first.';
+          console.warn('[MCP] ' + msg);
+          Blockbench.showStatusMessage('[MCP] ' + msg, 5000);
+          logToHistory('error: no project open');
+          return { ok: false, error: msg };
+        }
+
+        // --- Validation (see MODELING_CONSTRAINTS.md) ---------------------
+        if (input.from !== undefined && !isVec3(input.from)) {
+          return { ok: false, error: "'from' must be 3 finite numbers [x,y,z] (rule #5)." };
+        }
+        if (input.to !== undefined && !isVec3(input.to)) {
+          return { ok: false, error: "'to' must be 3 finite numbers [x,y,z] (rule #5)." };
+        }
+        if (input.origin !== undefined && !isVec3(input.origin)) {
+          return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1: define pivot explicitly)." };
+        }
+        if (input.size !== undefined && (typeof input.size !== 'number' || !isFinite(input.size) || input.size <= 0)) {
+          return { ok: false, error: "'size' must be a positive finite number (rule #5)." };
+        }
+
+        const rawFrom: [number, number, number] = input.from || [0, 0, 0];
+        const size = typeof input.size === 'number' ? input.size : 8;
+        const rawTo: [number, number, number] = input.to || [rawFrom[0] + size, rawFrom[1] + size, rawFrom[2] + size];
+        // Normalize corners to min/max so the box is never inverted/degenerate (rule #5).
+        const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
+        const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
+
+        // Unique, stable name across all cubes and groups (rule #4).
+        let name: string;
+        if (input.name) {
+          if (nameTaken(input.name)) {
+            return {
+              ok: false,
+              error: `Name "${input.name}" already exists. Names must be unique (rule #4) — pick a descriptive, unique name like "staff_handle".`,
+            };
+          }
+          name = input.name;
+        } else {
+          // No name supplied: generate a unique, non-colliding fallback.
+          let i = 1;
+          while (nameTaken(`element_${i}`)) i++;
+          name = `element_${i}`;
+        }
+
+        // Resolve an explicit parent group up front so we fail before creating anything.
+        let parentGroup: any = null;
+        if (input.parent) {
+          parentGroup = findGroupByName(input.parent);
+          if (!parentGroup) return { ok: false, error: `Parent group "${input.parent}" not found.` };
+        }
+
+        Undo.initEdit({ elements: [], outliner: true, selection: true });
+
+        // Mirror Blockbench's own "add_cube": init() registers the element (and
+        // places it at root); only call addTo() when nesting under a group.
+        // select() is wrapped and finishEdit() is GUARANTEED to run, so a throw
+        // from select()/addTo never (a) propagates, (b) skips the undo entry, or
+        // (c) leaves an orphan that undo can't remove (live bug 2026-06-13).
+        let cube: any = null;
+        let createError: any = null;
+        try {
+          cube = new Cube({
+            name,
+            autouv: 1, // Box UV auto-mapping so faces aren't left at [0,0] on export.
+            from,
+            to,
+            origin: input.origin || from,
+          }).init();
+
+          if (parentGroup) {
+            cube.addTo(parentGroup);
+          } else if (typeof Group !== 'undefined' && Group.selected) {
+            cube.addTo(Group.selected);
+          }
+          // else: init() already placed it at root — do NOT addTo (matches core).
+
+          try {
+            cube.select();
+          } catch (selErr) {
+            console.warn('[MCP Plugin] cube.select() failed (non-fatal):', selErr);
+          }
+        } catch (e: any) {
+          createError = e;
+        }
+
+        // Always close the edit so the create is a single undoable step.
+        Undo.finishEdit('Create cube via MCP', { elements: cube ? [cube] : [], outliner: true, selection: true });
+
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) {
+          Canvas.updateAll();
+        }
+
+        if (!cube) {
+          return { ok: false, error: createError?.message || String(createError) };
+        }
+
+        console.log('[MCP Plugin] Cube created:', cube);
+        Blockbench.showStatusMessage(`[MCP] Created cube "${name}".`, 4000);
+        logToHistory(`created cube "${name}"`);
+        return { ok: true, name, from, to };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createCube failed:', err);
+        Blockbench.showStatusMessage(`[MCP] Cube failed: ${err?.message || err}`, 6000);
+        logToHistory('error: ' + (err?.message || String(err)), { stack: err?.stack });
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Create a named group / GeckoLib bone, optionally nested under a parent (rule #4/#6).
+    const createGroup = (input: { name?: string; parent?: string; origin?: [number, number, number] }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open — create or open a model first.' };
+        if (!input.name) return { ok: false, error: 'A unique, descriptive group name is required (rule #4).' };
+        if (nameTaken(input.name)) return { ok: false, error: `Name "${input.name}" already exists. Names must be unique (rule #4).` };
+        if (input.origin !== undefined && !isVec3(input.origin)) {
+          return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1)." };
+        }
+
+        let parentGroup: any = null;
+        if (input.parent) {
+          parentGroup = findGroupByName(input.parent);
+          if (!parentGroup) return { ok: false, error: `Parent group "${input.parent}" not found.` };
+        }
+
+        Undo.initEdit({ outliner: true, elements: [], selection: true });
+        // Mirror Blockbench core: init() places it at root; addTo only when nesting.
+        // select() wrapped + finishEdit guaranteed (same robustness as create_cube).
+        let group: any = null;
+        let createError: any = null;
+        try {
+          group = new Group({ name: input.name, origin: input.origin || [0, 0, 0] }).init();
+          if (parentGroup) group.addTo(parentGroup);
+          try {
+            if (typeof group.select === 'function') group.select();
+          } catch (selErr) {
+            console.warn('[MCP Plugin] group.select() failed (non-fatal):', selErr);
+          }
+        } catch (e: any) {
+          createError = e;
+        }
+        Undo.finishEdit('Create group via MCP', { outliner: true, selection: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        if (!group) return { ok: false, error: createError?.message || String(createError) };
+        logToHistory(`created group "${group.name}"`);
+        return { ok: true, name: group.name, uuid: group.uuid, parent: parentGroup ? parentGroup.name : null };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createGroup failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Set the pivot/origin of a GROUP (rule #1: pivot-first). Rejects cubes.
+    const setOrigin = (input: { target?: string; origin?: [number, number, number] }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.target) return { ok: false, error: 'target (group name) is required.' };
+        if (!isVec3(input.origin)) return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1)." };
+        if (findCubeByName(input.target)) {
+          return { ok: false, error: `"${input.target}" is a cube. set_origin targets groups/bones only.` };
+        }
+        const group = findGroupByName(input.target);
+        if (!group) return { ok: false, error: `Group "${input.target}" not found.` };
+
+        Undo.initEdit({ outliner: true, elements: [] });
+        group.origin = [input.origin[0], input.origin[1], input.origin[2]];
+        Undo.finishEdit('Set origin via MCP', { outliner: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`set origin of "${group.name}"`);
+        return { ok: true, name: group.name, origin: group.origin };
+      } catch (err: any) {
+        console.error('[MCP Plugin] setOrigin failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Rotate a GROUP, single-axis only (rule #1). Rejects cubes and multi-axis rotations.
+    const setRotation = (input: { target?: string; rotation?: [number, number, number] }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.target) return { ok: false, error: 'target (group name) is required.' };
+        if (!isVec3(input.rotation)) return { ok: false, error: "'rotation' must be 3 finite numbers [x,y,z] degrees (rule #1)." };
+
+        if (findCubeByName(input.target)) {
+          return {
+            ok: false,
+            error: `"${input.target}" is a cube. Rotation is only allowed on groups/bones — create a parent group and rotate that (rule #1).`,
+          };
+        }
+        const group = findGroupByName(input.target);
+        if (!group) return { ok: false, error: `Group "${input.target}" not found.` };
+
+        const axes = nonZeroAxes(input.rotation);
+        if (axes > 1) {
+          return {
+            ok: false,
+            error: `Rotation uses ${axes} axes. Each group may rotate on ONE axis only; nest groups for multi-axis rotation (rule #1).`,
+          };
+        }
+
+        Undo.initEdit({ outliner: true, elements: [] });
+        group.rotation = [input.rotation[0], input.rotation[1], input.rotation[2]];
+        Undo.finishEdit('Set rotation via MCP', { outliner: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        const pivotSet = (group.origin || [0, 0, 0]).some((n: number) => Math.abs(n) > 1e-6);
+        logToHistory(`rotated "${group.name}"`);
+        return {
+          ok: true,
+          name: group.name,
+          rotation: group.rotation,
+          warning: pivotSet ? undefined : 'pivot/origin is [0,0,0]; call set_origin first for predictable rotation (rule #1).',
+        };
+      } catch (err: any) {
+        console.error('[MCP Plugin] setRotation failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Return the full outliner hierarchy + registered textures as a plain JSON tree.
+    const getSceneTree = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+
+        const mapNode = (node: any): any => {
+          const isGroup = (typeof Group !== 'undefined' && node instanceof Group) || node.type === 'group';
+          if (isGroup) {
+            return {
+              type: 'group',
+              uuid: node.uuid,
+              name: node.name,
+              origin: node.origin ? [...node.origin] : [0, 0, 0],
+              rotation: node.rotation ? [...node.rotation] : [0, 0, 0],
+              children: (node.children || []).map(mapNode),
+            };
+          }
+          const faces: Record<string, { texture: string | null }> = {};
+          if (node.faces) {
+            for (const f of Object.keys(node.faces)) {
+              const t = node.faces[f] ? node.faces[f].texture : null;
+              faces[f] = { texture: t ? String(t) : null };
+            }
+          }
+          return {
+            type: 'cube',
+            uuid: node.uuid,
+            name: node.name,
+            from: node.from ? [...node.from] : [0, 0, 0],
+            to: node.to ? [...node.to] : [0, 0, 0],
+            origin: node.origin ? [...node.origin] : [0, 0, 0],
+            rotation: node.rotation ? [...node.rotation] : [0, 0, 0],
+            faces,
+          };
+        };
+
+        const roots = (typeof Outliner !== 'undefined' && Outliner.root ? Outliner.root : []).map(mapNode);
+        const textures = (typeof Texture !== 'undefined' && (Texture as any).all ? (Texture as any).all : []).map(
+          (t: any) => ({ uuid: t.uuid, name: t.name })
+        );
+        return { ok: true, tree: { roots, textures } };
+      } catch (err: any) {
+        console.error('[MCP Plugin] getSceneTree failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Register/load a texture asset (rule #2). Source: data_url > path > blank canvas.
+    const registerTexture = (input: { name?: string; data_url?: string; path?: string; width?: number; height?: number }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.name) return { ok: false, error: 'A unique texture name is required.' };
+        const textures = (typeof Texture !== 'undefined' && (Texture as any).all) ? (Texture as any).all : [];
+        if (textures.some((t: any) => t.name === input.name)) {
+          return { ok: false, error: `Texture "${input.name}" is already registered.` };
+        }
+
+        let tex: any;
+        if (input.data_url) {
+          tex = new Texture({ name: input.name }).fromDataURL(input.data_url).add(false);
+        } else if (input.path) {
+          tex = new Texture({ name: input.name }).fromPath(input.path).add(false);
+        } else {
+          const w = input.width || 16;
+          const h = input.height || 16;
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          // Transparent blank texture of the requested resolution.
+          tex = new Texture({ name: input.name }).fromDataURL(canvas.toDataURL('image/png')).add(false);
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`registered texture "${tex.name}"`);
+        return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name };
+      } catch (err: any) {
+        console.error('[MCP Plugin] registerTexture failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Apply an already-registered texture to an existing cube (rule #2).
+    const applyTexture = (input: { target?: string; texture?: string; faces?: string[] }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.target) return { ok: false, error: 'target (cube name) is required.' };
+        if (!input.texture) return { ok: false, error: 'texture (name or id) is required.' };
+
+        const textures = (typeof Texture !== 'undefined' && (Texture as any).all) ? (Texture as any).all : [];
+        const tex = textures.find((t: any) => t.uuid === input.texture || t.name === input.texture);
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" is not registered. Call register_texture first (rule #2).` };
+
+        // Resolve target to one or more cubes: a cube name, OR a group name
+        // (then apply to ALL descendant cubes — one call textures a whole branch).
+        let cubes: any[] = [];
+        const directCube = findCubeByName(input.target);
+        if (directCube) {
+          cubes = [directCube];
+        } else {
+          const group = findGroupByName(input.target);
+          if (!group) return { ok: false, error: `"${input.target}" is not a cube or group (rule #2: the element must exist).` };
+          const collect = (g: any) => {
+            for (const child of g.children || []) {
+              if (typeof Cube !== 'undefined' && child instanceof Cube) cubes.push(child);
+              else if (typeof Group !== 'undefined' && child instanceof Group) collect(child);
+            }
+          };
+          collect(group);
+          if (!cubes.length) return { ok: false, error: `Group "${input.target}" has no descendant cubes.` };
+        }
+
+        Undo.initEdit({ elements: cubes, uv_only: true } as any);
+        for (const cube of cubes) {
+          if (typeof cube.applyTexture === 'function') {
+            cube.applyTexture(tex, input.faces && input.faces.length ? input.faces : true);
+          } else {
+            const faceKeys = input.faces && input.faces.length ? input.faces : Object.keys(cube.faces || {});
+            faceKeys.forEach((f: string) => { if (cube.faces[f]) cube.faces[f].texture = tex.uuid; });
+          }
+          if (typeof (cube as any).mapAutoUV === 'function') (cube as any).mapAutoUV();
+        }
+        Undo.finishEdit('Apply texture via MCP', { elements: cubes });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`applied texture "${tex.name}" to ${cubes.length} cube(s)`);
+        return { ok: true, target: input.target, texture: tex.name, cubes: cubes.length };
+      } catch (err: any) {
+        console.error('[MCP Plugin] applyTexture failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Animation tools (ported from the upstream jasonjgardner blockbench-mcp
+    // server/tools/animation.ts; execute bodies adapted to our ack model).
+    // ---------------------------------------------------------------------
+
+    const animationsSupported = (): boolean =>
+      typeof Animator !== 'undefined' && typeof Format !== 'undefined' && !!(Format as any).animation_mode;
+
+    // Selection, playback and previews only work in Animation mode. We create
+    // animations programmatically (usually from Edit mode), so enter the mode
+    // explicitly — otherwise Animation.selected stays null and play/select fail.
+    // (Animator.open is a boolean flag in Blockbench; Animator.join() enters the mode.)
+    const ensureAnimationMode = (): void => {
+      try {
+        if (typeof Animator !== 'undefined' && !(Animator as any).open && typeof (Animator as any).join === 'function') {
+          (Animator as any).join();
+        }
+      } catch (e) {
+        console.warn('[MCP Plugin] ensureAnimationMode failed:', e);
+      }
+    };
+
+    const isAnimationSelected = (anim: any): boolean =>
+      !!anim && (((Animator as any).selected === anim) || ((Animation as any).selected === anim) || anim.selected === true);
+
+    const findAnimation = (idOrName?: string): any => {
+      const all = (typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : [];
+      if (idOrName) {
+        // Resolve by UUID, exact name, or short name (create_animation prefixes "animation.").
+        return (
+          all.find((a: any) => a.uuid === idOrName || a.name === idOrName) ||
+          all.find((a: any) => a.name === `animation.${idOrName}`)
+        );
+      }
+      return (Animation as any).selected;
+    };
+
+    // Clipboard for animation_copy_paste (module-scoped, survives across calls).
+    let animationClipboard: any = null;
+
+    // Create a complete animation from per-bone keyframes via Animator.loadFile
+    // (bedrock animation JSON — the same path Blockbench uses for imports).
+    const createAnimation = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!animationsSupported()) {
+          return { ok: false, error: 'The current format does not support animations. Use a GeckoLib/Bedrock-style animated format.' };
+        }
+        if (!input.name) return { ok: false, error: 'Animation name is required.' };
+        if (!input.bones || Object.keys(input.bones).length === 0) {
+          return { ok: false, error: 'At least one bone with keyframes is required.' };
+        }
+        // State-safe (rule #3/#8): every animated bone must exist before keyframing.
+        const missing = Object.keys(input.bones).filter((b) => !findGroupByName(b));
+        if (missing.length) {
+          return { ok: false, error: `Bone(s) not found: ${missing.join(', ')}. Create the groups first (get_scene_tree to inspect).` };
+        }
+        if (findAnimation(`animation.${input.name}`) || findAnimation(input.name)) {
+          return { ok: false, error: `Animation "${input.name}" already exists (rule #4: unique names).` };
+        }
+
+        const animationData: any = {
+          loop: !!input.loop,
+          ...(input.animation_length ? { animation_length: input.animation_length } : {}),
+          bones: Object.fromEntries(
+            Object.entries(input.bones as Record<string, any[]>).map(([boneName, keyframes]) => {
+              const boneData: Record<string, Record<string, any>> = {};
+              (keyframes || []).forEach((kf: any) => {
+                const timeKey = String(kf.time);
+                if (kf.position) (boneData.position ??= {})[timeKey] = kf.position;
+                if (kf.rotation) (boneData.rotation ??= {})[timeKey] = kf.rotation;
+                if (kf.scale !== undefined) (boneData.scale ??= {})[timeKey] = kf.scale;
+              });
+              return [boneName, boneData];
+            })
+          ),
+          ...(input.particle_effects ? { particle_effects: input.particle_effects } : {}),
+        };
+
+        Animator.loadFile({
+          content: JSON.stringify({
+            format_version: '1.8.0',
+            animations: { [`animation.${input.name}`]: animationData },
+          }),
+        } as any);
+
+        // Enter animation mode and select, so timeline/keyframe tools work
+        // immediately (live finding: Blockbench does not select imported
+        // animations, and selection is a no-op outside animation mode).
+        ensureAnimationMode();
+        const created = findAnimation(`animation.${input.name}`);
+        if (created && typeof created.select === 'function') created.select();
+        const selected = isAnimationSelected(created);
+
+        logToHistory(`created animation "${input.name}"`);
+        return {
+          ok: true,
+          name: `animation.${input.name}`,
+          uuid: created ? created.uuid : undefined,
+          selected,
+          bones: Object.keys(input.bones).length,
+        };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createAnimation failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Create / delete / edit / select keyframes on one bone+channel.
+    const manageKeyframes = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+        const animation = findAnimation(input.animation_id);
+        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        const group = findGroupByName(input.bone_name);
+        if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found. Use get_scene_tree to inspect.` };
+        if (!input.channel) return { ok: false, error: 'channel is required (rotation/position/scale).' };
+        const keyframes: any[] = input.keyframes || [];
+        if (!keyframes.length) return { ok: false, error: 'keyframes array is required.' };
+
+        let animator = animation.animators[group.uuid];
+        if (!animator) {
+          animator = new BoneAnimator(group.uuid, animation, input.bone_name);
+          animation.animators[group.uuid] = animator;
+        }
+
+        Undo.initEdit({ animations: [animation], keyframes: [] } as any);
+
+        const applyBezier = (keyframe: any, kf: any) => {
+          if (kf.interpolation === 'bezier' && kf.bezier_handles) {
+            const h = kf.bezier_handles;
+            if (h.left_time !== undefined) keyframe.bezier_left_time = h.left_time;
+            if (h.left_value) keyframe.bezier_left_value = h.left_value;
+            if (h.right_time !== undefined) keyframe.bezier_right_time = h.right_time;
+            if (h.right_value) keyframe.bezier_right_value = h.right_value;
+          }
+        };
+        const findKf = (time: number) =>
+          (animator[input.channel] || []).find((k: any) => Math.abs(k.time - time) < 0.001);
+
+        let affected = 0;
+        switch (input.action) {
+          case 'create':
+            keyframes.forEach((kf: any) => {
+              const keyframe = animator.createKeyframe(
+                { time: kf.time, channel: input.channel, values: kf.values, interpolation: kf.interpolation },
+                kf.time, input.channel, false
+              );
+              applyBezier(keyframe, kf);
+              affected++;
+            });
+            break;
+          case 'delete':
+            keyframes.forEach((kf: any) => { const k = findKf(kf.time); if (k) { k.remove(); affected++; } });
+            break;
+          case 'edit':
+            keyframes.forEach((kf: any) => {
+              const k = findKf(kf.time);
+              if (!k) return;
+              if (kf.values !== undefined) k.set('values', kf.values);
+              if (kf.interpolation) k.interpolation = kf.interpolation;
+              applyBezier(k, kf);
+              affected++;
+            });
+            break;
+          case 'select':
+            (Timeline as any).selected.empty();
+            keyframes.forEach((kf: any) => { const k = findKf(kf.time); if (k) { k.select(); affected++; } });
+            break;
+          default:
+            Undo.finishEdit('no-op');
+            return { ok: false, error: `Unknown action "${input.action}".` };
+        }
+
+        Undo.finishEdit(`${input.action} keyframes`);
+        Animator.preview();
+        logToHistory(`${input.action} ${affected} keyframe(s) on ${input.bone_name}.${input.channel}`);
+        return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel };
+      } catch (err: any) {
+        console.error('[MCP Plugin] manageKeyframes failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Curve/easing control over existing keyframes.
+    const animationGraphEditor = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+        const animation = findAnimation(input.animation_id);
+        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        const group = findGroupByName(input.bone_name);
+        if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+        const animator = animation.animators[group.uuid];
+        if (!animator || !animator[input.channel] || !animator[input.channel].length) {
+          return { ok: false, error: `No keyframes found for ${input.bone_name}.${input.channel}` };
+        }
+        if (input.action === 'custom' && !input.custom_curve) {
+          return { ok: false, error: "custom_curve is required for 'custom' action." };
+        }
+
+        Undo.initEdit({ animations: [animation], keyframes: animator[input.channel] } as any);
+
+        const kfs = animator[input.channel].filter((kf: any) => {
+          if (!input.keyframe_range) return true;
+          return kf.time >= input.keyframe_range.start && kf.time <= input.keyframe_range.end;
+        });
+
+        kfs.forEach((kf: any, index: number) => {
+          switch (input.action) {
+            case 'linear': kf.interpolation = 'linear'; break;
+            case 'stepped': kf.interpolation = 'step'; break;
+            case 'smooth': kf.interpolation = 'catmullrom'; break;
+            case 'ease_in':
+            case 'ease_out':
+            case 'ease_in_out': {
+              kf.interpolation = 'bezier';
+              const next = kfs[index + 1];
+              if (next) {
+                const duration = next.time - kf.time;
+                kf.bezier_left_time = 0;
+                kf.bezier_right_time = duration;
+                if (input.action === 'ease_in') kf.bezier_right_time = duration * 0.6;
+                else if (input.action === 'ease_out') kf.bezier_left_time = duration * 0.4;
+                else { kf.bezier_left_time = duration * 0.3; kf.bezier_right_time = duration * 0.7; }
+              }
+              break;
+            }
+            case 'custom': {
+              const c = input.custom_curve;
+              kf.interpolation = 'bezier';
+              kf.bezier_left_time = c.control_point_1[0];
+              kf.bezier_left_value = [c.control_point_1[1], c.control_point_1[1], c.control_point_1[1]];
+              kf.bezier_right_time = c.control_point_2[0];
+              kf.bezier_right_value = [c.control_point_2[1], c.control_point_2[1], c.control_point_2[1]];
+              break;
+            }
+          }
+        });
+
+        Undo.finishEdit('Modify animation curves');
+        Animator.preview();
+        if (typeof updateKeyframeSelection === 'function') updateKeyframeSelection();
+        logToHistory(`applied ${input.action} curve to ${kfs.length} keyframe(s)`);
+        return { ok: true, action: input.action, affected: kfs.length, bone: input.bone_name, channel: input.channel };
+      } catch (err: any) {
+        console.error('[MCP Plugin] animationGraphEditor failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Timeline / playback control.
+    const animationTimeline = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+
+        // If an animation_id is given, select that animation first (live finding:
+        // the timeline only acts on the selected animation).
+        if (input.animation_id) {
+          const anim = findAnimation(input.animation_id);
+          if (!anim) return { ok: false, error: `Animation "${input.animation_id}" not found (use UUID, full name, or short name).` };
+          if (typeof anim.select === 'function') anim.select();
+        }
+        const selected = (Animation as any).selected;
+        if (!selected) return { ok: false, error: 'No animation selected. Pass animation_id or create one first.' };
+
+        let message = '';
+        switch (input.action) {
+          case 'select': message = `Selected animation "${selected.name}"`; break;
+          case 'play': Timeline.start(); message = 'Started animation playback'; break;
+          case 'pause': Timeline.pause(); message = 'Paused animation playback'; break;
+          case 'stop': Timeline.setTime(0); Timeline.pause(); message = 'Stopped animation playback'; break;
+          case 'set_time':
+            if (input.time === undefined) return { ok: false, error: 'time is required for set_time.' };
+            Timeline.setTime(input.time); message = `Set timeline to ${input.time}s`; break;
+          case 'set_length':
+            if (input.length === undefined) return { ok: false, error: 'length is required for set_length.' };
+            selected.length = input.length; message = `Set animation length to ${input.length}s`; break;
+          case 'set_fps':
+            if (input.fps === undefined) return { ok: false, error: 'fps is required for set_fps.' };
+            selected.snapping = input.fps; message = `Set animation FPS to ${input.fps}`; break;
+          case 'loop':
+            if (input.loop_mode) selected.loop = input.loop_mode;
+            message = `Loop mode: ${input.loop_mode || selected.loop}`; break;
+          case 'select_range': {
+            if (!input.range) return { ok: false, error: 'range is required for select_range.' };
+            let count = 0;
+            (Timeline as any).keyframes.forEach((kf: any) => {
+              if (kf.time >= input.range.start && kf.time <= input.range.end) { kf.select(); count++; }
+              else kf.selected = false;
+            });
+            message = `Selected ${count} keyframe(s) in range`; break;
+          }
+          default: return { ok: false, error: `Unknown action "${input.action}".` };
+        }
+        Animator.preview();
+        return { ok: true, message };
+      } catch (err: any) {
+        console.error('[MCP Plugin] animationTimeline failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Batch operations across many keyframes.
+    const batchKeyframeOperations = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+        const selected = (Animation as any).selected;
+        if (!selected) return { ok: false, error: 'No animation selected.' };
+        const params = input.parameters || {};
+
+        let kfs: any[] = [];
+        switch (input.selection || 'selected') {
+          case 'all': kfs = (Timeline as any).keyframes; break;
+          case 'selected': kfs = (Timeline as any).selected; break;
+          case 'range':
+            if (!input.range) return { ok: false, error: 'range is required for range selection.' };
+            kfs = (Timeline as any).keyframes.filter((kf: any) => kf.time >= input.range.start && kf.time <= input.range.end);
+            break;
+          case 'pattern':
+            if (!input.pattern) return { ok: false, error: 'pattern is required for pattern selection.' };
+            kfs = (Timeline as any).keyframes.filter((kf: any) => {
+              const rel = kf.time - (input.pattern.offset || 0);
+              return Math.abs(rel % input.pattern.interval) < 0.001;
+            });
+            break;
+        }
+        if (!kfs.length) return { ok: false, error: 'No keyframes match the selection criteria.' };
+
+        Undo.initEdit({ keyframes: kfs } as any);
+
+        switch (input.operation) {
+          case 'offset':
+            kfs.forEach((kf: any) => {
+              if (params.offset_time !== undefined) kf.time += params.offset_time;
+              if (params.offset_values) {
+                const v = kf.getArray();
+                kf.set('values', [v[0] + params.offset_values[0], v[1] + params.offset_values[1], v[2] + params.offset_values[2]]);
+              }
+            });
+            break;
+          case 'scale': {
+            const pivot = params.scale_pivot || 0;
+            const factor = params.scale_factor || 1;
+            kfs.forEach((kf: any) => { kf.time = pivot + (kf.time - pivot) * factor; });
+            break;
+          }
+          case 'reverse': {
+            const times = kfs.map((kf: any) => kf.time);
+            const minT = Math.min(...times);
+            const maxT = Math.max(...times);
+            kfs.forEach((kf: any) => { kf.time = maxT - (kf.time - minT); });
+            break;
+          }
+          case 'mirror': {
+            if (!params.mirror_axis) return { ok: false, error: 'mirror_axis is required for mirror.' };
+            const idx = params.mirror_axis === 'x' ? 0 : params.mirror_axis === 'y' ? 1 : 2;
+            kfs.forEach((kf: any) => { const v = kf.getArray(); v[idx] *= -1; kf.set('values', v); });
+            break;
+          }
+          case 'smooth':
+            kfs.forEach((kf: any) => { kf.interpolation = 'catmullrom'; });
+            break;
+          case 'bake': {
+            const interval = params.bake_interval || 1 / selected.snapping;
+            const animators = new Set(kfs.map((kf: any) => kf.animator));
+            animators.forEach((animator: any) => {
+              ['rotation', 'position', 'scale'].forEach((channel) => {
+                const chKfs = animator[channel];
+                if (!chKfs || chKfs.length < 2) return;
+                const startT = Math.min(...chKfs.map((kf: any) => kf.time));
+                const endT = Math.max(...chKfs.map((kf: any) => kf.time));
+                for (let t = startT; t <= endT; t += interval) {
+                  if (!chKfs.find((kf: any) => Math.abs(kf.time - t) < 0.001)) {
+                    (Timeline as any).time = t;
+                    animator.fillValues(
+                      animator.createKeyframe({ time: t, channel, values: animator.interpolate(channel, true) }, t, channel, false),
+                      null, false
+                    );
+                  }
+                }
+              });
+            });
+            break;
+          }
+          default: return { ok: false, error: `Unknown operation "${input.operation}".` };
+        }
+
+        Undo.finishEdit(`Batch keyframe operation: ${input.operation}`);
+        Animator.preview();
+        logToHistory(`batch ${input.operation} on ${kfs.length} keyframe(s)`);
+        return { ok: true, operation: input.operation, affected: kfs.length };
+      } catch (err: any) {
+        console.error('[MCP Plugin] batchKeyframeOperations failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Copy/paste (optionally mirrored) animation data between bones/animations.
+    const animationCopyPaste = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+
+        if (input.action === 'copy') {
+          const source = input.source;
+          if (!source) return { ok: false, error: 'source is required for copy.' };
+          const srcAnimation = findAnimation(source.animation);
+          if (!srcAnimation) return { ok: false, error: 'Source animation not found.' };
+          const srcBone = findGroupByName(source.bone);
+          if (!srcBone) return { ok: false, error: `Source bone "${source.bone}" not found.` };
+          const animator = srcAnimation.animators[srcBone.uuid];
+          if (!animator) return { ok: false, error: `No animation data for bone "${source.bone}".` };
+
+          const copied: any = { bone_name: source.bone, channels: {} };
+          (source.channels || ['rotation', 'position', 'scale']).forEach((channel: string) => {
+            if (!animator[channel]) return;
+            let kfs = animator[channel];
+            if (source.time_range) {
+              kfs = kfs.filter((kf: any) => kf.time >= source.time_range.start && kf.time <= source.time_range.end);
+            }
+            copied.channels[channel] = kfs.map((kf: any) => ({
+              time: kf.time,
+              values: kf.getArray(),
+              interpolation: kf.interpolation,
+              bezier_left_time: kf.bezier_left_time,
+              bezier_left_value: kf.bezier_left_value,
+              bezier_right_time: kf.bezier_right_time,
+              bezier_right_value: kf.bezier_right_value,
+            }));
+          });
+
+          animationClipboard = copied;
+          return { ok: true, message: `Copied ${Object.keys(copied.channels).join(', ')} from "${source.bone}"` };
+        }
+
+        if (input.action === 'paste' || input.action === 'mirror_paste') {
+          const target = input.target;
+          if (!target) return { ok: false, error: 'target is required for paste.' };
+          if (!animationClipboard) return { ok: false, error: 'Clipboard is empty — copy first.' };
+          const tgtAnimation = findAnimation(target.animation);
+          if (!tgtAnimation) return { ok: false, error: 'Target animation not found.' };
+          const tgtBone = findGroupByName(target.bone);
+          if (!tgtBone) return { ok: false, error: `Target bone "${target.bone}" not found.` };
+
+          let animator = tgtAnimation.animators[tgtBone.uuid];
+          if (!animator) {
+            animator = new BoneAnimator(tgtBone.uuid, tgtAnimation, target.bone);
+            tgtAnimation.animators[tgtBone.uuid] = animator;
+          }
+
+          Undo.initEdit({ animations: [tgtAnimation], keyframes: [] } as any);
+
+          const mirrorAxis = input.action === 'mirror_paste' ? (target.mirror_axis || 'x') : null;
+          const axisIndex = mirrorAxis === 'x' ? 0 : mirrorAxis === 'y' ? 1 : mirrorAxis === 'z' ? 2 : -1;
+          let pasted = 0;
+
+          Object.entries(animationClipboard.channels as Record<string, any[]>).forEach(([channel, kfsData]) => {
+            kfsData.forEach((kfData: any) => {
+              const values = Array.isArray(kfData.values) ? [...kfData.values] : kfData.values;
+              if (mirrorAxis && Array.isArray(values) && (channel === 'rotation' || channel === 'position')) {
+                values[axisIndex] *= -1;
+              }
+              const time = kfData.time + (target.time_offset || 0);
+              const keyframe = animator.createKeyframe(
+                { time, channel, values, interpolation: kfData.interpolation },
+                time, channel, false
+              );
+              if (kfData.interpolation === 'bezier') {
+                if (kfData.bezier_left_time !== undefined) keyframe.bezier_left_time = kfData.bezier_left_time;
+                if (kfData.bezier_left_value) keyframe.bezier_left_value = kfData.bezier_left_value;
+                if (kfData.bezier_right_time !== undefined) keyframe.bezier_right_time = kfData.bezier_right_time;
+                if (kfData.bezier_right_value) keyframe.bezier_right_value = kfData.bezier_right_value;
+              }
+              pasted++;
+            });
+          });
+
+          Undo.finishEdit(`${input.action} animation data`);
+          Animator.preview();
+          logToHistory(`pasted ${pasted} keyframe(s) to "${target.bone}"`);
+          return { ok: true, message: `Pasted ${pasted} keyframe(s) to "${target.bone}"${mirrorAxis ? ` (mirrored on ${mirrorAxis})` : ''}` };
+        }
+
+        return { ok: false, error: `Unknown action "${input.action}".` };
+      } catch (err: any) {
+        console.error('[MCP Plugin] animationCopyPaste failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // List animations + their per-bone keyframe counts (state verification, rule #3/#8).
+    const listAnimations = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const all = (typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : [];
+        const animations = all.map((a: any) => ({
+          uuid: a.uuid,
+          name: a.name,
+          loop: a.loop,
+          length: a.length,
+          selected: a.selected || false,
+          bones: Object.values(a.animators || {})
+            .filter((an: any) => an && an.constructor && an.constructor.name !== 'EffectAnimator')
+            .map((an: any) => ({
+              name: an.name,
+              rotation_keyframes: (an.rotation || []).length,
+              position_keyframes: (an.position || []).length,
+              scale_keyframes: (an.scale || []).length,
+            }))
+            // Only report bones that actually have keyframes (cosmetic: imported
+            // animations register an animator for every group, most with 0 keys).
+            .filter((b: any) => b.rotation_keyframes + b.position_keyframes + b.scale_keyframes > 0),
+        }));
+        return { ok: true, animations };
+      } catch (err: any) {
+        console.error('[MCP Plugin] listAnimations failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Editing tools (ported from upstream cubes.ts modify_cube + element.ts
+    // remove/rename/reparent patterns, with our guardrails).
+    // ---------------------------------------------------------------------
+
+    const findCubeByNameOrUuid = (id: string): any =>
+      allCubes().find((c: any) => c.uuid === id || c.name === id);
+    const findGroupByNameOrUuid = (id: string): any =>
+      allGroups().find((g: any) => g.uuid === id || g.name === id);
+
+    // Modify an existing cube. Rotation is deliberately NOT accepted — rotation
+    // stays group-only (rule #1); use a parent bone instead.
+    const modifyCube = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.id) return { ok: false, error: 'id (cube name or uuid) is required.' };
+        const cube = findCubeByNameOrUuid(input.id);
+        if (!cube) return { ok: false, error: `Cube "${input.id}" not found. Use get_scene_tree to inspect.` };
+
+        for (const key of ['from', 'to', 'origin'] as const) {
+          if (input[key] !== undefined && !isVec3(input[key])) {
+            return { ok: false, error: `'${key}' must be 3 finite numbers [x,y,z] (rule #5).` };
+          }
+        }
+        if (input.name && input.name !== cube.name && nameTaken(input.name)) {
+          return { ok: false, error: `Name "${input.name}" already exists (rule #4).` };
+        }
+
+        // Normalize corners if either is being changed (rule #5: never inverted).
+        let from = input.from !== undefined ? input.from : [...cube.from];
+        let to = input.to !== undefined ? input.to : [...cube.to];
+        const nFrom = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
+        const nTo = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
+
+        Undo.initEdit({ elements: [cube], outliner: true });
+
+        cube.extend({
+          name: input.name ?? cube.name,
+          from: nFrom,
+          to: nTo,
+          origin: input.origin ?? cube.origin,
+          inflate: input.inflate ?? cube.inflate,
+          visibility: input.visibility ?? cube.visibility,
+          shade: input.shade ?? cube.shade,
+          autouv: input.autouv !== undefined ? (Number(input.autouv) as 0 | 1 | 2) : cube.autouv,
+          mirror_uv: input.mirror_uv ?? cube.mirror_uv,
+          uv_offset: input.uv_offset ?? cube.uv_offset,
+        });
+
+        Undo.finishEdit('Modify cube via MCP', { elements: [cube] });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`modified cube "${cube.name}"`);
+        return { ok: true, name: cube.name, from: [...cube.from], to: [...cube.to] };
+      } catch (err: any) {
+        console.error('[MCP Plugin] modifyCube failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Delete a cube or group (and its children) by name/uuid.
+    const deleteElement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.id) return { ok: false, error: 'id (name or uuid) is required.' };
+        // Resolve cubes, groups AND meshes (delete_element used to miss meshes,
+        // so a mesh could only be removed via risky_eval — LIVE 2026-06-15).
+        const el = findCubeByNameOrUuid(input.id) || findGroupByNameOrUuid(input.id) || findMesh(input.id);
+        if (!el) return { ok: false, error: `Element "${input.id}" not found. Use get_scene_tree to inspect.` };
+
+        const isGroup = (typeof Group !== 'undefined' && el instanceof Group);
+        const isMesh = (typeof Mesh !== 'undefined' && el instanceof Mesh);
+        const kind = isGroup ? 'group' : (isMesh ? 'mesh' : 'cube');
+        const name = el.name;
+
+        // Groups delete via the outliner; cubes AND meshes are elements.
+        Undo.initEdit({ elements: isGroup ? [] : [el], outliner: true, selection: true });
+        el.remove();
+        Undo.finishEdit('Delete element via MCP', { outliner: true, selection: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`deleted ${kind} "${name}"`);
+        return { ok: true, deleted: name, kind };
+      } catch (err: any) {
+        console.error('[MCP Plugin] deleteElement failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Move a cube/group under another parent group (or to root).
+    const reparentElement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.id) return { ok: false, error: 'id (name or uuid) is required.' };
+        if (!input.parent) return { ok: false, error: "parent (group name or 'root') is required." };
+
+        const el = findCubeByNameOrUuid(input.id) || findGroupByNameOrUuid(input.id);
+        if (!el) return { ok: false, error: `Element "${input.id}" not found.` };
+
+        let target: any = 'root';
+        if (input.parent !== 'root') {
+          target = findGroupByNameOrUuid(input.parent);
+          if (!target) return { ok: false, error: `Parent group "${input.parent}" not found.` };
+          // Guard: a group must not be moved into itself or its own descendant.
+          if (typeof Group !== 'undefined' && el instanceof Group) {
+            let walker: any = target;
+            while (walker && walker !== 'root') {
+              if (walker === el) return { ok: false, error: `Cannot move "${el.name}" into its own descendant "${target.name}".` };
+              walker = walker.parent;
+            }
+          }
+        }
+
+        Undo.initEdit({ outliner: true, selection: true });
+        el.addTo(target);
+        Undo.finishEdit('Reparent element via MCP', { outliner: true, selection: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`moved "${el.name}" under "${input.parent}"`);
+        return { ok: true, name: el.name, parent: input.parent };
+      } catch (err: any) {
+        console.error('[MCP Plugin] reparentElement failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Export tools (ported from upstream export.ts). Compile the project via a
+    // Blockbench codec (e.g. GeckoLib/Bedrock) and optionally write to disk.
+    // ---------------------------------------------------------------------
+
+    const listExportFormats = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const registry: any = (typeof Codecs !== 'undefined') ? (Codecs as any) : {};
+        const currentId = (typeof Format !== 'undefined' && (Format as any).codec) ? (Format as any).codec.id : null;
+        let summaries = Object.keys(registry).map((id) => {
+          const c = registry[id] || {};
+          return {
+            id,
+            name: c.name || id,
+            extension: c.extension || null,
+            has_compile: typeof c.compile === 'function',
+            belongs_to_current_format: c.id === currentId,
+          };
+        });
+        if (input.only_current_format) summaries = summaries.filter((s: any) => s.belongs_to_current_format);
+        summaries.sort((a: any, b: any) => a.id.localeCompare(b.id));
+        return { ok: true, current_format_codec: currentId, count: summaries.length, codecs: summaries };
+      } catch (err: any) {
+        console.error('[MCP Plugin] listExportFormats failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const exportModel = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const registry: any = (typeof Codecs !== 'undefined') ? (Codecs as any) : {};
+        const formatCodec = (typeof Format !== 'undefined' && (Format as any).codec) ? (Format as any).codec : null;
+        const resolvedId = input.codec_id || (formatCodec ? formatCodec.id : null);
+        if (!resolvedId) return { ok: false, error: 'No codec_id and the current format has no default codec. Use list_export_formats.' };
+        const codec = registry[resolvedId];
+        if (!codec) return { ok: false, error: `Codec "${resolvedId}" not found. Use list_export_formats for valid IDs.` };
+        if (typeof codec.compile !== 'function') return { ok: false, error: `Codec "${resolvedId}" cannot export programmatically (no compile()).` };
+
+        const effectiveOptions = input.options !== undefined
+          ? input.options
+          : (typeof codec.getExportOptions === 'function' ? codec.getExportOptions() : undefined);
+        const rawResult = codec.compile(effectiveOptions);
+
+        const isArrayBuffer = rawResult instanceof ArrayBuffer;
+        const isBinaryView = ArrayBuffer.isView(rawResult) && !(rawResult instanceof DataView);
+        let binaryBuffer: any = null;
+        if (isArrayBuffer) binaryBuffer = Buffer.from(rawResult as ArrayBuffer);
+        else if (isBinaryView) {
+          const v = rawResult as ArrayBufferView;
+          binaryBuffer = Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+        }
+
+        const text = binaryBuffer ? null : (typeof rawResult === 'string' ? rawResult : (rawResult == null ? '' : JSON.stringify(rawResult, null, 2)));
+        const byteLength = binaryBuffer ? binaryBuffer.byteLength : Buffer.byteLength(text || '', 'utf8');
+        const encoding = binaryBuffer ? 'base64' : 'utf-8';
+
+        let wrote_to_path: string | null = null;
+        if (input.path) {
+          const rnm = (globalThis as any).requireNativeModule;
+          const fs = (typeof rnm === 'function')
+            ? rnm('fs', { message: `MCP export_model requested write access to save the model to ${input.path}` })
+            : null;
+          if (!fs) return { ok: false, error: 'File system access was denied/unavailable. Omit "path" to get the content in the response instead.' };
+          fs.writeFileSync(input.path, binaryBuffer ? binaryBuffer : (text || ''));
+          wrote_to_path = input.path;
+        }
+
+        const maxLen = typeof input.max_content_length === 'number' ? input.max_content_length : 100000;
+        const fullContent = binaryBuffer ? binaryBuffer.toString('base64') : (text || '');
+        const truncated = fullContent.length > maxLen;
+        const content = maxLen === 0 ? null : (truncated ? fullContent.slice(0, maxLen) : fullContent);
+        const fileName = (typeof codec.fileName === 'function') ? codec.fileName() : (Project as any).name;
+
+        // Warn about silent data loss: the Bedrock/GeckoLib geo format stores only
+        // cubes, so the codec drops any mesh WITHOUT erroring or warning (the export
+        // looks fine but the mesh is gone — LIVE 2026-06-15). Surface it explicitly.
+        const meshCount = (typeof Mesh !== 'undefined' && (Mesh as any).all) ? (Mesh as any).all.length : 0;
+        const warning = (meshCount > 0 && resolvedId === 'bedrock')
+          ? `${meshCount} mesh element(s) were OMITTED — the Bedrock/GeckoLib geometry format supports only cubes. Convert meshes to cubes or delete them before exporting.`
+          : null;
+
+        logToHistory(`exported via "${resolvedId}"${wrote_to_path ? ` → ${wrote_to_path}` : ''}${warning ? ' [mesh omitted]' : ''}`);
+        return {
+          ok: true,
+          codec: { id: resolvedId, name: codec.name || resolvedId, extension: codec.extension || null },
+          file_name: fileName,
+          byte_length: byteLength,
+          encoding,
+          wrote_to_path,
+          truncated,
+          content,
+          warning,
+        };
+      } catch (err: any) {
+        console.error('[MCP Plugin] exportModel failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Project tools (ported/adapted from upstream project.ts) + animation
+    // export. set_project fixes the GeckoLib geometry identifier; export_
+    // animations writes the separate .animation.json GeckoLib needs.
+    // ---------------------------------------------------------------------
+
+    const getProjectInfo = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const fmt: any = (typeof Format !== 'undefined') ? Format : null;
+        const rootGroups = (typeof Outliner !== 'undefined' && Outliner.root ? Outliner.root : [])
+          .filter((n: any) => typeof Group !== 'undefined' && n instanceof Group)
+          .map((g: any) => ({ name: g.name, uuid: g.uuid, children: (g.children || []).length }));
+        return {
+          ok: true,
+          info: {
+            project: {
+              name: (Project as any).name,
+              uuid: (Project as any).uuid,
+              model_identifier: (Project as any).model_identifier || null,
+              save_path: (Project as any).save_path || null,
+            },
+            plugin_build: '2026-06-15-meshfix', // bump on each plugin rebuild to confirm the loaded build
+            tool_count: 105,
+            format: { id: fmt ? fmt.id : null, name: fmt ? (fmt.display_name || fmt.name) : null, animation_mode: fmt ? !!fmt.animation_mode : false },
+            resolution: { texture_width: (Project as any).texture_width || null, texture_height: (Project as any).texture_height || null },
+            counts: {
+              cubes: allCubes().length,
+              groups: allGroups().length,
+              textures: (typeof Texture !== 'undefined' && (Texture as any).all ? (Texture as any).all : []).length,
+              animations: (typeof Animation !== 'undefined' && (Animation as any).all ? (Animation as any).all : []).length,
+            },
+            root_groups: rootGroups,
+          },
+        };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Set project-level metadata. model_identifier drives the exported
+    // "geometry.<id>" name (GeckoLib needs a real one, not "unknown").
+    const setProject = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const changed: string[] = [];
+        if (typeof input.model_identifier === 'string') { (Project as any).model_identifier = input.model_identifier; changed.push('model_identifier'); }
+        if (typeof input.name === 'string') { (Project as any).name = input.name; changed.push('name'); }
+        if (typeof input.texture_width === 'number' && input.texture_width > 0) { (Project as any).texture_width = input.texture_width; changed.push('texture_width'); }
+        if (typeof input.texture_height === 'number' && input.texture_height > 0) { (Project as any).texture_height = input.texture_height; changed.push('texture_height'); }
+        if (!changed.length) {
+          return { ok: false, error: 'Nothing to set. Provide model_identifier, name, texture_width, or texture_height.' };
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`set project: ${changed.join(', ')}`);
+        return { ok: true, changed, model_identifier: (Project as any).model_identifier || null, name: (Project as any).name };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Compile all animations to a GeckoLib/Bedrock .animation.json (the model
+    // geometry is exported separately via export_model). Optionally write to disk.
+    const exportAnimations = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        const all = (typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : [];
+        if (!all.length) return { ok: false, error: 'No animations to export. Create one with create_animation first.' };
+
+        const animations: Record<string, any> = {};
+        let compiled = 0;
+        all.forEach((a: any) => {
+          if (typeof a.compileBedrockAnimation === 'function') {
+            animations[a.name] = a.compileBedrockAnimation();
+            compiled++;
+          }
+        });
+        if (!compiled) return { ok: false, error: 'No animations could be compiled (compileBedrockAnimation unavailable).' };
+
+        const content = JSON.stringify({ format_version: '1.8.0', animations }, null, 2);
+
+        let wrote_to_path: string | null = null;
+        if (input.path) {
+          const rnm = (globalThis as any).requireNativeModule;
+          const fs = (typeof rnm === 'function') ? rnm('fs', { message: `MCP export_animations requested write access to ${input.path}` }) : null;
+          if (!fs) return { ok: false, error: 'File system access denied/unavailable. Omit "path" to get content inline.' };
+          fs.writeFileSync(input.path, content);
+          wrote_to_path = input.path;
+        }
+
+        const maxLen = typeof input.max_content_length === 'number' ? input.max_content_length : 100000;
+        const truncated = content.length > maxLen;
+        const out = maxLen === 0 ? null : (truncated ? content.slice(0, maxLen) : content);
+
+        logToHistory(`exported ${compiled} animation(s)${wrote_to_path ? ` → ${wrote_to_path}` : ''}`);
+        return { ok: true, count: compiled, byte_length: Buffer.byteLength(content, 'utf8'), wrote_to_path, truncated, content: out };
+      } catch (err: any) {
+        console.error('[MCP Plugin] exportAnimations failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Texture & UV tools (ported from upstream texture.ts + uv.ts).
+    // ---------------------------------------------------------------------
+
+    const allTextures = (): any[] => (typeof Texture !== 'undefined' && (Texture as any).all) ? (Texture as any).all : [];
+    const findTexture = (id: string): any => allTextures().find((t: any) => t.uuid === id || t.name === id || t.id === id);
+    const allMeshes = (): any[] => (typeof Mesh !== 'undefined' && (Mesh as any).all) ? (Mesh as any).all : [];
+    const findMesh = (id: string): any => allMeshes().find((m: any) => m.uuid === id || m.name === id);
+
+    const colorToCss = (c: any): string => {
+      if (Array.isArray(c)) {
+        const [r, g, b, a = 255] = c;
+        return `rgba(${r}, ${g}, ${b}, ${(a > 1 ? a / 255 : a)})`;
+      }
+      return String(c);
+    };
+
+    // Richer texture creation than register_texture: data URL, file path, fill color, or blank.
+    const createTexture = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.name) return { ok: false, error: 'A unique texture name is required.' };
+        if (allTextures().some((t: any) => t.name === input.name)) {
+          return { ok: false, error: `Texture "${input.name}" already exists.` };
+        }
+        const w = input.width || 16;
+        const h = input.height || 16;
+        let tex: any;
+
+        if (input.data && typeof input.data === 'string') {
+          if (input.data.startsWith('data:image/')) {
+            tex = new Texture({ name: input.name, width: w, height: h }).fromDataURL(input.data).add(false);
+          } else {
+            const path = input.data.replace(/^file:\/\//, '');
+            tex = new Texture({ name: input.name }).fromFile({ name: path.split(/[\\/]/).pop() || path, path } as any).add(false);
+          }
+        } else {
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d')!;
+          if (input.fill_color) {
+            ctx.fillStyle = colorToCss(input.fill_color);
+            ctx.fillRect(0, 0, w, h);
+          } else {
+            ctx.clearRect(0, 0, w, h);
+          }
+          tex = new Texture({ name: input.name, width: w, height: h }).fromDataURL(canvas.toDataURL('image/png')).add(false);
+        }
+
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`created texture "${tex.name}"`);
+        return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name, width: tex.width || w, height: tex.height || h };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createTexture failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const listTextures = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const textures = allTextures().map((t: any) => ({ name: t.name, uuid: t.uuid, id: t.id, group: t.group || null, width: t.width, height: t.height }));
+        return { ok: true, textures };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Returns the texture's image as a data URL (server turns it into MCP image content).
+    const getTexture = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let tex: any;
+        if (input.texture) {
+          tex = findTexture(input.texture);
+          if (!tex) return { ok: false, error: `Texture "${input.texture}" not found.` };
+        } else {
+          tex = (typeof Texture !== 'undefined' && (Texture as any).getDefault) ? (Texture as any).getDefault() : allTextures()[0];
+          if (!tex) return { ok: false, error: 'No textures in the project.' };
+        }
+        return { ok: true, name: tex.name, uuid: tex.uuid, data_url: tex.getDataURL() };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const activateTexture = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tex = findTexture(input.texture);
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" not found.` };
+        if (!(typeof Texture !== 'undefined' && (Texture as any).selected) || (Texture as any).selected.uuid !== tex.uuid) {
+          tex.select();
+        }
+        return { ok: true, name: tex.name, uuid: tex.uuid };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const addTextureGroup = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.name) return { ok: false, error: 'A group name is required.' };
+        if (typeof TextureGroup === 'undefined') return { ok: false, error: 'TextureGroup is not available in this Blockbench version.' };
+        const isMaterial = input.is_material !== false;
+        const group = new (TextureGroup as any)({ name: input.name, is_material: isMaterial }).add();
+        if (Array.isArray(input.textures) && input.textures.length) {
+          const list = input.textures.map((t: string) => findTexture(t)).filter(Boolean);
+          list.forEach((t: any) => t.extend({ group: group.uuid }));
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`added texture group "${group.name}"`);
+        return { ok: true, name: group.name, uuid: group.uuid };
+      } catch (err: any) {
+        console.error('[MCP Plugin] addTextureGroup failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // --- Mesh UV (only meaningful once meshes exist; see Phase 9) ----------
+    const setMeshUv = (input: any): any => {
+      try {
+        const mesh = findMesh(input.mesh_id);
+        if (!mesh) return { ok: false, error: `Mesh "${input.mesh_id}" not found.` };
+        const face = mesh.faces[input.face_key];
+        if (!face) return { ok: false, error: `Face "${input.face_key}" not found in mesh.` };
+        Undo.initEdit({ elements: [mesh], uv_only: true } as any);
+        Object.entries(input.uv_mapping || {}).forEach(([vkey, uv]) => {
+          if (face.vertices.includes(vkey)) face.uv[vkey] = uv;
+        });
+        mesh.preview_controller.updateUV(mesh);
+        if (typeof UVEditor !== 'undefined') (UVEditor as any).loadData();
+        Undo.finishEdit('Set mesh UV');
+        return { ok: true, mesh: mesh.name, face: input.face_key };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const autoUvMesh = (input: any): any => {
+      try {
+        const mesh = input.mesh_id ? findMesh(input.mesh_id) : (allMeshes().find((m: any) => m.selected) || allMeshes()[0]);
+        if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+        Undo.initEdit({ elements: [mesh], uv_only: true } as any);
+        const mode = input.mode || 'project';
+        const selectedFaces = input.faces || (typeof UVEditor !== 'undefined' ? (UVEditor as any).getSelectedFaces(mesh) : Object.keys(mesh.faces));
+        if (mode === 'project') {
+          (BarItems as any).uv_project_from_view.click();
+        } else {
+          selectedFaces.forEach((fkey: string) => {
+            const face = mesh.faces[fkey];
+            if (!face) return;
+            if (mode === 'unwrap') {
+              (UVEditor as any).setAutoSize(null, true, [fkey]);
+            } else if (mode === 'cylinder' || mode === 'sphere') {
+              const verts = face.getSortedVertices();
+              verts.forEach((vkey: string) => {
+                const v = mesh.vertices[vkey];
+                if (mode === 'cylinder') {
+                  const angle = Math.atan2(v[0], v[2]);
+                  face.uv[vkey] = [((angle + Math.PI) / (2 * Math.PI)) * (Project as any).texture_width, ((v[1] + 8) / 16) * (Project as any).texture_height];
+                } else {
+                  const len = Math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2);
+                  const theta = Math.acos(v[1] / len);
+                  const phi = Math.atan2(v[0], v[2]);
+                  face.uv[vkey] = [((phi + Math.PI) / (2 * Math.PI)) * (Project as any).texture_width, (theta / Math.PI) * (Project as any).texture_height];
+                }
+              });
+            }
+          });
+        }
+        mesh.preview_controller.updateUV(mesh);
+        if (typeof UVEditor !== 'undefined') (UVEditor as any).loadData();
+        Undo.finishEdit('Auto UV mesh');
+        return { ok: true, mesh: mesh.name, mode, faces: selectedFaces.length };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const rotateMeshUv = (input: any): any => {
+      try {
+        const mesh = input.mesh_id ? findMesh(input.mesh_id) : (allMeshes().find((m: any) => m.selected) || allMeshes()[0]);
+        if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+        Undo.initEdit({ elements: [mesh], uv_only: true } as any);
+        if (input.faces && input.faces.length) {
+          const sel = mesh.getSelectedFaces(true);
+          sel.length = 0;
+          sel.push(...input.faces);
+        }
+        (UVEditor as any).rotate(parseInt(input.angle || '90'));
+        Undo.finishEdit('Rotate mesh UV');
+        const affected = input.faces || mesh.getSelectedFaces();
+        return { ok: true, mesh: mesh.name, angle: input.angle || '90', faces: affected.length };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Camera & screenshot tools (ported from upstream camera.ts + util.ts).
+    // Return a data URL; the server turns it into MCP image content.
+    // ---------------------------------------------------------------------
+
+    const renderPreviewDataURL = (preview: any): string | undefined => {
+      let dataUrl: string | undefined;
+      (Canvas as any).withoutGizmos(() => {
+        preview.render();
+        dataUrl = preview.canvas.toDataURL();
+      });
+      return dataUrl;
+    };
+
+    const captureScreenshot = (input: any): any => {
+      try {
+        let selectedProject: any = (typeof Project !== 'undefined') ? Project : null;
+        if ((!selectedProject || input.project !== undefined) && typeof ModelProject !== 'undefined') {
+          selectedProject = (ModelProject as any).all.find(
+            (p: any) => p.name === input.project || p.uuid === input.project || p.selected
+          );
+        }
+        if (!selectedProject) return { ok: false, error: 'No project found.' };
+        if (!selectedProject.selected) selectedProject.select();
+
+        const preview = (Preview as any).selected;
+        if (!preview) return { ok: false, error: 'No preview available for the selected project.' };
+
+        const dataUrl = renderPreviewDataURL(preview);
+        if (!dataUrl) return { ok: false, error: 'Failed to capture preview screenshot.' };
+        return { ok: true, data_url: dataUrl };
+      } catch (err: any) {
+        console.error('[MCP Plugin] captureScreenshot failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const captureAppScreenshot = (): Promise<any> =>
+      new Promise((resolve) => {
+        try {
+          if (typeof Screencam === 'undefined' || !(Screencam as any).fullScreen) {
+            resolve({ ok: false, error: 'Screencam unavailable (desktop only).' });
+            return;
+          }
+          let done = false;
+          const t = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: 'App screenshot timed out.' }); } }, 5000);
+          (Screencam as any).fullScreen({}, (dataUrl: string) => {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            resolve(dataUrl ? { ok: true, data_url: dataUrl } : { ok: false, error: 'No data returned.' });
+          });
+        } catch (err: any) {
+          resolve({ ok: false, error: err?.message || String(err) });
+        }
+      });
+
+    const setCameraAngle = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const preview = (Preview as any).selected;
+        if (!preview) return { ok: false, error: 'No preview found in the editor.' };
+        preview.loadAnglePreset({
+          position: input.position,
+          target: input.target,
+          rotation: input.rotation,
+          projection: input.projection,
+        });
+        const dataUrl = renderPreviewDataURL(preview);
+        if (!dataUrl) return { ok: false, error: 'Failed to capture screenshot after setting angle.' };
+        return { ok: true, data_url: dataUrl };
+      } catch (err: any) {
+        console.error('[MCP Plugin] setCameraAngle failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // History tools (ported from upstream history.ts): undo/redo/stack/checkpoint.
+    // ---------------------------------------------------------------------
+
+    const summarizeHistory = (limit: number) => {
+      const history: any[] = (Undo as any).history ?? [];
+      const index = (Undo as any).index ?? 0;
+      const start = Math.max(0, history.length - limit);
+      const entries = history.slice(start).map((entry: any, offset: number) => {
+        const absoluteIndex = start + offset;
+        return {
+          index: absoluteIndex,
+          action: entry.action ?? '(unnamed edit)',
+          type: entry.type ?? 'edit',
+          time: entry.time ?? 0,
+          is_applied: absoluteIndex < index,
+          is_current: absoluteIndex === index - 1,
+        };
+      }).reverse();
+      return { index, total: history.length, can_undo: index > 0, can_redo: index < history.length, entries };
+    };
+
+    const undoTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const history: any[] = (Undo as any).history ?? [];
+        const available = (Undo as any).index ?? 0;
+        if (available === 0) return { ok: false, error: 'Nothing to undo. The undo stack is empty.' };
+        const steps = typeof input.steps === 'number' ? input.steps : 1;
+        const count = Math.min(steps, available);
+        const undone: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const entry = history[((Undo as any).index ?? 0) - 1];
+          undone.push(entry?.action ?? '(unnamed edit)');
+          (Undo as any).undo();
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, undone_count: undone.length, requested: steps, undone, new_index: (Undo as any).index };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const redoTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const history: any[] = (Undo as any).history ?? [];
+        const available = history.length - ((Undo as any).index ?? 0);
+        if (available === 0) return { ok: false, error: 'Nothing to redo.' };
+        const steps = typeof input.steps === 'number' ? input.steps : 1;
+        const count = Math.min(steps, available);
+        const redone: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const entry = history[(Undo as any).index ?? 0];
+          redone.push(entry?.action ?? '(unnamed edit)');
+          (Undo as any).redo();
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, redone_count: redone.length, requested: steps, redone, new_index: (Undo as any).index };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const getUndoStack = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        return { ok: true, stack: summarizeHistory(typeof input.limit === 'number' ? input.limit : 50) };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    const saveCheckpoint = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.name) return { ok: false, error: 'A checkpoint name is required.' };
+        const label = `[checkpoint] ${input.name}`;
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        Undo.finishEdit(label);
+        logToHistory(`checkpoint "${input.name}"`);
+        return { ok: true, name: input.name, label, index: (Undo as any).index, total: (Undo as any).history?.length ?? 0 };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // ---------------------------------------------------------------------
+    // Element utilities (ported from upstream element.ts). list_outline is
+    // skipped — get_scene_tree already covers it.
+    // ---------------------------------------------------------------------
+
+    const findElementAny = (id: string): any =>
+      findCubeByNameOrUuid(id) || findGroupByNameOrUuid(id) || allMeshes().find((m: any) => m.uuid === id || m.name === id);
+    const elementType = (el: any): 'cube' | 'mesh' | 'group' | null => {
+      if (typeof Cube !== 'undefined' && el instanceof Cube) return 'cube';
+      if (typeof Mesh !== 'undefined' && el instanceof Mesh) return 'mesh';
+      if (typeof Group !== 'undefined' && el instanceof Group) return 'group';
+      return null;
+    };
+    const parentName = (el: any): string | null => {
+      const p = el.parent;
+      if (!p || typeof p !== 'object') return null;
+      return p.name ?? p.uuid ?? null;
+    };
+    const isDescendantOf = (el: any, target: any): boolean => {
+      let cur = el;
+      while (cur && cur.parent && typeof cur.parent === 'object') {
+        if (cur.parent === target) return true;
+        cur = cur.parent;
+      }
+      return false;
+    };
+
+    const renameElement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.id) return { ok: false, error: 'id is required.' };
+        if (!input.new_name) return { ok: false, error: 'new_name is required.' };
+        const el = findElementAny(input.id);
+        if (!el) return { ok: false, error: `Element "${input.id}" not found.` };
+        if (input.new_name !== el.name && nameTaken(input.new_name)) {
+          return { ok: false, error: `Name "${input.new_name}" already exists (rule #4).` };
+        }
+        Undo.initEdit({ elements: [el], outliner: true } as any);
+        el.extend({ name: input.new_name });
+        Undo.finishEdit('Rename element via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`renamed "${input.id}" → "${input.new_name}"`);
+        return { ok: true, id: input.id, name: input.new_name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const duplicateElement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.id) return { ok: false, error: 'id is required.' };
+        const element = findElementAny(input.id);
+        if (!element) return { ok: false, error: `Element "${input.id}" not found.` };
+        const offset: number[] = isVec3(input.offset) ? input.offset : [0, 0, 0];
+
+        const uniqueName = (base: string): string => {
+          if (input.newName) return input.newName;
+          let n = `${base}_copy`;
+          let i = 1;
+          while (nameTaken(n)) n = `${base}_copy${i++}`;
+          return n;
+        };
+
+        const cloneElement = (el: any, parent: any): any => {
+          if (typeof Cube !== 'undefined' && el instanceof Cube) {
+            const dupe = new Cube({
+              name: uniqueName(el.name),
+              from: el.from.map((v: number, i: number) => v + offset[i]),
+              to: el.to.map((v: number, i: number) => v + offset[i]),
+              origin: el.origin.map((v: number, i: number) => v + offset[i]),
+              rotation: el.rotation, autouv: el.autouv, uv_offset: el.uv_offset,
+              mirror_uv: el.mirror_uv, shade: el.shade, inflate: el.inflate,
+              color: el.color, visibility: el.visibility,
+            }).init();
+            dupe.addTo(parent);
+            return dupe;
+          }
+          if (typeof Group !== 'undefined' && el instanceof Group) {
+            const dupeGroup = new Group({
+              name: uniqueName(el.name),
+              origin: el.origin.map((v: number, i: number) => v + offset[i]),
+              rotation: el.rotation, autouv: el.autouv, visibility: el.visibility, shade: el.shade,
+            }).init();
+            dupeGroup.addTo(parent);
+            (el.children || []).forEach((child: any) => cloneElement(child, dupeGroup));
+            return dupeGroup;
+          }
+          if (typeof Mesh !== 'undefined' && el instanceof Mesh) {
+            const dupe = new Mesh({ name: uniqueName(el.name), vertices: {}, origin: el.origin.map((v: number, i: number) => v + offset[i]), rotation: el.rotation } as any).init();
+            const map: any = {};
+            Object.entries(el.vertices).forEach(([key, coords]: any) => {
+              map[key] = dupe.addVertices([coords[0] + offset[0], coords[1] + offset[1], coords[2] + offset[2]])[0];
+            });
+            el.faces.forEach((face: any) => {
+              dupe.addFaces(new MeshFace(dupe, { vertices: face.vertices.map((v: any) => map[v]), uv: face.uv } as any));
+            });
+            dupe.addTo(parent);
+            return dupe;
+          }
+          throw new Error('Unsupported element type.');
+        };
+
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        let dup: any = null;
+        let err: any = null;
+        try { dup = cloneElement(element, element.parent ?? 'root'); } catch (e) { err = e; }
+        Undo.finishEdit('Duplicate element via MCP', dup ? { elements: [dup], outliner: true } : { outliner: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        if (!dup) return { ok: false, error: err?.message || String(err) };
+        logToHistory(`duplicated "${element.name}" → "${dup.name}"`);
+        return { ok: true, source: element.name, name: dup.name, uuid: dup.uuid };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const findElementsByCriteria = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const type = input.type || 'any';
+        const needle = input.name_contains ? String(input.name_contains).toLowerCase() : null;
+        let regex: RegExp | null = null;
+        if (input.name_pattern) { try { regex = new RegExp(input.name_pattern); } catch { /* ignore bad pattern */ } }
+        const limit = typeof input.limit === 'number' ? input.limit : 100;
+        let parentScope: any = null;
+        if (input.parent_group) {
+          parentScope = findGroupByNameOrUuid(input.parent_group);
+          if (!parentScope) return { ok: false, error: `Parent group "${input.parent_group}" not found.` };
+        }
+        const selOnly = !!input.selected_only;
+        const cubes = selOnly ? ((Cube as any).selected || []) : allCubes();
+        const meshes = selOnly ? (typeof Mesh !== 'undefined' ? ((Mesh as any).selected || []) : []) : allMeshes();
+        const groups = selOnly ? allGroups().filter((g: any) => g.selected) : allGroups();
+        const candidates = [...cubes, ...meshes, ...groups];
+        const matches: any[] = [];
+        for (const el of candidates) {
+          if (matches.length >= limit) break;
+          const t = elementType(el); if (!t) continue;
+          if (type !== 'any' && t !== type) continue;
+          if (regex && !regex.test(el.name)) continue;
+          if (needle && !el.name.toLowerCase().includes(needle)) continue;
+          if (parentScope && !isDescendantOf(el, parentScope)) continue;
+          if (t === 'cube' && (input.min_size || input.max_size)) {
+            const size = [el.to[0] - el.from[0], el.to[1] - el.from[1], el.to[2] - el.from[2]];
+            const min = input.min_size, max = input.max_size;
+            if (min && size.some((v: number, i: number) => v < (min[i] ?? -Infinity))) continue;
+            if (max && size.some((v: number, i: number) => v > (max[i] ?? Infinity))) continue;
+          }
+          matches.push({ uuid: el.uuid, name: el.name, type: t, parent: parentName(el) });
+        }
+        return { ok: true, count: matches.length, truncated: matches.length >= limit, matches };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const selectAllOfType = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const type = input.type || 'cube';
+        let parentScope: any = null;
+        if (input.parent_group) {
+          parentScope = findGroupByNameOrUuid(input.parent_group);
+          if (!parentScope) return { ok: false, error: `Parent group "${input.parent_group}" not found.` };
+        }
+        const pool = type === 'cube' ? allCubes() : type === 'mesh' ? allMeshes() : allGroups();
+        const targets = parentScope ? pool.filter((el: any) => isDescendantOf(el, parentScope)) : pool;
+        if (!input.add_to_selection) {
+          allCubes().forEach((c: any) => { if (c.selected) c.unselect?.(); });
+          allMeshes().forEach((m: any) => { if (m.selected) m.unselect?.(); });
+          allGroups().forEach((g: any) => { if (g.selected) g.selected = false; });
+        }
+        for (const el of targets) {
+          if (typeof Group !== 'undefined' && el instanceof Group) { el.selected = true; continue; }
+          el.select?.({ shiftKey: true });
+        }
+        if (typeof updateSelection === 'function') (updateSelection as any)();
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, type, selected: targets.length, parent_group: parentScope ? parentScope.name : null };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const filterByMaterial = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.texture) return { ok: false, error: 'texture is required.' };
+        const tex = findTexture(input.texture);
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" not found.` };
+        const matches: any[] = [];
+        const scan = (els: any[], t: string) => {
+          for (const el of els) {
+            const keys: string[] = [];
+            for (const [key, face] of Object.entries(el.faces || {})) {
+              const fid = (face as any).texture;
+              if (fid === tex.uuid || fid === tex.id) keys.push(key);
+            }
+            if (keys.length) matches.push({ uuid: el.uuid, name: el.name, type: t, ...(input.include_face_keys ? { faces: keys } : {}) });
+          }
+        };
+        scan(allCubes(), 'cube');
+        scan(allMeshes(), 'mesh');
+        return { ok: true, texture: { uuid: tex.uuid, name: tex.name }, count: matches.length, matches };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const getSelection = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const cubes = ((Cube as any).selected || []).map((c: any) => ({ uuid: c.uuid, name: c.name, type: 'cube' }));
+        const meshes = (typeof Mesh !== 'undefined' ? ((Mesh as any).selected || []) : []).map((m: any) => ({ uuid: m.uuid, name: m.name, type: 'mesh' }));
+        const groups = allGroups().filter((g: any) => g.selected).map((g: any) => ({ uuid: g.uuid, name: g.name, type: 'group' }));
+        const at = (typeof Texture !== 'undefined' && (Texture as any).selected)
+          ? { uuid: (Texture as any).selected.uuid, id: (Texture as any).selected.id, name: (Texture as any).selected.name }
+          : null;
+        return { ok: true, counts: { cubes: cubes.length, meshes: meshes.length, groups: groups.length }, cubes, meshes, groups, active_texture: at };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // PBR materials (texture.ts PBR subset) + face material instances
+    // (material-instances.ts). Bedrock/RTX-specific; guarded for formats
+    // that lack TextureGroup/material_config.
+    // ---------------------------------------------------------------------
+    const FACE_KEYS = ['north', 'south', 'east', 'west', 'up', 'down'];
+
+    const findTextureGroup = (id: string): any => {
+      const all = (typeof TextureGroup !== 'undefined' && (TextureGroup as any).all) ? (TextureGroup as any).all : [];
+      return all.find((g: any) => g.uuid === id || g.name === id);
+    };
+    const channelInfo = (textures: any[], channel: string) => {
+      const t = textures.find((x: any) => x.pbr_channel === channel);
+      return t ? { name: t.name, uuid: t.uuid } : null;
+    };
+
+    const createPbrMaterial = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (typeof TextureGroup === 'undefined') return { ok: false, error: 'PBR materials (TextureGroup) not available in this format.' };
+        if (!input.name) return { ok: false, error: 'name is required.' };
+        Undo.initEdit({ texture_groups: [], textures: [] } as any);
+        const tg: any = new (TextureGroup as any)({ name: input.name, is_material: true });
+        if (tg.material_config) {
+          if (input.color_value) tg.material_config.color_value = input.color_value;
+          if (input.mer_value) tg.material_config.mer_value = input.mer_value;
+          if (input.subsurface_value !== undefined) tg.material_config.subsurface_value = input.subsurface_value;
+          tg.material_config.saved = false;
+        }
+        tg.add();
+        const assign = (texId: string | undefined, channel: string) => {
+          if (!texId) return;
+          const tex = findTexture(texId);
+          if (tex) tex.extend({ group: tg.uuid, pbr_channel: channel });
+        };
+        assign(input.color_texture, 'color');
+        assign(input.normal_texture, 'normal');
+        assign(input.height_texture, 'height');
+        assign(input.mer_texture, 'mer');
+        if (typeof tg.updateMaterial === 'function') tg.updateMaterial();
+        Undo.finishEdit('Create PBR material via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`created PBR material "${tg.name}"`);
+        return { ok: true, name: tg.name, uuid: tg.uuid };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const configureMaterial = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tg = findTextureGroup(input.material);
+        if (!tg) return { ok: false, error: `Material "${input.material}" not found.` };
+        const textures = tg.getTextures ? tg.getTextures() : [];
+        Undo.initEdit({ texture_groups: [tg], textures } as any);
+        const setChannel = (val: string | undefined, channel: string) => {
+          if (val === 'none') textures.filter((t: any) => t.pbr_channel === channel).forEach((t: any) => (t.group = ''));
+          else if (val) { const tex = findTexture(val); if (tex) tex.extend({ group: tg.uuid, pbr_channel: channel }); }
+        };
+        setChannel(input.color_texture, 'color');
+        setChannel(input.normal_texture, 'normal');
+        setChannel(input.height_texture, 'height');
+        setChannel(input.mer_texture, 'mer');
+        if (tg.material_config) {
+          if (input.color_value) tg.material_config.color_value = input.color_value;
+          if (input.mer_value) tg.material_config.mer_value = input.mer_value;
+          if (input.subsurface_value !== undefined) tg.material_config.subsurface_value = input.subsurface_value;
+          tg.material_config.saved = false;
+        }
+        if (typeof tg.updateMaterial === 'function') tg.updateMaterial();
+        Undo.finishEdit('Configure material via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, name: tg.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const listMaterials = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const all = (typeof TextureGroup !== 'undefined' && (TextureGroup as any).all) ? (TextureGroup as any).all : [];
+        const materials = all.filter((g: any) => g.is_material).map((g: any) => {
+          const textures = g.getTextures ? g.getTextures() : [];
+          return {
+            name: g.name, uuid: g.uuid,
+            channels: { color: channelInfo(textures, 'color'), normal: channelInfo(textures, 'normal'), height: channelInfo(textures, 'height'), mer: channelInfo(textures, 'mer') },
+            config: g.material_config ? { color_value: g.material_config.color_value, mer_value: g.material_config.mer_value, subsurface_value: g.material_config.subsurface_value, saved: g.material_config.saved } : null,
+          };
+        });
+        return { ok: true, materials };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const getMaterialInfo = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tg = findTextureGroup(input.material);
+        if (!tg) return { ok: false, error: `Material "${input.material}" not found.` };
+        const textures = tg.getTextures ? tg.getTextures() : [];
+        let textureSetJson = null;
+        try { if (tg.material_config && tg.material_config.compileForBedrock) textureSetJson = tg.material_config.compileForBedrock(); } catch { /* format may not support it */ }
+        return {
+          ok: true,
+          info: {
+            name: tg.name, uuid: tg.uuid, is_material: tg.is_material,
+            textures: textures.map((t: any) => ({ name: t.name, uuid: t.uuid, pbr_channel: t.pbr_channel, width: t.width, height: t.height })),
+            config: tg.material_config ? { color_value: tg.material_config.color_value, mer_value: tg.material_config.mer_value, subsurface_value: tg.material_config.subsurface_value, saved: tg.material_config.saved, file_path: tg.material_config.getFilePath ? tg.material_config.getFilePath() : null } : null,
+            texture_set_json: textureSetJson,
+          },
+        };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const importTextureSet = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.path || !String(input.path).endsWith('.texture_set.json')) return { ok: false, error: "path must end with '.texture_set.json'." };
+        const rnm = (globalThis as any).requireNativeModule;
+        const fs = (typeof rnm === 'function') ? rnm('fs') : null;
+        if (!fs || !fs.existsSync(input.path)) return { ok: false, error: `File not found or fs unavailable: ${input.path}` };
+        const fn = (globalThis as any).importTextureSet;
+        if (typeof fn !== 'function') return { ok: false, error: 'importTextureSet not available in this Blockbench version.' };
+        fn({ path: input.path, name: input.path.split(/[\/\\]/).pop() });
+        return { ok: true, path: input.path };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const assignTextureChannel = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tg = findTextureGroup(input.material);
+        if (!tg) return { ok: false, error: `Material "${input.material}" not found.` };
+        const tex = findTexture(input.texture);
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" not found.` };
+        Undo.initEdit({ texture_groups: [tg], textures: [tex] } as any);
+        const existing = tg.getTextures ? tg.getTextures() : [];
+        existing.filter((t: any) => t.pbr_channel === input.channel && t.uuid !== tex.uuid).forEach((t: any) => (t.pbr_channel = 'color'));
+        tex.extend({ group: tg.uuid, pbr_channel: input.channel });
+        if (tg.material_config) tg.material_config.saved = false;
+        if (typeof tg.updateMaterial === 'function') tg.updateMaterial();
+        Undo.finishEdit('Assign texture channel via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, texture: tex.name, channel: input.channel, material: tg.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const saveMaterialConfig = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tg = findTextureGroup(input.material);
+        if (!tg) return { ok: false, error: `Material "${input.material}" not found.` };
+        if (!tg.material_config) return { ok: false, error: 'Material has no material_config.' };
+        const filePath = tg.material_config.getFilePath ? tg.material_config.getFilePath() : null;
+        if (!filePath) return { ok: false, error: 'Cannot save: material needs a color texture with a valid file path.' };
+        tg.material_config.save();
+        return { ok: true, file_path: filePath };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const getFaceMaterialInstances = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const cube = input.cube_id ? findCubeByNameOrUuid(input.cube_id) : ((Cube as any).selected || [])[0];
+        if (!cube) return { ok: false, error: 'No cube found.' };
+        const facesToCheck = (input.faces && input.faces.length) ? input.faces : FACE_KEYS;
+        const result: any = {};
+        for (const f of facesToCheck) {
+          const face = cube.faces[f];
+          if (face) result[f] = { material_name: face.material_name || '', texture: face.texture ? (face.getTexture?.()?.name || String(face.texture)) : null };
+        }
+        return { ok: true, cube: { name: cube.name, uuid: cube.uuid }, faces: result };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const setFaceMaterialInstance = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let cubes: any[];
+        if (input.cube_id) { const c = findCubeByNameOrUuid(input.cube_id); if (!c) return { ok: false, error: `Cube "${input.cube_id}" not found.` }; cubes = [c]; }
+        else { cubes = (Cube as any).selected || []; if (!cubes.length) return { ok: false, error: 'No cube_id and nothing selected.' }; }
+        if (input.material_name === undefined) return { ok: false, error: 'material_name is required (use "" to clear).' };
+        const faces = (input.faces && input.faces.length) ? input.faces : FACE_KEYS;
+        Undo.initEdit({ elements: cubes, uv_only: true } as any);
+        let n = 0;
+        for (const cube of cubes) for (const f of faces) { const face = cube.faces[f]; if (face) { face.extend({ material_name: input.material_name }); n++; } }
+        Undo.finishEdit('Set material instances via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, material_name: input.material_name, faces: n, cubes: cubes.length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const listMaterialInstances = (): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const map: any = {};
+        for (const cube of allCubes()) for (const f of FACE_KEYS) {
+          const face = cube.faces[f];
+          if (face && face.material_name) (map[face.material_name] ??= []).push({ cube_name: cube.name, cube_uuid: cube.uuid, face: f });
+        }
+        const instances = Object.entries(map).map(([name, usages]: any) => ({ name, usage_count: usages.length, usages }));
+        return { ok: true, total_unique_instances: instances.length, material_instances: instances };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const bulkSetMaterialInstances = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const assignments = input.assignments || [];
+        if (!assignments.length) return { ok: false, error: 'assignments are required.' };
+        const cache: any = {};
+        const cubesToEdit: any[] = [];
+        for (const a of assignments) { if (!cache[a.cube_id]) { const c = findCubeByNameOrUuid(a.cube_id); if (!c) return { ok: false, error: `Cube "${a.cube_id}" not found.` }; cache[a.cube_id] = c; cubesToEdit.push(c); } }
+        Undo.initEdit({ elements: cubesToEdit, uv_only: true } as any);
+        let n = 0;
+        for (const a of assignments) { const c = cache[a.cube_id]; for (const f of a.faces) { const face = c.faces[f]; if (face) { face.extend({ material_name: a.material_name }); n++; } } }
+        Undo.finishEdit('Bulk set material instances via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, assignments: assignments.length, faces: n, cubes: cubesToEdit.length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const clearMaterialInstances = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let cubes: any[];
+        if (input.all_cubes) cubes = allCubes();
+        else if (input.cube_id) { const c = findCubeByNameOrUuid(input.cube_id); if (!c) return { ok: false, error: `Cube "${input.cube_id}" not found.` }; cubes = [c]; }
+        else { cubes = (Cube as any).selected || []; if (!cubes.length) return { ok: false, error: 'No cube_id, nothing selected, and all_cubes is false.' }; }
+        if (!cubes.length) return { ok: true, cleared: 0, cubes: 0 };
+        const faces = (input.faces && input.faces.length) ? input.faces : FACE_KEYS;
+        Undo.initEdit({ elements: cubes, uv_only: true } as any);
+        let n = 0;
+        for (const cube of cubes) for (const f of faces) { const face = cube.faces[f]; if (face && face.material_name) { face.extend({ material_name: '' }); n++; } }
+        Undo.finishEdit('Clear material instances via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, cleared: n, cubes: cubes.length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // Painting tools (ported from upstream paint.ts — core subset: fill,
+    // draw_shape, gradient, color_picker). Enough to paint a texture atlas.
+    // ---------------------------------------------------------------------
+    const getAndActivateTexture = (id?: string): any => {
+      if (!id) {
+        const active = (Texture as any).selected ?? ((Texture as any).getDefault ? (Texture as any).getDefault() : null);
+        if (!active) throw new Error('No texture available. Use create_texture first or pass texture_id.');
+        if ((Texture as any).selected?.uuid !== active.uuid) active.select();
+        return active;
+      }
+      const tex = findTexture(id);
+      if (!tex) throw new Error(`Texture "${id}" not found.`);
+      if ((Texture as any).selected?.uuid !== tex.uuid) tex.select();
+      return tex;
+    };
+    const setBarItemValue = (id: string, value: any): void => {
+      const item: any = (typeof BarItems !== 'undefined') ? (BarItems as any)[id] : null;
+      if (!item) return;
+      if (typeof item.set === 'function') { try { item.set(value); return; } catch { /* fall through */ } }
+      if ('value' in item) item.value = value;
+    };
+
+    // Pixel-art-safe painting: write DIRECTLY to the texture canvas (the same
+    // approach as paint_pixel_matrix). The Painter UI API (Painter.useShapeTool
+    // /useGradientTool + BarItems.<tool>.select) no-ops when driven headlessly
+    // over the socket — it depends on paint-mode UI state and real mouse events,
+    // so it returned ok:true but never modified the bitmap (LIVE 2026-06-15).
+    const hexToRgb = (hex: string): [number, number, number] => {
+      const h = String(hex || '#000000').replace('#', '').trim();
+      const s = (h.length === 3 ? h.split('').map((c) => c + c).join('') : h).slice(0, 6).padEnd(6, '0');
+      const n = parseInt(s, 16) || 0;
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    };
+
+    const paintFillTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        const sx = Math.round(input.x), sy = Math.round(input.y);
+        const [fr, fg, fb] = hexToRgb(input.color);
+        const fa = input.opacity !== undefined ? Math.max(0, Math.min(255, Math.round(input.opacity))) : 255;
+        const tol = ((input.tolerance ?? 0) / 100) * 255;
+        const connected = input.fill_mode !== 'color'; // 'color' = replace all matching pixels; else flood from the point
+        let painted = 0;
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          const W = canvas.width, H = canvas.height;
+          if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
+          const img = ctx.getImageData(0, 0, W, H);
+          const d = img.data;
+          const t0 = (sy * W + sx) * 4;
+          const tr = d[t0], tg = d[t0 + 1], tb = d[t0 + 2], ta = d[t0 + 3];
+          const match = (i: number) =>
+            Math.abs(d[i] - tr) <= tol && Math.abs(d[i + 1] - tg) <= tol &&
+            Math.abs(d[i + 2] - tb) <= tol && Math.abs(d[i + 3] - ta) <= tol;
+          const put = (i: number) => { d[i] = fr; d[i + 1] = fg; d[i + 2] = fb; d[i + 3] = fa; painted++; };
+          if (connected) {
+            const seen = new Uint8Array(W * H);
+            const stack = [sy * W + sx];
+            while (stack.length) {
+              const p = stack.pop() as number;
+              if (p < 0 || p >= W * H || seen[p] || !match(p * 4)) continue;
+              seen[p] = 1; put(p * 4);
+              const px = p % W, py = (p / W) | 0;
+              if (px + 1 < W) stack.push(p + 1);
+              if (px - 1 >= 0) stack.push(p - 1);
+              if (py + 1 < H) stack.push(p + W);
+              if (py - 1 >= 0) stack.push(p - W);
+            }
+          } else {
+            for (let p = 0; p < W * H; p++) if (match(p * 4)) put(p * 4);
+          }
+          ctx.putImageData(img, 0, 0);
+        }, { edit_name: 'Fill tool' });
+        Undo.finishEdit('Fill tool via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`fill (${sx},${sy}) on "${texture.name}" — ${painted}px`);
+        return { ok: true, x: sx, y: sy, painted, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const drawShapeTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        const shape = String(input.shape || 'rectangle');
+        const hollow = shape.endsWith('_h');
+        const isEllipse = shape.startsWith('ellipse');
+        const lw = Math.max(1, Math.round(input.line_width ?? 1));
+        const x0 = Math.round(Math.min(input.start.x, input.end.x));
+        const y0 = Math.round(Math.min(input.start.y, input.end.y));
+        const x1 = Math.round(Math.max(input.start.x, input.end.x));
+        const y1 = Math.round(Math.max(input.start.y, input.end.y));
+        let painted = 0;
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          ctx.save();
+          ctx.globalAlpha = input.opacity !== undefined ? Math.max(0, Math.min(255, input.opacity)) / 255 : 1;
+          ctx.fillStyle = input.color || '#000000';
+          const cx = (x0 + x1 + 1) / 2, cy = (y0 + y1 + 1) / 2;
+          const rx = (x1 - x0 + 1) / 2, ry = (y1 - y0 + 1) / 2;
+          const irx = rx - lw, iry = ry - lw;
+          // Per-pixel fillRect keeps shapes crisp (no canvas anti-aliasing).
+          for (let py = y0; py <= y1; py++) {
+            for (let px = x0; px <= x1; px++) {
+              let on: boolean;
+              if (isEllipse) {
+                const ex = (px + 0.5 - cx) / rx, ey = (py + 0.5 - cy) / ry;
+                on = ex * ex + ey * ey <= 1;
+                if (on && hollow && irx > 0 && iry > 0) {
+                  const ix = (px + 0.5 - cx) / irx, iy = (py + 0.5 - cy) / iry;
+                  if (ix * ix + iy * iy <= 1) on = false;
+                }
+              } else if (hollow) {
+                on = (px - x0) < lw || (x1 - px) < lw || (py - y0) < lw || (y1 - py) < lw;
+              } else {
+                on = true;
+              }
+              if (on) { ctx.fillRect(px, py, 1, 1); painted++; }
+            }
+          }
+          ctx.restore();
+        }, { edit_name: 'Draw shape' });
+        Undo.finishEdit('Draw shape via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`drew ${shape} on "${texture.name}" — ${painted}px`);
+        return { ok: true, shape, painted, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const gradientTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          ctx.save();
+          ctx.globalAlpha = input.opacity !== undefined ? Math.max(0, Math.min(255, input.opacity)) / 255 : 1;
+          const g = ctx.createLinearGradient(input.start.x, input.start.y, input.end.x, input.end.y);
+          g.addColorStop(0, input.start_color);
+          g.addColorStop(1, input.end_color);
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.restore();
+        }, { edit_name: 'Gradient' });
+        Undo.finishEdit('Gradient via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`gradient on "${texture.name}"`);
+        return { ok: true, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const colorPickerTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        (Painter as any).colorPicker(texture, input.x, input.y, { button: input.set_as_secondary ? 2 : 0 });
+        const color = (ColorPanel as any).get();
+        return { ok: true, color, x: input.x, y: input.y, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // Mesh tools (ported from upstream mesh.ts). Freeform geometry: spheres,
+    // cylinders, vertices/faces, extrude/subdivide/merge/knife.
+    // ---------------------------------------------------------------------
+    const resolveOutlinerGroup = (group?: string): any =>
+      (!group || group === 'root') ? 'root' : (findGroupByNameOrUuid(group) ?? 'root');
+    const meshOrSelected = (id?: string): any => {
+      const m = id ? findMesh(id) : (((Mesh as any).selected || [])[0] || allMeshes().find((x: any) => x.selected));
+      if (!m) throw new Error(id ? `Mesh "${id}" not found.` : 'No mesh selected.');
+      return m;
+    };
+
+    const placeMesh = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tex = input.texture ? findTexture(input.texture) : ((Texture as any).getDefault?.());
+        const outlinerGroup = resolveOutlinerGroup(input.group);
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        const meshes = (input.elements || []).map((el: any) => {
+          const mesh = new Mesh({ name: el.name, vertices: {}, origin: el.position, rotation: el.rotation || [0, 0, 0] } as any).init();
+          (el.vertices || []).forEach((v: any) => mesh.addVertices(v));
+          mesh.addTo(outlinerGroup);
+          if (tex) mesh.applyTexture(tex);
+          return mesh;
+        });
+        Undo.finishEdit('Place meshes via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, meshes: meshes.map((m: any) => ({ name: m.name, uuid: m.uuid })) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const createSphere = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tex = input.texture ? findTexture(input.texture) : ((Texture as any).getDefault?.());
+        const outlinerGroup = resolveOutlinerGroup(input.group);
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        const made = (input.elements || []).map((element: any) => {
+          const mesh = new Mesh({ name: element.name, vertices: {}, origin: element.position, rotation: element.rotation || [0, 0, 0] } as any).init();
+          const radius = (element.diameter ?? 16) / 2;
+          const elSides = element.sides ?? 12;
+          const sides = Math.round(elSides / 2) * 2;
+          const [bottom] = mesh.addVertices([0, -radius, 0]);
+          const [top] = mesh.addVertices([0, radius, 0]);
+          const rings: string[][] = [];
+          const off = element.align_edges === false ? 0 : 0.5;
+          for (let i = 0; i < elSides; i++) {
+            const cx = Math.sin(((i + off) / elSides) * Math.PI * 2);
+            const cz = Math.cos(((i + off) / elSides) * Math.PI * 2);
+            const verts: string[] = [];
+            for (let j = 1; j < sides / 2; j++) {
+              const sx = Math.sin((j / sides) * Math.PI * 2) * radius;
+              verts.push(...mesh.addVertices([cx * sx, Math.cos((j / sides) * Math.PI * 2) * radius, cz * sx]));
+            }
+            rings.push(verts);
+          }
+          for (let i = 0; i < elSides; i++) {
+            const tr = rings[i];
+            const nr = rings[i + 1] || rings[0];
+            for (let j = 0; j < sides / 2; j++) {
+              if (j === 0) { mesh.addFaces(new MeshFace(mesh, { vertices: [tr[j], nr[j], top], uv: {} } as any)); continue; }
+              if (!tr[j]) { mesh.addFaces(new MeshFace(mesh, { vertices: [nr[j - 1], tr[j - 1], bottom], uv: {} } as any)); continue; }
+              mesh.addFaces(new MeshFace(mesh, { vertices: [tr[j], nr[j], tr[j - 1], nr[j - 1]], uv: {} } as any));
+            }
+          }
+          mesh.addTo(outlinerGroup);
+          if (tex) mesh.applyTexture(tex);
+          return mesh;
+        });
+        Undo.finishEdit('Create spheres via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, meshes: made.map((m: any) => ({ name: m.name, uuid: m.uuid })) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const createCylinder = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const tex = input.texture ? findTexture(input.texture) : ((Texture as any).getDefault?.());
+        const outlinerGroup = resolveOutlinerGroup(input.group);
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        const made = (input.elements || []).map((element: any) => {
+          const mesh = new Mesh({ name: element.name, vertices: {}, origin: element.position, rotation: element.rotation || [0, 0, 0] } as any).init();
+          const radius = (element.diameter ?? 16) / 2;
+          const height = element.height ?? 16;
+          const sides = Math.round(element.sides ?? 12);
+          const topCenter = mesh.addVertices([0, height / 2, 0])[0];
+          const bottomCenter = mesh.addVertices([0, -height / 2, 0])[0];
+          const topRing: any[] = [], bottomRing: any[] = [];
+          for (let i = 0; i < sides; i++) {
+            const ang = (i / sides) * Math.PI * 2;
+            const x = Math.cos(ang) * radius, z = Math.sin(ang) * radius;
+            topRing.push(mesh.addVertices([x, height / 2, z])[0]);
+            bottomRing.push(mesh.addVertices([x, -height / 2, z])[0]);
+          }
+          for (let i = 0; i < sides; i++) {
+            const next = (i + 1) % sides;
+            mesh.addFaces(new MeshFace(mesh, { vertices: [bottomRing[i], bottomRing[next], topRing[next], topRing[i]], uv: {} } as any));
+            if (element.capped !== false) {
+              mesh.addFaces(new MeshFace(mesh, { vertices: [topRing[i], topRing[next], topCenter], uv: {} } as any));
+              mesh.addFaces(new MeshFace(mesh, { vertices: [bottomRing[next], bottomRing[i], bottomCenter], uv: {} } as any));
+            }
+          }
+          mesh.addTo(outlinerGroup);
+          if (tex) mesh.applyTexture(tex);
+          return mesh;
+        });
+        Undo.finishEdit('Create cylinders via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, meshes: made.map((m: any) => ({ name: m.name, uuid: m.uuid })) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const extrudeMesh = (input: any): any => {
+      try {
+        const mesh = meshOrSelected(input.mesh_id);
+        const tool = (BarItems as any).extrude_mesh_selection;
+        if (!tool) return { ok: false, error: 'Extrude tool not available.' };
+        tool.click({}, input.distance ?? 1);
+        return { ok: true, mesh: mesh.name, mode: input.mode || 'faces', distance: input.distance ?? 1 };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const subdivideMesh = (input: any): any => {
+      try {
+        const mesh = meshOrSelected(input.mesh_id);
+        const tool = (BarItems as any).loop_cut;
+        if (!tool) return { ok: false, error: 'Loop cut tool not available.' };
+        tool.click({}, undefined, undefined, input.cuts ?? 1);
+        return { ok: true, mesh: mesh.name, cuts: input.cuts ?? 1 };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const deleteMeshElements = (input: any): any => {
+      try {
+        const mesh = meshOrSelected(input.mesh_id);
+        const tool = (BarItems as any).delete_mesh_selection;
+        if (!tool) return { ok: false, error: 'Delete mesh selection tool not available.' };
+        tool.click({}, input.keep_vertices ?? false);
+        return { ok: true, mesh: mesh.name, mode: input.mode || 'faces' };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const moveMeshVertices = (input: any): any => {
+      try {
+        const mesh = meshOrSelected(input.mesh_id);
+        if (!isVec3(input.offset)) return { ok: false, error: "'offset' must be 3 numbers." };
+        Undo.initEdit({ elements: [mesh], element_aspects: { geometry: true, uv: true, faces: true } } as any);
+        const verts = input.vertices || mesh.getSelectedVertices();
+        verts.forEach((vk: string) => {
+          if (mesh.vertices[vk]) { mesh.vertices[vk][0] += input.offset[0]; mesh.vertices[vk][1] += input.offset[1]; mesh.vertices[vk][2] += input.offset[2]; }
+        });
+        mesh.preview_controller.updateGeometry(mesh);
+        Undo.finishEdit('Move mesh vertices via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, mesh: mesh.name, moved: verts.length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const mergeMeshVertices = (input: any): any => {
+      try {
+        const mesh = findMesh(input.mesh_id);
+        if (!mesh) return { ok: false, error: `Mesh "${input.mesh_id}" not found.` };
+        const threshold = input.threshold ?? 0.1;
+        Undo.initEdit({ elements: [mesh], element_aspects: { geometry: true, uv: true, faces: true } } as any);
+        const toCheck = (input.selected_only !== false) ? mesh.getSelectedVertices() : Object.keys(mesh.vertices);
+        let merged = 0;
+        const map: Record<string, string> = {};
+        for (let i = 0; i < toCheck.length; i++) {
+          const a = toCheck[i]; if (map[a]) continue;
+          for (let j = i + 1; j < toCheck.length; j++) {
+            const b = toCheck[j]; if (map[b]) continue;
+            const v1 = mesh.vertices[a], v2 = mesh.vertices[b];
+            const d = Math.sqrt((v1[0] - v2[0]) ** 2 + (v1[1] - v2[1]) ** 2 + (v1[2] - v2[2]) ** 2);
+            if (d <= threshold) { map[b] = a; merged++; }
+          }
+        }
+        Object.entries(map).forEach(([oldK, newK]) => {
+          for (const fk in mesh.faces) {
+            const face = mesh.faces[fk];
+            const idx = face.vertices.indexOf(oldK);
+            if (idx !== -1) { face.vertices[idx] = newK; face.uv[newK] = face.uv[oldK] || [0, 0]; delete face.uv[oldK]; }
+          }
+          delete mesh.vertices[oldK];
+        });
+        mesh.preview_controller.updateGeometry(mesh);
+        Undo.finishEdit('Merge mesh vertices via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, mesh: mesh.name, merged };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const createMeshFace = (input: any): any => {
+      try {
+        const mesh = meshOrSelected(input.mesh_id);
+        if (!input.vertices || input.vertices.length < 3) return { ok: false, error: 'Provide 3 or 4 vertex keys.' };
+        const tex = input.texture ? findTexture(input.texture) : null;
+        Undo.initEdit({ elements: [mesh], element_aspects: { geometry: true, uv: true, faces: true } } as any);
+        const face = new MeshFace(mesh, { vertices: input.vertices, texture: tex ? tex.uuid : undefined } as any);
+        const [faceKey] = mesh.addFaces(face);
+        if (typeof UVEditor !== 'undefined') (UVEditor as any).setAutoSize(null, true, [faceKey]);
+        mesh.preview_controller.updateGeometry(mesh);
+        mesh.preview_controller.updateUV(mesh);
+        Undo.finishEdit('Create mesh face via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, mesh: mesh.name, face: faceKey };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const selectMeshElements = (input: any): any => {
+      try {
+        const mesh = findMesh(input.mesh_id);
+        if (!mesh) return { ok: false, error: `Mesh "${input.mesh_id}" not found.` };
+        Undo.initEdit({ elements: [mesh], selection: true } as any);
+        if ((BarItems as any).selection_mode?.set) (BarItems as any).selection_mode.set(input.mode);
+        const sel = ((Project as any)?.mesh_selection?.[mesh.uuid]) ?? { vertices: [], edges: [], faces: [] };
+        const action = input.action || 'select';
+        if (action === 'select') { sel.vertices = []; sel.edges.length = 0; sel.faces = []; }
+        const els = input.elements;
+        if (!els || !els.length) {
+          if (input.mode === 'vertex') sel.vertices = Object.keys(mesh.vertices);
+          else if (input.mode === 'face') sel.faces = Object.keys(mesh.faces);
+        } else {
+          els.forEach((e: any) => {
+            const k = String(e);
+            const arr = input.mode === 'vertex' ? sel.vertices : input.mode === 'face' ? sel.faces : null;
+            if (!arr) return;
+            if (action === 'add' || action === 'select') { if (!arr.includes(k)) arr.push(k); }
+            else if (action === 'remove') { const i = arr.indexOf(k); if (i >= 0) arr.splice(i, 1); }
+            else if (action === 'toggle') { const i = arr.indexOf(k); if (i >= 0) arr.splice(i, 1); else arr.push(k); }
+          });
+        }
+        if ((Project as any).mesh_selection) (Project as any).mesh_selection[mesh.uuid] = sel;
+        mesh.select();
+        Undo.finishEdit('Select mesh elements via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, mesh: mesh.name, mode: input.mode, selected: { vertices: sel.vertices.length, edges: sel.edges.length, faces: sel.faces.length } };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const knifeTool = (input: any): any => {
+      try {
+        const mesh = findMesh(input.mesh_id);
+        if (!mesh) return { ok: false, error: `Mesh "${input.mesh_id}" not found.` };
+        if (typeof (globalThis as any).KnifeToolContext === 'undefined') return { ok: false, error: 'KnifeToolContext not available in this Blockbench version.' };
+        Undo.initEdit({ elements: [mesh], element_aspects: { geometry: true, uv: true, faces: true } } as any);
+        const ctx = new (globalThis as any).KnifeToolContext(mesh);
+        (input.points || []).forEach((p: any) => {
+          ctx.points.push({ position: new (THREE as any).Vector3(...p.position), fkey: p.face, type: p.face ? 'face' : 'edge' });
+        });
+        ctx.apply();
+        Undo.finishEdit('Knife cut via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, mesh: mesh.name, points: (input.points || []).length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // UI + import tools (ported from upstream ui.ts + import.ts). Power tools:
+    // trigger any Blockbench action, fill dialogs, eval (escape hatch), import geo.
+    // ---------------------------------------------------------------------
+    const triggerAction = async (input: any): Promise<any> => {
+      try {
+        if (typeof BarItems === 'undefined' || !(input.action in (BarItems as any))) {
+          return { ok: false, error: `Action "${input.action}" not found.` };
+        }
+        let parsedArgs: any = {};
+        if (input.confirmEvent) { try { parsedArgs = JSON.parse(input.confirmEvent); } catch { return { ok: false, error: 'Invalid JSON in confirmEvent.' }; } }
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        const barItem: any = (BarItems as any)[input.action];
+        const { event, ...rest } = parsedArgs;
+        if (barItem && typeof Action !== 'undefined' && barItem instanceof Action) {
+          barItem.trigger(new Event(event || 'click', { ...rest }));
+        } else if (barItem && typeof barItem.trigger === 'function') {
+          barItem.trigger(new Event(event || 'click'));
+        } else if (barItem && typeof barItem.click === 'function') {
+          barItem.click();
+        }
+        if (input.confirmDialog !== false && typeof Dialog !== 'undefined' && (Dialog as any).open) (Dialog as any).open.confirm?.();
+        Undo.finishEdit('Trigger action via MCP');
+        const shot = await captureAppScreenshot();
+        return shot.ok ? { ok: true, action: input.action, data_url: shot.data_url } : { ok: true, action: input.action, message: `Action "${input.action}" executed.` };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const riskyEval = async (input: any): Promise<any> => {
+      try {
+        if (!input.code) return { ok: false, error: 'code is required.' };
+        Undo.initEdit({ elements: [], outliner: true } as any);
+        let result: any;
+        try {
+          // eslint-disable-next-line no-eval
+          result = await eval(String(input.code).trim());
+        } finally {
+          Undo.finishEdit('Eval via MCP');
+        }
+        return { ok: true, result: result !== undefined ? (typeof result === 'string' ? result : JSON.stringify(result)) : '(Code executed; no result returned.)' };
+      } catch (e: any) { return { ok: false, error: 'Error executing code: ' + (e?.message || String(e)) }; }
+    };
+
+    const emulateClicks = async (input: any): Promise<any> => {
+      try {
+        const { x, y, button } = input.position || {};
+        const btn = button === 'right' ? 2 : 0;
+        document.dispatchEvent(new MouseEvent('click', { clientX: x, clientY: y, button: btn }));
+        if (input.drag) {
+          const to = input.drag.to;
+          const dur = input.drag.duration ?? 100;
+          document.dispatchEvent(new MouseEvent('mousedown', { clientX: x, clientY: y, button: btn }));
+          await new Promise((r) => setTimeout(r, dur));
+          document.dispatchEvent(new MouseEvent('mouseup', { clientX: to.x, clientY: to.y, button: btn }));
+        }
+        const shot = await captureAppScreenshot();
+        return shot.ok ? { ok: true, data_url: shot.data_url } : { ok: true, message: 'Clicks emulated.' };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const fillDialog = (input: any): any => {
+      try {
+        if (typeof Dialog === 'undefined' || !(Dialog as any).stack?.length) return { ok: false, error: 'No open dialog.' };
+        if (!(Dialog as any).open) (Dialog as any).stack[(Dialog as any).stack.length - 1]?.focus?.();
+        let parsed: any;
+        try { parsed = JSON.parse(input.values); } catch (e: any) { return { ok: false, error: 'Invalid JSON in values.' }; }
+        const keys = Object.keys((Dialog as any).open?.getFormResult?.() ?? {});
+        const toFill: any = {};
+        for (const [k, v] of Object.entries(parsed)) if (keys.includes(k)) toFill[k] = v;
+        (Dialog as any).open?.setFormValues?.(toFill, true);
+        if (input.confirm !== false) (Dialog as any).open?.confirm?.(); else (Dialog as any).open?.cancel?.();
+        return { ok: true, stack_depth: (Dialog as any).stack.length };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const fromGeoJson = async (input: any): Promise<any> => {
+      try {
+        let geojson = String(input.geojson || '');
+        if (!geojson.startsWith('{') && !geojson.startsWith('[')) {
+          let url: URL;
+          try { url = new URL(geojson); } catch { return { ok: false, error: `Invalid URL or inline GeoJSON: "${geojson}".` }; }
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') return { ok: false, error: `Unsupported protocol "${url.protocol}".` };
+          const res = await fetch(url.href);
+          if (!res.ok) return { ok: false, error: `Failed to fetch: ${res.status} ${res.statusText}` };
+          geojson = await res.text();
+        }
+        if (typeof Codecs === 'undefined' || !(Codecs as any).bedrock?.parse) return { ok: false, error: 'Bedrock codec parse not available.' };
+        (Codecs as any).bedrock.parse(JSON.parse(geojson), '');
+        await new Promise((r) => setTimeout(r, 1500));
+        const shot = await captureAppScreenshot();
+        return shot.ok ? { ok: true, data_url: shot.data_url } : { ok: true, message: 'Imported GeoJSON.' };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // Armature tools (ported from upstream armature.ts). Newer Blockbench
+    // feature (skeletal rig + vertex weights); guarded for formats/versions
+    // that lack Armature/ArmatureBone.
+    // ---------------------------------------------------------------------
+    const armSupported = (): boolean => typeof Armature !== 'undefined' && typeof ArmatureBone !== 'undefined';
+    const findArmature = (id: string): any => armSupported() ? (Armature as any).all.find((a: any) => a.uuid === id || a.name === id || a.uuid.startsWith(id)) : undefined;
+    const findArmBone = (id: string): any => armSupported() ? (ArmatureBone as any).all.find((b: any) => b.uuid === id || b.name === id || b.uuid.startsWith(id)) : undefined;
+    const serArmature = (a: any) => ({ uuid: a.uuid, name: a.name, type: a.type, visibility: a.visibility, locked: a.locked, export: a.export, origin: a.origin, childCount: (a.children || []).length, boneCount: (a.getAllBones?.() || []).length });
+    const serBone = (b: any) => {
+      const a = b.getArmature?.();
+      return { uuid: b.uuid, name: b.name, armature: a ? { uuid: a.uuid, name: a.name } : null, origin: b.origin, rotation: b.rotation, length: b.length, width: b.width, connected: b.connected, color: b.color, visibility: b.visibility, locked: b.locked, parentBone: (typeof ArmatureBone !== 'undefined' && b.parent instanceof ArmatureBone) ? { uuid: b.parent.uuid, name: b.parent.name } : null, childCount: (b.children || []).length, vertexWeightCount: Object.keys(b.vertex_weights || {}).length };
+    };
+    const armMeshOr = (id?: string): any => id ? findMesh(id) : ((Mesh as any).selected || [])[0];
+    const guardArm = () => armSupported() ? null : { ok: false, error: 'Armatures are not available in this Blockbench version/format.' };
+
+    const listArmatures = (): any => { const g = guardArm(); if (g) return g; return { ok: true, data: { count: (Armature as any).all.length, armatures: (Armature as any).all.map(serArmature) } }; };
+    const getArmature = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const a = findArmature(input.id); if (!a) return { ok: false, error: `Armature "${input.id}" not found.` };
+      const data: any = serArmature(a);
+      if (input.include_bones !== false) data.bones = (a.getAllBones?.() || []).map(serBone);
+      return { ok: true, data };
+    };
+    const addArmature = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      if (!(Format as any)?.armature_rig) return { ok: false, error: 'Current format does not support armatures (no armature_rig).' };
+      try {
+        Undo.initEdit({ outliner: true, elements: [] } as any);
+        const a = new (Armature as any)({ name: input.name || 'armature', visibility: input.visibility !== false, locked: !!input.locked });
+        a.addTo((Outliner as any).root); a.isOpen = true; a.createUniqueName?.(); a.init();
+        if (input.add_initial_bone !== false) { const b = new (ArmatureBone as any)({ name: 'bone' }); b.addTo(a); b.init(); }
+        Undo.finishEdit('Add armature via MCP');
+        if (Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, message: `Created armature "${a.name}"`, armature: serArmature(a) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+    const removeArmature = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const a = findArmature(input.id); if (!a) return { ok: false, error: `Armature "${input.id}" not found.` };
+      Undo.initEdit({ outliner: true, elements: [] } as any); const n = a.name; a.remove(); Undo.finishEdit('Remove armature via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Removed armature "${n}"` };
+    };
+    const updateArmature = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const a = findArmature(input.id); if (!a) return { ok: false, error: `Armature "${input.id}" not found.` };
+      Undo.initEdit({ outliner: true, elements: [a] } as any);
+      if (input.name !== undefined) a.name = input.name;
+      if (input.visibility !== undefined) a.visibility = input.visibility;
+      if (input.locked !== undefined) a.locked = input.locked;
+      if (input.export !== undefined) a.export = input.export;
+      a.updateElement?.(); Undo.finishEdit('Update armature via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Updated armature "${a.name}"`, armature: serArmature(a) };
+    };
+    const listArmatureBones = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      let bones: any[];
+      if (input.armature_id) { const a = findArmature(input.armature_id); if (!a) return { ok: false, error: `Armature "${input.armature_id}" not found.` }; bones = a.getAllBones?.() || []; }
+      else bones = (ArmatureBone as any).all;
+      return { ok: true, data: { count: bones.length, bones: bones.map(serBone) } };
+    };
+    const getArmatureBone = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.id); if (!b) return { ok: false, error: `Bone "${input.id}" not found.` };
+      const data: any = serBone(b);
+      if (input.include_weights) data.vertex_weights = b.vertex_weights;
+      return { ok: true, data };
+    };
+    const addArmatureBone = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      let parent: any = findArmature(input.parent_id) || findArmBone(input.parent_id);
+      if (!parent) return { ok: false, error: `Parent "${input.parent_id}" not found (armature or bone).` };
+      try {
+        const defOrigin = (typeof ArmatureBone !== 'undefined' && parent instanceof ArmatureBone) ? [0, parent.length ?? 8, 0] : [0, 0, 0];
+        Undo.initEdit({ outliner: true, elements: [] } as any);
+        const b = new (ArmatureBone as any)({ name: input.name || 'bone', origin: input.origin ?? defOrigin, rotation: input.rotation ?? [0, 0, 0], length: input.length ?? 8, width: input.width ?? 2, connected: input.connected !== false, color: input.color });
+        b.addTo(parent); b.isOpen = true;
+        if ((Format as any)?.bone_rig) b.createUniqueName?.();
+        b.init();
+        Undo.finishEdit('Add armature bone via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, message: `Created bone "${b.name}"`, bone: serBone(b) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+    const removeArmatureBone = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.id); if (!b) return { ok: false, error: `Bone "${input.id}" not found.` };
+      const n = b.name;
+      Undo.initEdit({ outliner: true, elements: [] } as any);
+      if (input.remove_children === false && (b.children || []).length) { for (const c of [...b.children]) c.addTo(b.parent); }
+      b.remove(); Undo.finishEdit('Remove armature bone via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Removed bone "${n}"` };
+    };
+    const updateArmatureBone = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.id); if (!b) return { ok: false, error: `Bone "${input.id}" not found.` };
+      Undo.initEdit({ outliner: true, elements: [b] } as any);
+      if (input.name !== undefined) b.name = input.name;
+      if (input.origin !== undefined) b.origin.V3_set ? b.origin.V3_set(input.origin) : (b.origin = input.origin);
+      if (input.rotation !== undefined) b.rotation.V3_set ? b.rotation.V3_set(input.rotation) : (b.rotation = input.rotation);
+      if (input.length !== undefined) b.length = input.length;
+      if (input.width !== undefined) b.width = input.width;
+      if (input.connected !== undefined) b.connected = input.connected;
+      if (input.color !== undefined) b.setColor?.(input.color);
+      if (input.visibility !== undefined) b.visibility = input.visibility;
+      if (input.locked !== undefined) b.locked = input.locked;
+      b.preview_controller?.updateTransform?.(b); b.updateElement?.();
+      Undo.finishEdit('Update armature bone via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Updated bone "${b.name}"`, bone: serBone(b) };
+    };
+    const updateArmatureBonesBatch = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const bones = (input.ids || []).map((id: string) => findArmBone(id)).filter(Boolean);
+      Undo.initEdit({ outliner: true, elements: bones } as any);
+      for (const b of bones) {
+        if (input.visibility !== undefined) b.visibility = input.visibility;
+        if (input.locked !== undefined) b.locked = input.locked;
+        if (input.color !== undefined) b.setColor?.(input.color);
+        b.updateElement?.();
+      }
+      Undo.finishEdit('Update armature bones (batch) via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Updated ${bones.length} bone(s)`, bones: bones.map(serBone) };
+    };
+    const selectArmatureBones = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      if (input.clear_selection !== false && typeof unselectAllElements === 'function') (unselectAllElements as any)();
+      let bones: any[] = [];
+      if (input.armature_id) { const a = findArmature(input.armature_id); if (!a) return { ok: false, error: `Armature "${input.armature_id}" not found.` }; bones = a.getAllBones?.() || []; }
+      else if (input.ids?.length) {
+        for (const id of input.ids) { const b = findArmBone(id); if (b) { bones.push(b); if (input.include_descendants) b.forEachChild?.((c: any) => { if (c instanceof ArmatureBone) bones.push(c); }); } }
+      }
+      for (const b of bones) b.select?.();
+      if (typeof updateSelection === 'function') (updateSelection as any)();
+      return { ok: true, message: `Selected ${bones.length} bone(s)`, bones: bones.map((b: any) => ({ uuid: b.uuid, name: b.name })) };
+    };
+    const getVertexWeights = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const mesh = armMeshOr(input.mesh_id); if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+      const armature = mesh.getArmature?.(); if (!armature) return { ok: false, error: `Mesh "${mesh.name}" has no armature.` };
+      const bones = input.bone_id ? [findArmBone(input.bone_id)].filter(Boolean) : (armature.getAllBones?.() || []);
+      const weights: any = {};
+      for (const b of bones) { const bw: any = {}; for (const vk in mesh.vertices) { const w = b.getVertexWeight?.(mesh, vk) || 0; if (w > 0) bw[vk] = w; } if (Object.keys(bw).length) weights[b.name] = bw; }
+      return { ok: true, data: { mesh: { uuid: mesh.uuid, name: mesh.name }, armature: { uuid: armature.uuid, name: armature.name }, weights } };
+    };
+    const setVertexWeight = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.bone_id); if (!b) return { ok: false, error: `Bone "${input.bone_id}" not found.` };
+      const mesh = armMeshOr(input.mesh_id); if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+      if (!(input.vertex_key in mesh.vertices)) return { ok: false, error: `Vertex "${input.vertex_key}" not found.` };
+      Undo.initEdit({ elements: [b] } as any); b.setVertexWeight?.(mesh, input.vertex_key, input.weight); Undo.finishEdit('Set vertex weight via MCP');
+      if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Set weight ${input.weight} on "${b.name}" vertex ${input.vertex_key}` };
+    };
+    const setVertexWeightsBatch = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.bone_id); if (!b) return { ok: false, error: `Bone "${input.bone_id}" not found.` };
+      const mesh = armMeshOr(input.mesh_id); if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+      Undo.initEdit({ elements: [b] } as any);
+      let count = 0;
+      for (const [vk, w] of Object.entries(input.weights || {})) { if (vk in mesh.vertices) { b.setVertexWeight?.(mesh, vk, w); count++; } }
+      Undo.finishEdit('Set vertex weights (batch) via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Set ${count} vertex weights on "${b.name}"` };
+    };
+    const clearVertexWeights = (input: any): any => {
+      const g = guardArm(); if (g) return g;
+      const b = findArmBone(input.bone_id); if (!b) return { ok: false, error: `Bone "${input.bone_id}" not found.` };
+      const mesh = armMeshOr(input.mesh_id); if (!mesh) return { ok: false, error: 'No mesh found/selected.' };
+      Undo.initEdit({ elements: [b] } as any);
+      let count = 0; const prefix = mesh.uuid.substring(0, 6) + ':';
+      for (const k in (b.vertex_weights || {})) { if (k.startsWith(prefix)) { delete b.vertex_weights[k]; count++; } }
+      Undo.finishEdit('Clear vertex weights via MCP'); if (Canvas.updateAll) Canvas.updateAll();
+      return { ok: true, message: `Cleared ${count} vertex weights from "${b.name}"` };
+    };
+
+    // ---------------------------------------------------------------------
+    // Remaining paint tools (ported from upstream paint.ts).
+    // ---------------------------------------------------------------------
+    const copyBrushTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        if (input.brush_size !== undefined) setBarItemValue('slider_brush_size', input.brush_size);
+        if (input.opacity !== undefined) setBarItemValue('slider_brush_opacity', input.opacity);
+        if (input.mode) setBarItemValue('copy_brush_mode', input.mode);
+        (BarItems as any).copy_brush.select();
+        (Painter as any).startPaintTool(texture, input.source.x, input.source.y, {}, { ctrlOrCmd: true });
+        (Painter as any).startPaintTool(texture, input.target.x, input.target.y, {}, { shiftKey: false });
+        (Painter as any).stopPaintTool();
+        Undo.finishEdit('Copy brush via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const eraserTool = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        const coords = input.coordinates || [];
+        if (!coords.length) return { ok: false, error: 'coordinates are required.' };
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        if (input.brush_size !== undefined) setBarItemValue('slider_brush_size', input.brush_size);
+        if (input.opacity !== undefined) setBarItemValue('slider_brush_opacity', input.opacity);
+        if (input.softness !== undefined) setBarItemValue('slider_brush_softness', input.softness);
+        if (input.shape !== undefined) setBarItemValue('brush_shape', input.shape);
+        (BarItems as any).eraser.select();
+        for (let i = 0; i < coords.length; i++) {
+          if (i === 0 || input.connect_strokes === false) (Painter as any).startPaintTool(texture, coords[i].x, coords[i].y, {}, { shiftKey: false });
+          else (Painter as any).movePaintTool(texture, coords[i].x, coords[i].y, {});
+        }
+        (Painter as any).stopPaintTool();
+        Undo.finishEdit('Erase via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, erased: coords.length, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const paintSettings = (input: any): any => {
+      try {
+        const applied: string[] = [];
+        const bbSettings: any = (globalThis as any).settings;
+        if (input.mirror_painting !== undefined) {
+          setBarItemValue('mirror_painting', input.mirror_painting.enabled);
+          (Painter as any).mirror_painting = input.mirror_painting.enabled;
+          applied.push('mirror_painting');
+          const opts = (Painter as any).mirror_painting_options;
+          if (input.mirror_painting.enabled && opts) {
+            (input.mirror_painting.axis || []).forEach((ax: string) => { opts[ax] = true; });
+            if (input.mirror_painting.texture !== undefined) opts.texture = input.mirror_painting.texture;
+            if (input.mirror_painting.texture_center) opts.texture_center = [input.mirror_painting.texture_center.x, input.mirror_painting.texture_center.y];
+          }
+        }
+        if (input.lock_alpha !== undefined) { (Painter as any).lock_alpha = input.lock_alpha; applied.push('lock_alpha'); }
+        if (input.pixel_perfect !== undefined) { setBarItemValue('pixel_perfect_drawing', input.pixel_perfect); applied.push('pixel_perfect'); }
+        if (input.color_erase_mode !== undefined) { setBarItemValue('color_erase_mode', input.color_erase_mode); (Painter as any).erase_mode = input.color_erase_mode; applied.push('color_erase_mode'); }
+        for (const key of ['paint_side_restrict', 'brush_opacity_modifier', 'brush_size_modifier', 'paint_with_stylus_only', 'pick_color_opacity', 'pick_combined_color']) {
+          if (input[key] !== undefined && bbSettings && bbSettings[key]) { bbSettings[key].value = input[key]; applied.push(key); }
+        }
+        return { ok: true, applied };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const paintWithBrush = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        const coords = input.coordinates || [];
+        const bs = input.brush_settings || {};
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        const hex = bs.color ?? '#000000';
+        const r = parseInt(hex.slice(1, 3), 16), gg = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+        const a = bs.opacity ?? 255, size = bs.size ?? 1, softness = bs.softness ?? 0, shape = bs.shape ?? 'square';
+        setBarItemValue('slider_brush_size', size); setBarItemValue('slider_brush_opacity', a);
+        setBarItemValue('slider_brush_softness', softness); setBarItemValue('brush_shape', shape);
+        (ColorPanel as any).set(hex);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          for (const c of coords) {
+            const fn = () => ({ r, g: gg, b, a });
+            if (shape === 'circle') (Painter as any).editCircle(ctx, c.x, c.y, size, softness, fn);
+            else (Painter as any).editSquare(ctx, c.x, c.y, size, softness, fn);
+          }
+        }, { edit_name: 'Paint with brush' });
+        Undo.finishEdit('Paint with brush via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        return { ok: true, painted: coords.length, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const createBrushPreset = (input: any): any => {
+      try {
+        if (typeof StateMemory === 'undefined') return { ok: false, error: 'StateMemory not available.' };
+        const preset = { name: input.name, size: input.size ?? null, opacity: input.opacity ?? null, softness: input.softness ?? null, shape: input.shape || 'square', color: input.color || null, blend_mode: input.blend_mode || 'default', pixel_perfect: input.pixel_perfect || false };
+        (StateMemory as any).brush_presets.push(preset);
+        (StateMemory as any).save('brush_presets');
+        return { ok: true, name: input.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const loadBrushPreset = (input: any): any => {
+      try {
+        if (typeof StateMemory === 'undefined') return { ok: false, error: 'StateMemory not available.' };
+        const preset = (StateMemory as any).brush_presets.find((p: any) => p.name === input.preset_name);
+        if (!preset) return { ok: false, error: `Brush preset "${input.preset_name}" not found.` };
+        (Painter as any).loadBrushPreset(preset);
+        return { ok: true, name: input.preset_name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const textureSelection = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        const sel = texture.selection;
+        const c = input.coordinates;
+        switch (input.action) {
+          case 'select_rectangle':
+            if (!c) return { ok: false, error: 'coordinates required.' };
+            sel.clear(); sel.start_x = c.x1; sel.start_y = c.y1; sel.end_x = c.x2; sel.end_y = c.y2; sel.is_custom = false; break;
+          case 'select_ellipse': {
+            if (!c) return { ok: false, error: 'coordinates required.' };
+            sel.clear(); sel.is_custom = true;
+            const cx = (c.x1 + c.x2) / 2, cy = (c.y1 + c.y2) / 2, rx = Math.abs(c.x2 - c.x1) / 2, ry = Math.abs(c.y2 - c.y1) / 2;
+            for (let x = Math.floor(cx - rx); x <= Math.ceil(cx + rx); x++) for (let y = Math.floor(cy - ry); y <= Math.ceil(cy + ry); y++) { const dx = (x - cx) / rx, dy = (y - cy) / ry; if (dx * dx + dy * dy <= 1) sel.set(x, y, true); }
+            break;
+          }
+          case 'select_all': sel.clear(); sel.start_x = 0; sel.start_y = 0; sel.end_x = texture.width; sel.end_y = texture.height; sel.is_custom = false; break;
+          case 'clear_selection': sel.clear(); break;
+          case 'invert_selection': sel.invert(); break;
+          case 'expand_selection': if (input.radius === undefined) return { ok: false, error: 'radius required.' }; sel.expand(input.radius); break;
+          case 'contract_selection': if (input.radius === undefined) return { ok: false, error: 'radius required.' }; sel.contract(input.radius); break;
+          case 'feather_selection': if (input.radius === undefined) return { ok: false, error: 'radius required.' }; sel.feather(input.radius); break;
+          default: return { ok: false, error: `Unknown action "${input.action}".` };
+        }
+        if (typeof UVEditor !== 'undefined' && (UVEditor as any).vue?.updateTexture) (UVEditor as any).vue.updateTexture();
+        Undo.finishEdit('Texture selection via MCP');
+        return { ok: true, action: input.action, texture: texture.name };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    const textureLayerManagement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        if (typeof TextureLayer === 'undefined') return { ok: false, error: 'TextureLayer not available.' };
+        Undo.initEdit({ textures: [texture], layers: texture.layers, bitmap: true } as any);
+        let result = '';
+        const selected = () => (TextureLayer as any).selected;
+        switch (input.action) {
+          case 'create_layer': {
+            if (!texture.layers_enabled) texture.activateLayers(true);
+            const nl = new (TextureLayer as any)({ name: input.layer_name || `Layer ${texture.layers.length + 1}` }, texture);
+            nl.setSize(texture.width, texture.height); nl.addForEditing(); result = `Created layer "${nl.name}"`; break;
+          }
+          case 'delete_layer': { if (!selected()) return { ok: false, error: 'No layer selected.' }; const l = selected(); l.remove(); result = `Deleted layer "${l.name}"`; break; }
+          case 'duplicate_layer': { if (!selected()) return { ok: false, error: 'No layer selected.' }; const d = selected().duplicate(); d.name = `${selected().name} copy`; result = `Duplicated layer`; break; }
+          case 'merge_down': { if (!selected()) return { ok: false, error: 'No layer selected.' }; selected().mergeDown(true); result = 'Merged layer down'; break; }
+          case 'set_opacity': { if (!selected()) return { ok: false, error: 'No layer selected.' }; if (input.opacity === undefined) return { ok: false, error: 'opacity required.' }; selected().opacity = input.opacity / 100; texture.updateChangesAfterEdit(); result = `Set opacity ${input.opacity}%`; break; }
+          case 'set_blend_mode': { if (!selected()) return { ok: false, error: 'No layer selected.' }; if (!input.blend_mode) return { ok: false, error: 'blend_mode required.' }; selected().blend_mode = input.blend_mode; texture.updateChangesAfterEdit(); result = `Set blend mode ${input.blend_mode}`; break; }
+          case 'move_layer': { if (!selected()) return { ok: false, error: 'No layer selected.' }; if (input.target_index === undefined) return { ok: false, error: 'target_index required.' }; const lm = selected(); texture.layers.remove(lm); texture.layers.splice(input.target_index, 0, lm); result = `Moved layer to ${input.target_index}`; break; }
+          case 'rename_layer': { if (!selected()) return { ok: false, error: 'No layer selected.' }; if (!input.layer_name) return { ok: false, error: 'layer_name required.' }; selected().name = input.layer_name; result = `Renamed layer`; break; }
+          case 'flatten_layers': { if (!texture.layers_enabled) return { ok: false, error: 'No layers to flatten.' }; texture.flattenLayers(); result = 'Flattened layers'; break; }
+          default: return { ok: false, error: `Unknown action "${input.action}".` };
+        }
+        texture.updateChangesAfterEdit();
+        Undo.finishEdit('Layer management via MCP');
+        if (typeof updateInterfacePanels === 'function') (updateInterfacePanels as any)();
+        return { ok: true, action: input.action, message: result };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // Pixel-art shading: render an index-matrix to a texture using a
+    // hue-shifted palette. Indices 0-4 only (palette-locked → no muddy colors,
+    // no anti-aliasing). The matrix carries the noise/AO/directional-light.
+    // ---------------------------------------------------------------------
+    const paintPixelMatrix = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const pal = getPalette(input.palette);
+        if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes to see options.` };
+        const rows: string[] = input.pixels || [];
+        if (!rows.length) return { ok: false, error: 'pixels (array of index-string rows) is required.' };
+        const texture = getAndActivateTexture(input.texture_id);
+        const ox = input.origin?.x ?? 0;
+        const oy = input.origin?.y ?? 0;
+
+        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        let painted = 0;
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          for (let r = 0; r < rows.length; r++) {
+            const row = String(rows[r]);
+            for (let c = 0; c < row.length; c++) {
+              const ch = row[c];
+              if (ch === '.' || ch === ' ' || ch === '-' || ch === '_') continue; // transparent
+              const idx = parseInt(ch, 10);
+              if (isNaN(idx) || idx < 0 || idx > 4) continue;
+              ctx.fillStyle = pal[idx];
+              ctx.fillRect(ox + c, oy + r, 1, 1);
+              painted++;
+            }
+          }
+        }, { edit_name: 'Paint pixel matrix' });
+        Undo.finishEdit('Paint pixel matrix via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`painted ${painted}px (${input.palette}) on "${texture.name}"`);
+        return { ok: true, texture: texture.name, palette: input.palette, painted, origin: [ox, oy], size: [Math.max(...rows.map((r: string) => String(r).length)), rows.length] };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
     socket.on("connect", () => {
-      console.log("[MCP Plugin] 연결됨");
+      console.log("[MCP Plugin] Connected");
       commandHistory.push({
         timestamp: new Date(),
         type: 'sent',
@@ -213,7 +3197,7 @@ const options: PluginOptions = {
       updateCommandHistory();
     });
 
-    socket.on("tool_command", (cmd: { tool: ToolType; input: any }) => {
+    socket.on("tool_command", async (cmd: { tool: ToolType; input: any }, ack?: (response: any) => void) => {
       commandHistory.push({
         timestamp: new Date(),
         type: 'received',
@@ -221,16 +3205,134 @@ const options: PluginOptions = {
         data: cmd
       });
 
-      if (cmd.tool === "hello_world") {
-        Blockbench.showStatusMessage(
-          `[MCP] Hello, ${cmd.input.name || "World"}!`,
-          5000
-        );
+      const handlers: Record<string, (input: any) => any> = {
+        hello_world: (input) => {
+          Blockbench.showStatusMessage(`[MCP] Hello, ${input?.name || "World"}!`, 5000);
+          return { ok: true, tool: 'hello_world' };
+        },
+        create_cube: createCube,
+        create_group: createGroup,
+        set_origin: setOrigin,
+        set_rotation: setRotation,
+        get_scene_tree: getSceneTree,
+        register_texture: registerTexture,
+        apply_texture: applyTexture,
+        create_animation: createAnimation,
+        manage_keyframes: manageKeyframes,
+        animation_graph_editor: animationGraphEditor,
+        animation_timeline: animationTimeline,
+        batch_keyframe_operations: batchKeyframeOperations,
+        animation_copy_paste: animationCopyPaste,
+        list_animations: listAnimations,
+        modify_cube: modifyCube,
+        delete_element: deleteElement,
+        reparent_element: reparentElement,
+        list_export_formats: listExportFormats,
+        export_model: exportModel,
+        export_animations: exportAnimations,
+        get_project_info: getProjectInfo,
+        set_project: setProject,
+        create_texture: createTexture,
+        list_textures: listTextures,
+        get_texture: getTexture,
+        activate_texture: activateTexture,
+        add_texture_group: addTextureGroup,
+        set_mesh_uv: setMeshUv,
+        auto_uv_mesh: autoUvMesh,
+        rotate_mesh_uv: rotateMeshUv,
+        capture_screenshot: captureScreenshot,
+        capture_app_screenshot: captureAppScreenshot,
+        set_camera_angle: setCameraAngle,
+        undo: undoTool,
+        redo: redoTool,
+        get_undo_stack: getUndoStack,
+        save_checkpoint: saveCheckpoint,
+        duplicate_element: duplicateElement,
+        rename_element: renameElement,
+        find_elements_by_criteria: findElementsByCriteria,
+        select_all_of_type: selectAllOfType,
+        filter_by_material: filterByMaterial,
+        get_selection: getSelection,
+        create_pbr_material: createPbrMaterial,
+        configure_material: configureMaterial,
+        list_materials: listMaterials,
+        get_material_info: getMaterialInfo,
+        import_texture_set: importTextureSet,
+        assign_texture_channel: assignTextureChannel,
+        save_material_config: saveMaterialConfig,
+        get_face_material_instances: getFaceMaterialInstances,
+        set_face_material_instance: setFaceMaterialInstance,
+        list_material_instances: listMaterialInstances,
+        bulk_set_material_instances: bulkSetMaterialInstances,
+        clear_material_instances: clearMaterialInstances,
+        paint_fill_tool: paintFillTool,
+        draw_shape_tool: drawShapeTool,
+        gradient_tool: gradientTool,
+        color_picker_tool: colorPickerTool,
+        place_mesh: placeMesh,
+        create_sphere: createSphere,
+        create_cylinder: createCylinder,
+        extrude_mesh: extrudeMesh,
+        subdivide_mesh: subdivideMesh,
+        delete_mesh_elements: deleteMeshElements,
+        move_mesh_vertices: moveMeshVertices,
+        merge_mesh_vertices: mergeMeshVertices,
+        create_mesh_face: createMeshFace,
+        select_mesh_elements: selectMeshElements,
+        knife_tool: knifeTool,
+        trigger_action: triggerAction,
+        risky_eval: riskyEval,
+        emulate_clicks: emulateClicks,
+        fill_dialog: fillDialog,
+        from_geo_json: fromGeoJson,
+        list_armatures: listArmatures,
+        get_armature: getArmature,
+        add_armature: addArmature,
+        remove_armature: removeArmature,
+        update_armature: updateArmature,
+        list_armature_bones: listArmatureBones,
+        get_armature_bone: getArmatureBone,
+        add_armature_bone: addArmatureBone,
+        remove_armature_bone: removeArmatureBone,
+        update_armature_bone: updateArmatureBone,
+        update_armature_bones_batch: updateArmatureBonesBatch,
+        select_armature_bones: selectArmatureBones,
+        get_vertex_weights: getVertexWeights,
+        set_vertex_weight: setVertexWeight,
+        set_vertex_weights_batch: setVertexWeightsBatch,
+        clear_vertex_weights: clearVertexWeights,
+        copy_brush_tool: copyBrushTool,
+        eraser_tool: eraserTool,
+        paint_settings: paintSettings,
+        paint_with_brush: paintWithBrush,
+        create_brush_preset: createBrushPreset,
+        load_brush_preset: loadBrushPreset,
+        texture_selection: textureSelection,
+        texture_layer_management: textureLayerManagement,
+        paint_pixel_matrix: paintPixelMatrix,
+      };
+
+      let response: any;
+      const handler = handlers[cmd.tool];
+      if (handler) {
+        try {
+          response = await handler(cmd.input || {});
+        } catch (err: any) {
+          response = { ok: false, error: err?.message || String(err) };
+        }
+      } else {
+        response = { ok: false, error: `Unknown tool: ${cmd.tool}` };
       }
+
       updateCommandHistory();
+
+      // Acknowledge back to the MCP server so it can report the result to Claude.
+      if (typeof ack === "function") {
+        ack(response);
+      }
     });
 
-    // 소켓 이벤트 리스너 추가하여 모든 송수신 기록
+    // Add a socket event listener to record all sent/received traffic
     const originalEmit = socket.emit;
     socket.emit = function(event: string, ...args: any[]) {
       commandHistory.push({
@@ -243,19 +3345,31 @@ const options: PluginOptions = {
       return originalEmit.call(this, event, ...args);
     };
 
-    // 주기적으로 패널 업데이트 (10초마다)
-    setInterval(() => {
+    // Periodically refresh the panel (every 10 seconds)
+    mcpInterval = setInterval(() => {
       if (commandHistory.length > 0) {
         updateCommandHistory();
       }
     }, 10000);
   },
   onunload: () => {
-    // Action 정리
+    // Disconnect the socket so reloading the plugin doesn't leave stale
+    // connections behind (each one would otherwise keep creating cubes).
+    if (mcpSocket) {
+      mcpSocket.removeAllListeners();
+      mcpSocket.disconnect();
+      mcpSocket = null;
+    }
+    // Stop the periodic refresh timer.
+    if (mcpInterval) {
+      clearInterval(mcpInterval);
+      mcpInterval = null;
+    }
+    // Clean up the Action
     if (BarItems.mcp_toggle_panel) {
       BarItems.mcp_toggle_panel.delete();
     }
-    // 패널 정리
+    // Clean up the panel
     if (mcpPanel) {
       mcpPanel.delete();
     }
