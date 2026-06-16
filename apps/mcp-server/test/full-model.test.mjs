@@ -215,6 +215,8 @@ try {
   check("get_palette rejects unknown palette", gpBad.isError);
   const pmx = await h.call("paint_pixel_matrix", { texture_id: "staff_skin", palette: "iron", origin: { x: 0, y: 0 }, pixels: ["43210", "3.2.1", "01234"] });
   check("paint_pixel_matrix paints (skips transparent)", !pmx.isError && pmx.text.includes("iron"));
+  const ash = await h.call("auto_shade", { texture_id: "staff_skin", region: { x: 0, y: 0, w: 8, h: 8 }, palette: "iron", style: "weapon_metal" });
+  check("auto_shade shades a region", !ash.isError && ash.text.includes("iron"));
 
   // 8. validate_model — should PASS on this clean, GeckoLib-safe model.
   const validation = await h.call("validate_model");

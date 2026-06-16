@@ -113,7 +113,7 @@ export function buildInstructions(loaded: LoadedSkills): string {
   const lines = [
     "Blockbench skill guides are bundled with this server and MUST be consulted before you create, modify, texture, animate, or export Blockbench content.",
     "Workflow: call the `get_skill` tool to read the relevant guide(s) BEFORE the corresponding tool calls. Always read `blockbench-use` first (the mandatory orchestrator), then the domain skill(s).",
-    "Loading order: 1) blockbench-use  2) blockbench-mcp-overview  3) domain skill(s) — modeling / texturing / pbr-materials / animation / hytale  4) blockbench-development (only when authoring a Blockbench plugin).",
+    "Loading order: 1) blockbench-use  2) blockbench-mcp-overview  3) domain skill(s) — modeling / texturing / pbr-materials / pixel-shading / animation  4) blockbench-development (only when authoring a Blockbench plugin).",
     "",
     "Available skills (use the name with get_skill):",
     ...loaded.skills.map((s) => `- ${s.name}: ${firstSentence(s.description)}`),

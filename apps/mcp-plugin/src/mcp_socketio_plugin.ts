@@ -556,50 +556,95 @@ const options: PluginOptions = {
     };
 
     // Apply an already-registered texture to an existing cube (rule #2).
-    const applyTexture = (input: { target?: string; texture?: string; faces?: string[] }): any => {
+    const applyTexture = (input: { target?: string; texture?: string; faces?: string[]; apply_mode?: string }): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
-        if (!input.target) return { ok: false, error: 'target (cube name) is required.' };
+        if (!input.target) return { ok: false, error: 'target (cube/mesh/group name) is required.' };
         if (!input.texture) return { ok: false, error: 'texture (name or id) is required.' };
 
         const textures = (typeof Texture !== 'undefined' && (Texture as any).all) ? (Texture as any).all : [];
         const tex = textures.find((t: any) => t.uuid === input.texture || t.name === input.texture);
-        if (!tex) return { ok: false, error: `Texture "${input.texture}" is not registered. Call register_texture first (rule #2).` };
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" is not registered. Call create_texture/register_texture first (rule #2).` };
 
-        // Resolve target to one or more cubes: a cube name, OR a group name
-        // (then apply to ALL descendant cubes — one call textures a whole branch).
-        let cubes: any[] = [];
+        // Resolve target to cubes AND meshes: a cube/mesh name, OR a group name
+        // (then ALL descendant cubes+meshes — one call textures a whole branch).
+        const cubes: any[] = [];
+        const meshes: any[] = [];
         const directCube = findCubeByName(input.target);
-        if (directCube) {
-          cubes = [directCube];
-        } else {
+        const directMesh = (typeof findMesh === 'function') ? findMesh(input.target) : null;
+        if (directCube) cubes.push(directCube);
+        else if (directMesh) meshes.push(directMesh);
+        else {
           const group = findGroupByName(input.target);
-          if (!group) return { ok: false, error: `"${input.target}" is not a cube or group (rule #2: the element must exist).` };
+          if (!group) return { ok: false, error: `"${input.target}" is not a cube, mesh, or group (rule #2: the element must exist).` };
           const collect = (g: any) => {
             for (const child of g.children || []) {
               if (typeof Cube !== 'undefined' && child instanceof Cube) cubes.push(child);
+              else if (typeof Mesh !== 'undefined' && child instanceof Mesh) meshes.push(child);
               else if (typeof Group !== 'undefined' && child instanceof Group) collect(child);
             }
           };
           collect(group);
-          if (!cubes.length) return { ok: false, error: `Group "${input.target}" has no descendant cubes.` };
+          if (!cubes.length && !meshes.length) return { ok: false, error: `Group "${input.target}" has no descendant cubes/meshes.` };
         }
+        const targets = [...cubes, ...meshes];
 
-        Undo.initEdit({ elements: cubes, uv_only: true } as any);
-        for (const cube of cubes) {
-          if (typeof cube.applyTexture === 'function') {
-            cube.applyTexture(tex, input.faces && input.faces.length ? input.faces : true);
+        // Save the caller's selection so this call is non-destructive to UI state.
+        const prevCubes = (typeof Cube !== 'undefined' && (Cube as any).selected) ? [...(Cube as any).selected] : [];
+        const prevMeshes = (typeof Mesh !== 'undefined' && (Mesh as any).selected) ? [...(Mesh as any).selected] : [];
+        const prevGroup = (typeof Group !== 'undefined' && (Group as any).selected) ? (Group as any).selected : null;
+        const faceScoped = !!(input.faces && input.faces.length);
+
+        Undo.initEdit({ elements: targets, uv_only: false } as any);
+        try {
+          if (faceScoped) {
+            // Native Texture.apply() can't scope to specific faces → assign directly.
+            for (const el of targets) {
+              for (const f of input.faces as string[]) { if (el.faces && el.faces[f]) el.faces[f].texture = tex.uuid; }
+            }
           } else {
-            const faceKeys = input.faces && input.faces.length ? input.faces : Object.keys(cube.faces || {});
-            faceKeys.forEach((f: string) => { if (cube.faces[f]) cube.faces[f].texture = tex.uuid; });
+            // Native path (ported from upstream): select EXACTLY the targets, then
+            // Texture.selected.apply(mode). mode: blank=only untextured faces,
+            // all=every face, none=clear.
+            (Cube as any).all?.forEach((c: any) => { if (c.selected) c.unselect?.(); });
+            (Mesh as any).all?.forEach((m: any) => { if (m.selected) m.unselect?.(); });
+            for (const el of targets) { try { el.select?.({ shiftKey: true }); } catch { /* best-effort */ } }
+            if (typeof updateSelection === 'function') updateSelection();
+            tex.select?.();
+            const mode = input.apply_mode === 'all' ? true : input.apply_mode === 'none' ? false : 'blank';
+            if (typeof (Texture as any).selected?.apply === 'function') {
+              (Texture as any).selected.apply(mode);
+            } else {
+              for (const el of targets) { Object.keys(el.faces || {}).forEach((f) => { if (el.faces[f]) el.faces[f].texture = tex.uuid; }); }
+            }
           }
-          if (typeof (cube as any).mapAutoUV === 'function') (cube as any).mapAutoUV();
+          // Box-UV positioning: only auto-pack cubes still in AUTO mode (autouv != 0).
+          // Cubes with a manual uv_offset (autouv:0) keep their atlas region — this is
+          // why the old unconditional mapAutoUV() collapsed deliberate atlases.
+          for (const cube of cubes) {
+            if (cube.box_uv && cube.autouv !== 0 && typeof cube.mapAutoUV === 'function') cube.mapAutoUV();
+          }
+          if (typeof tex.updateChangesAfterEdit === 'function') tex.updateChangesAfterEdit();
+        } finally {
+          // Restore the caller's original selection.
+          (Cube as any).all?.forEach((c: any) => { if (c.selected) c.unselect?.(); });
+          (Mesh as any).all?.forEach((m: any) => { if (m.selected) m.unselect?.(); });
+          for (const c of prevCubes) { try { c.select?.({ shiftKey: true }); } catch { /* */ } }
+          for (const m of prevMeshes) { try { m.select?.({ shiftKey: true }); } catch { /* */ } }
+          if (prevGroup) prevGroup.selected = true;
+          if (typeof updateSelection === 'function') updateSelection();
+          Undo.finishEdit('Apply texture via MCP', { elements: targets });
         }
-        Undo.finishEdit('Apply texture via MCP', { elements: cubes });
-        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
-        logToHistory(`applied texture "${tex.name}" to ${cubes.length} cube(s)`);
-        return { ok: true, target: input.target, texture: tex.name, cubes: cubes.length };
+        // Force a face-level render refresh — Canvas.updateAll() alone sometimes
+        // doesn't push new face materials into the THREE render targets (upstream).
+        if (typeof Canvas !== 'undefined') {
+          if ((Canvas as any).updateView) (Canvas as any).updateView({ elements: targets, element_aspects: { faces: true, uv: true, geometry: false } });
+          if ((Canvas as any).updateAll) (Canvas as any).updateAll();
+        }
+
+        logToHistory(`applied texture "${tex.name}" to ${cubes.length} cube(s) + ${meshes.length} mesh(es) [${input.apply_mode || 'blank'}]`);
+        return { ok: true, target: input.target, texture: tex.name, cubes: cubes.length, meshes: meshes.length, mode: input.apply_mode || 'blank' };
       } catch (err: any) {
         console.error('[MCP Plugin] applyTexture failed:', err);
         logToHistory('error: ' + (err?.message || String(err)));
@@ -1175,7 +1220,10 @@ const options: PluginOptions = {
           inflate: input.inflate ?? cube.inflate,
           visibility: input.visibility ?? cube.visibility,
           shade: input.shade ?? cube.shade,
-          autouv: input.autouv !== undefined ? (Number(input.autouv) as 0 | 1 | 2) : cube.autouv,
+          // Setting a manual uv_offset implies box-UV lock (autouv:0) unless the
+          // caller overrides — otherwise Blockbench re-derives box-UV and the
+          // offset collapses to [0,0] (the recurring "everything one colour" bug).
+          autouv: input.autouv !== undefined ? (Number(input.autouv) as 0 | 1 | 2) : (input.uv_offset !== undefined ? 0 : cube.autouv),
           mirror_uv: input.mirror_uv ?? cube.mirror_uv,
           uv_offset: input.uv_offset ?? cube.uv_offset,
         });
@@ -1380,8 +1428,8 @@ const options: PluginOptions = {
               model_identifier: (Project as any).model_identifier || null,
               save_path: (Project as any).save_path || null,
             },
-            plugin_build: '2026-06-15-meshfix', // bump on each plugin rebuild to confirm the loaded build
-            tool_count: 105,
+            plugin_build: '2026-06-15-t3-autoshade', // bump on each plugin rebuild to confirm the loaded build
+            tool_count: 106,
             format: { id: fmt ? fmt.id : null, name: fmt ? (fmt.display_name || fmt.name) : null, animation_mode: fmt ? !!fmt.animation_mode : false },
             resolution: { texture_width: (Project as any).texture_width || null, texture_height: (Project as any).texture_height || null },
             counts: {
@@ -1511,9 +1559,13 @@ const options: PluginOptions = {
           tex = new Texture({ name: input.name, width: w, height: h }).fromDataURL(canvas.toDataURL('image/png')).add(false);
         }
 
+        // Optional: enable texture layers so paint passes can be non-destructive
+        // (paint tools accept a `layer` name to target separate base/shade/highlight).
+        if (input.layers && typeof tex.activateLayers === 'function' && !tex.layers_enabled) tex.activateLayers(true);
+
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-        logToHistory(`created texture "${tex.name}"`);
-        return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name, width: tex.width || w, height: tex.height || h };
+        logToHistory(`created texture "${tex.name}"${tex.layers_enabled ? ' (layers on)' : ''}`);
+        return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name, width: tex.width || w, height: tex.height || h, layers_enabled: !!tex.layers_enabled };
       } catch (err: any) {
         console.error('[MCP Plugin] createTexture failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -2299,6 +2351,25 @@ const options: PluginOptions = {
       if ('value' in item) item.value = value;
     };
 
+    // Optional named-layer targeting (T2): when a paint tool gets `layer`, paint
+    // into that named TextureLayer (non-destructive) instead of the flat texture —
+    // enables separate base/shade/highlight/detail passes. After this selects the
+    // layer, texture.edit() writes into THAT layer's canvas. Returns the layer, or
+    // null (flat paint) when no layer is requested or the format lacks layers.
+    const resolveTextureLayer = (texture: any, layerName?: string): any => {
+      if (!layerName || typeof TextureLayer === 'undefined') return null;
+      if (!texture.layers_enabled && typeof texture.activateLayers === 'function') texture.activateLayers(true);
+      let layer = (texture.layers || []).find((l: any) => l.name === layerName);
+      if (!layer) {
+        layer = new (TextureLayer as any)({ name: layerName }, texture);
+        if (typeof layer.setSize === 'function') layer.setSize(texture.width, texture.height);
+        layer.addForEditing();
+      } else if (typeof layer.select === 'function') {
+        layer.select();
+      }
+      return layer;
+    };
+
     // Pixel-art-safe painting: write DIRECTLY to the texture canvas (the same
     // approach as paint_pixel_matrix). The Painter UI API (Painter.useShapeTool
     // /useGradientTool + BarItems.<tool>.select) no-ops when driven headlessly
@@ -2315,13 +2386,14 @@ const options: PluginOptions = {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
         const sx = Math.round(input.x), sy = Math.round(input.y);
         const [fr, fg, fb] = hexToRgb(input.color);
         const fa = input.opacity !== undefined ? Math.max(0, Math.min(255, Math.round(input.opacity))) : 255;
         const tol = ((input.tolerance ?? 0) / 100) * 255;
         const connected = input.fill_mode !== 'color'; // 'color' = replace all matching pixels; else flood from the point
         let painted = 0;
-        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
           const ctx = canvas.getContext('2d');
           const W = canvas.width, H = canvas.height;
@@ -2363,6 +2435,7 @@ const options: PluginOptions = {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
         const shape = String(input.shape || 'rectangle');
         const hollow = shape.endsWith('_h');
         const isEllipse = shape.startsWith('ellipse');
@@ -2372,7 +2445,7 @@ const options: PluginOptions = {
         const x1 = Math.round(Math.max(input.start.x, input.end.x));
         const y1 = Math.round(Math.max(input.start.y, input.end.y));
         let painted = 0;
-        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
           const ctx = canvas.getContext('2d');
           ctx.save();
@@ -2413,7 +2486,8 @@ const options: PluginOptions = {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         const texture = getAndActivateTexture(input.texture_id);
-        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        const layer = resolveTextureLayer(texture, input.layer);
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
           const ctx = canvas.getContext('2d');
           ctx.save();
@@ -3158,10 +3232,11 @@ const options: PluginOptions = {
         const rows: string[] = input.pixels || [];
         if (!rows.length) return { ok: false, error: 'pixels (array of index-string rows) is required.' };
         const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
         const ox = input.origin?.x ?? 0;
         const oy = input.origin?.y ?? 0;
 
-        Undo.initEdit({ textures: [texture], bitmap: true } as any);
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         let painted = 0;
         texture.edit((canvas: any) => {
           const ctx = canvas.getContext('2d');
@@ -3183,6 +3258,100 @@ const options: PluginOptions = {
 
         logToHistory(`painted ${painted}px (${input.palette}) on "${texture.name}"`);
         return { ok: true, texture: texture.name, palette: input.palette, painted, origin: [ox, oy], size: [Math.max(...rows.map((r: string) => String(r).length)), rows.length] };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // auto_shade: generate shaded pixel-art automatically (no hand-painted
+    // matrices). Encodes the blockbench-pixel-shading rules as code — pick a
+    // palette + material style and the tool does directional light, AO at the
+    // cube seams, per-pixel noise/dither, wood grain and specular glints. All
+    // palette-locked (indices 0-4 only) and 1px/cell → no anti-aliasing.
+    // ---------------------------------------------------------------------
+    const FACE_BASE: Record<string, number> = { up: 3, north: 3, west: 2, east: 1, south: 1, down: 0 };
+    const STYLE_KNOBS: Record<string, { contrast: number; noise: number; specular: boolean; grain: boolean; dir: number }> = {
+      weapon_metal: { contrast: 1.2, noise: 0.10, specular: true,  grain: false, dir: 1.0 },
+      metal:        { contrast: 1.2, noise: 0.10, specular: true,  grain: false, dir: 1.0 },
+      crystal:      { contrast: 1.5, noise: 0.05, specular: true,  grain: false, dir: 1.2 },
+      wood:         { contrast: 0.8, noise: 0.30, specular: false, grain: true,  dir: 0.5 },
+      organic:      { contrast: 0.7, noise: 0.50, specular: false, grain: false, dir: 0.6 },
+      cloth:        { contrast: 0.6, noise: 0.35, specular: false, grain: false, dir: 0.5 },
+    };
+
+    const autoShade = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const pal = getPalette(input.palette);
+        if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes to see options.` };
+        const style = STYLE_KNOBS[input.style] || STYLE_KNOBS.organic;
+        const seed = ((input.seed ?? 1) >>> 0) || 1;
+        const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
+
+        // Build the regions to shade: per-face rects (cube) or one rect (region).
+        const regions: Array<{ x: number; y: number; w: number; h: number; base: number }> = [];
+        if (input.cube_id) {
+          const cube = findCubeByNameOrUuid(input.cube_id);
+          if (!cube) return { ok: false, error: `Cube "${input.cube_id}" not found.` };
+          const faces = cube.faces || {};
+          for (const key of Object.keys(faces)) {
+            const uv = faces[key] && faces[key].uv;
+            if (!uv || uv.length < 4) continue;
+            const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
+            const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
+            if (x1 - x0 <= 0 || y1 - y0 <= 0) continue;
+            regions.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0, base: FACE_BASE[key] ?? 2 });
+          }
+          if (!regions.length) return { ok: false, error: `Cube "${input.cube_id}" has no usable face UVs (give it a texture/uv first).` };
+        } else if (input.region) {
+          const r = input.region;
+          regions.push({ x: Math.round(r.x), y: Math.round(r.y), w: Math.max(1, Math.round(r.w)), h: Math.max(1, Math.round(r.h)), base: input.base ?? 2 });
+        } else {
+          return { ok: false, error: 'Provide cube_id (shade a cube box-UV net) or region {x,y,w,h}.' };
+        }
+
+        const noiseAt = (lx: number, ly: number): number => {
+          const hsh = ((((lx + 1) * 73856093) ^ ((ly + 1) * 19349663) ^ (seed * 83492791)) >>> 0) % 1000 / 1000;
+          if (hsh < style.noise / 2) return -1;
+          if (hsh > 1 - style.noise / 2) return 1;
+          return 0;
+        };
+
+        let painted = 0;
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          const TW = canvas.width, TH = canvas.height;
+          for (const reg of regions) {
+            for (let ly = 0; ly < reg.h; ly++) {
+              for (let lx = 0; lx < reg.w; lx++) {
+                const px = reg.x + lx, py = reg.y + ly;
+                if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
+                let idx = reg.base;
+                const vt = reg.h > 1 ? ly / (reg.h - 1) : 0;          // 0 top → 1 bottom
+                idx += Math.round((0.5 - vt) * 2 * style.contrast);   // top lighter
+                const dx = reg.w > 1 ? lx / (reg.w - 1) : 0;
+                idx += Math.round((0.5 - (dx + vt) / 2) * 2 * style.dir); // top-left light
+                const edge = Math.min(lx, reg.w - 1 - lx, ly, reg.h - 1 - ly);
+                if (edge === 0) idx -= 2;                              // hard AO outline at seam
+                else if (edge === 1) idx -= 1;                         // soft AO
+                if (style.grain && ((((lx + 1) * 2654435761) >>> 0) % 5) === 0) idx -= 1; // wood streak
+                idx += noiseAt(lx, ly);
+                if (style.specular && lx <= 1 && ly <= 1) idx = 4;     // glint near lit corner
+                else if (style.specular && lx === 2 && ly <= 1) idx = 1; // dark next to glint (4-next-to-1)
+                idx = Math.max(0, Math.min(4, idx));
+                ctx.fillStyle = pal[idx];
+                ctx.fillRect(px, py, 1, 1);
+                painted++;
+              }
+            }
+          }
+        }, { edit_name: 'Auto-shade' });
+        Undo.finishEdit('Auto-shade via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`auto-shaded ${regions.length} region(s), ${painted}px (${input.palette}/${input.style || 'organic'}) on "${texture.name}"`);
+        return { ok: true, texture: texture.name, palette: input.palette, style: input.style || 'organic', regions: regions.length, painted, layer: layer ? layer.name : null };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -3310,6 +3479,7 @@ const options: PluginOptions = {
         texture_selection: textureSelection,
         texture_layer_management: textureLayerManagement,
         paint_pixel_matrix: paintPixelMatrix,
+        auto_shade: autoShade,
       };
 
       let response: any;

@@ -251,20 +251,28 @@ server.registerTool(
   {
     title: "Apply Texture",
     description:
-      "Apply an already-registered texture to an existing cube, OR to a GROUP (textures all its descendant " +
-      "cubes in one call). Fails if the texture is not registered or the target doesn't exist (rule #2). " +
-      "Optionally limit to specific faces.",
+      "Apply a registered texture to a cube, a MESH, or a GROUP (all its descendant cubes+meshes in one " +
+      "call). Uses Blockbench's native Texture.apply with proper selection-scoping and a face-level render " +
+      "refresh. Fails if the texture is not registered or the target doesn't exist (rule #2). Note: cubes " +
+      "with a manual box-UV offset (autouv:0, set via modify_cube) keep their atlas region; only auto-UV " +
+      "cubes get repacked.",
     inputSchema: {
-      target: z.string().describe("Cube name, or a group name to texture all its descendant cubes."),
+      target: z.string().describe("Cube/mesh name, or a group name to texture all its descendant cubes+meshes."),
       texture: z.string().describe("Registered texture name or id."),
+      apply_mode: z
+        .enum(["blank", "all", "none"])
+        .optional()
+        .describe("blank = only faces with no texture yet (default); all = every face; none = clear the texture."),
       faces: z
         .array(z.string())
         .optional()
-        .describe("Face keys (north/south/east/west/up/down). Omit for all faces."),
+        .describe("Limit to these face keys (north/south/east/west/up/down). Omit for the whole element."),
     },
   },
   async (args) =>
-    forward("apply_texture", args, (r) => `Applied texture "${r.texture}" to ${r.cubes ?? 1} cube(s) (${r.target}).`)
+    forward("apply_texture", args, (r) =>
+      `Applied texture "${r.texture}" to ${r.cubes ?? 1} cube(s)${r.meshes ? ` + ${r.meshes} mesh(es)` : ""} (${r.target}, mode: ${r.mode ?? "blank"}).`
+    )
 );
 
 server.registerTool(
@@ -761,6 +769,7 @@ server.registerTool(
       data: z.string().optional().describe("Image data URL or absolute file path."),
       fill_color: colorSchema.optional().describe("Solid fill color (when no data)."),
       group: z.string().optional().describe("Texture group/material uuid."),
+      layers: z.boolean().optional().describe("Enable texture layers so paint passes can be non-destructive (target them with the paint tools' `layer` arg)."),
     },
   },
   async (args) => forward("create_texture", args, (r) => `Created texture "${r.name}" (${r.width}x${r.height}, id ${r.id}).`)
@@ -1308,6 +1317,7 @@ server.registerTool(
       opacity: z.number().min(0).max(255).optional().describe("0-255."),
       tolerance: z.number().min(0).max(100).optional(),
       fill_mode: z.enum(["color", "color_connected", "face", "element", "selected_elements", "selection"]).optional(),
+      layer: z.string().optional().describe("TextureLayer name to paint into (non-destructive; created if missing). Omit to paint the flat texture."),
       blend_mode: blendModeEnum.optional(),
     },
   },
@@ -1328,6 +1338,7 @@ server.registerTool(
       end: xy("End X", "End Y"),
       color: z.string().describe("Hex color."),
       line_width: z.number().min(1).max(50).optional().describe("Outline width for hollow shapes."),
+      layer: z.string().optional().describe("TextureLayer name to draw into (non-destructive; created if missing). Omit to draw on the flat texture."),
       opacity: z.number().min(0).max(255).optional(),
       blend_mode: blendModeEnum.optional(),
     },
@@ -1345,6 +1356,7 @@ server.registerTool(
       start: xy("Gradient start X", "Gradient start Y"),
       end: xy("Gradient end X", "Gradient end Y"),
       start_color: z.string().describe("Start hex color."),
+      layer: z.string().optional().describe("TextureLayer name to draw the gradient into (non-destructive; created if missing). Omit for the flat texture."),
       end_color: z.string().describe("End hex color."),
       opacity: z.number().min(0).max(255).optional(),
       blend_mode: blendModeEnum.optional(),
@@ -1414,10 +1426,46 @@ server.registerTool(
       palette: z.string().describe(`Palette name (list_palettes). One of: ${PALETTE_NAMES.join(", ")}.`),
       origin: z.object({ x: z.number().int(), y: z.number().int() }).optional().describe("Top-left pixel to start at. Default [0,0]."),
       pixels: z.array(z.string()).min(1).describe("Rows of palette indices '0'-'4' (or '.'/' ' = transparent)."),
+      layer: z.string().optional().describe("TextureLayer name to paint this matrix into (non-destructive; created if missing). Great for separate shade/highlight passes. Omit for the flat texture."),
     },
   },
   async (args) =>
     forward("paint_pixel_matrix", args, (r) => `Painted ${r.painted}px with "${r.palette}" at [${r.origin}] (size ${r.size?.[0]}x${r.size?.[1]}) on "${r.texture}".`)
+);
+
+server.registerTool(
+  "auto_shade",
+  {
+    title: "Auto-Shade",
+    description:
+      "Auto-generate shaded pixel-art onto a texture — the easy, high-quality way to texture (no hand-painted " +
+      "matrices). Give a cube_id (reads its box-UV net and shades each face by orientation: top bright, sides " +
+      "mid, bottom dark, with ambient occlusion at the seams) OR a flat region {x,y,w,h}. Pick a palette + a " +
+      "material style and the tool applies directional light (top-left), AO, per-pixel noise/dither, wood grain, " +
+      "and specular glints (hard materials) — all palette-locked (indices 0-4) and anti-aliasing-free. Optionally " +
+      "paints into a named texture layer. This is the preferred texturing tool; use paint_pixel_matrix only for " +
+      "fully hand-controlled art.",
+    inputSchema: {
+      texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
+      cube_id: z.string().optional().describe("Cube name/uuid: shade its whole box-UV net (each face lit by orientation). Give the cube a texture/UV first."),
+      region: z
+        .object({ x: z.number().int(), y: z.number().int(), w: z.number().int().min(1), h: z.number().int().min(1) })
+        .optional()
+        .describe("Flat rectangle to shade (use when not shading a whole cube)."),
+      palette: z.string().describe(`Palette name (list_palettes). One of: ${PALETTE_NAMES.join(", ")}.`),
+      style: z
+        .enum(["weapon_metal", "metal", "crystal", "wood", "organic", "cloth"])
+        .optional()
+        .describe("Material style — sets contrast, noise, grain, specular. Default organic."),
+      base: z.number().int().min(0).max(4).optional().describe("Base palette index for region mode (default 2). Ignored for cube_id."),
+      seed: z.number().int().optional().describe("Noise seed for deterministic output."),
+      layer: z.string().optional().describe("TextureLayer name to paint into (non-destructive; created if missing)."),
+    },
+  },
+  async (args) =>
+    forward("auto_shade", args, (r) =>
+      `Auto-shaded ${r.regions} region(s) (${r.painted}px) with "${r.palette}"/${r.style} on "${r.texture}"${r.layer ? ` (layer ${r.layer})` : ""}.`
+    )
 );
 
 // ---------------------------------------------------------------------------

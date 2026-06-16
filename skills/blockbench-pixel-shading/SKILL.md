@@ -9,6 +9,18 @@ Flat single-color fills look bad. Real Minecraft pixel art has hue-shifted ramps
 directional light, ambient occlusion, and texture noise. This is a HARD workflow, enforced
 by the tools.
 
+## Fastest path: `auto_shade` (use this FIRST)
+`auto_shade` applies everything in this guide automatically. Give it a `palette` + a `style`
+(`weapon_metal` / `metal` / `crystal` / `wood` / `organic` / `cloth`) and either:
+- a **`cube_id`** → shades the cube's whole box-UV net by face orientation (top lit, sides mid,
+  bottom dark) with ambient occlusion at the seams, or
+- a flat **`region {x,y,w,h}`**.
+It bakes in top-left directional light, AO, per-pixel noise/dither, wood grain and specular
+glints — palette-locked (indices 0-4), no anti-aliasing. Optionally paint into a `layer`.
+Reach for `paint_pixel_matrix` (below) only when you want full hand control over a specific
+motif (a readable face, a rune, an emblem). The rules below are exactly what `auto_shade` bakes
+in — and how to hand-paint when you need to.
+
 ## Core rule: palette indices only (no self-computed colors)
 - Color comes ONLY from a palette via `paint_pixel_matrix`. Each palette is a 5-step ramp:
   **index 0 = deepest shadow / ambient occlusion → 4 = brightest highlight.**

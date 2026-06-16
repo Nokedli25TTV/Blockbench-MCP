@@ -7,15 +7,34 @@ description: Create and paint textures in Blockbench using MCP tools. Use when c
 
 Create and paint textures for 3D models using Blockbench MCP tools.
 
+## ★ Recommended workflow (read first)
+1. **One atlas.** `set_project` the texture size, then `create_texture` (add `layers: true` for
+   non-destructive base/shade/highlight passes). Minecraft/GeckoLib uses ONE atlas per model with box-UV.
+2. **Assign + map.** `apply_texture` on a cube, a mesh, or a whole **group** (textures every
+   descendant in one call). It uses Blockbench's native mapping + a render refresh.
+3. **Texture it — prefer `auto_shade`.** The easy, good-looking path: give a `cube_id` (shades the
+   cube's box-UV net by face orientation, with AO at the seams) or a `region`, plus a `palette` +
+   `style`. See the `blockbench-pixel-shading` skill. Use `paint_pixel_matrix` / the paint tools
+   only for hand-controlled motifs.
+4. **Verify.** `get_texture` (image) + `capture_screenshot`.
+
+### ⚠ Critical: box-UV & `autouv`
+A box-UV cube is positioned on the atlas by its **`uv_offset`**, and that offset only STICKS when
+the cube's **`autouv` = 0**. Setting a manual `uv_offset` via `modify_cube` forces `autouv:0` for
+you. With `autouv:1`, Blockbench re-derives the box-UV and every cube collapses to `[0,0]` → the
+whole model samples one corner (the classic "everything is one colour" bug). A cube `(w,h,d)`
+occupies a footprint of `2·(w+d)` wide × `(h+d)` tall from its offset.
+
 ## Available Tools
 
 ### Texture Management
 | Tool | Purpose |
 |------|---------|
-| `create_texture` | Create new texture with size and fill color |
+| `create_texture` | Create new texture (size, fill color, `layers`) |
 | `list_textures` | List all project textures |
 | `get_texture` | Get texture image data |
-| `apply_texture` | Apply texture to element |
+| `apply_texture` | Apply texture to a cube/mesh/group (`apply_mode`: blank/all/none) |
+| `auto_shade` | **Auto-generate shaded pixel-art** (cube box-UV net or region) by palette + style |
 
 ### Paint Tools
 | Tool | Purpose |
@@ -71,7 +90,18 @@ create_texture: name="overlay", width=32, height=32, fill_color=[0, 0, 0, 0]
 ### Apply to Element
 
 ```
-apply_texture: id="body", texture="skin", applyTo="all"
+apply_texture: target="body", texture="skin", apply_mode="all"   # blank (default) | all | none
+# target can be a cube, a mesh, or a GROUP (textures every descendant in one call)
+```
+
+### Auto-Shade (recommended for good-looking results)
+
+```
+# Shade a whole cube's box-UV net by face orientation (top lit → bottom dark, AO at seams):
+auto_shade: cube_id="blade", palette="iron", style="weapon_metal"
+
+# Or shade a flat atlas region, into a named layer:
+auto_shade: region={x: 0, y: 0, w: 16, h: 16}, palette="crystal_purple", style="crystal", layer="gem"
 ```
 
 ## Painting

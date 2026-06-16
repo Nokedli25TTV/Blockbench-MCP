@@ -72,9 +72,18 @@ export function createMockScene() {
     apply_texture(input) {
       const t = scene.textures.find((x) => x.uuid === input.texture || x.name === input.texture);
       if (!t) return { ok: false, error: "texture not registered (rule #2)" };
-      const c = findCube(input.target); if (!c) return { ok: false, error: "cube not found" };
-      (input.faces && input.faces.length ? input.faces : ["north", "south", "east", "west", "up", "down"]).forEach((f) => (c.faces[f] = { texture: t.uuid }));
-      return { ok: true, target: c.name, texture: t.name };
+      let cubes = [];
+      const c = findCube(input.target);
+      if (c) cubes = [c];
+      else {
+        const g = findGroup(input.target);
+        if (!g) return { ok: false, error: "target not found" };
+        walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); });
+        if (!cubes.length) return { ok: false, error: "group has no descendant cubes" };
+      }
+      const faces = input.faces && input.faces.length ? input.faces : ["north", "south", "east", "west", "up", "down"];
+      cubes.forEach((cu) => faces.forEach((f) => (cu.faces[f] = { texture: t.uuid })));
+      return { ok: true, target: input.target, texture: t.name, cubes: cubes.length, meshes: 0, mode: input.apply_mode || "blank" };
     },
     modify_cube(input) {
       const c = findCube(input.id);
@@ -358,6 +367,13 @@ export function createMockScene() {
       let painted = 0;
       for (const r of rows) for (const ch of String(r)) if ("01234".includes(ch)) painted++;
       return { ok: true, texture: input.texture_id || "atlas", palette: input.palette, painted, origin: [input.origin?.x ?? 0, input.origin?.y ?? 0], size: [Math.max(...rows.map((r) => String(r).length)), rows.length] };
+    },
+    auto_shade(input) {
+      if (!input.cube_id && !input.region) return { ok: false, error: "cube_id or region required" };
+      let painted = 0, regions = 0;
+      if (input.region) { regions = 1; painted = input.region.w * input.region.h; }
+      else { const c = findCube(input.cube_id); if (!c) return { ok: false, error: "cube not found" }; regions = Object.keys(c.faces || {}).length || 6; painted = regions * 16; }
+      return { ok: true, texture: input.texture_id || "atlas", palette: input.palette, style: input.style || "organic", regions, painted, layer: input.layer || null };
     },
     get_scene_tree() { return { ok: true, tree: scene }; },
   };
