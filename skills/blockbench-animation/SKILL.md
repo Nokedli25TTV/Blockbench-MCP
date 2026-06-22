@@ -7,14 +7,39 @@ description: Create and manage animations in Blockbench using MCP tools. Use whe
 
 Create animations for 3D models using Blockbench MCP tools.
 
+## ⚠ Workflow & gotchas (read first — these cost whole sessions otherwise)
+- **Verify by read-back, never by eye.** After EVERY `manage_keyframes` / `animation_copy_paste`,
+  call **`get_keyframes`** (it returns the values ACTUALLY stored). `manage_keyframes` also echoes
+  the stored values in its ack. Catches silent write failures in round 1, not round 5.
+- **Calibrate rotation direction ONCE, up front.** Don't guess "forward/back" from a camera angle —
+  set a known +X on a bone, call **`get_bone_pose`** to read its world-space rotation (a number),
+  note "for this rig +X = forward/back", then never guess again.
+- **GeckoLib renders CUBES only — no meshes.** Model the whole mob/item from cubes in a
+  Bedrock/GeckoLib format from minute one. A mesh model means redo geometry + UVs + texture near
+  export. (`validate_model` / `export_model` warn if meshes are present.)
+- **Rig hierarchy convention.** Use a clean parent chain (root → body → head → …), NOT every part
+  as a separate child of root. If body and head both hang off root, leaning the whole torso means
+  rotating root AND counter-rotating the head — error-prone. Prefer one **upper-body control bone**
+  that leans the torso in a single move. Document the rig's hierarchy + the calibrated rotation
+  direction in a project note so the next session doesn't rediscover it.
+- **Neutral pose at the start AND end of every loop and attack**, identical, so GeckoLib blends
+  seamlessly between states.
+- **Curves:** `linear` for constant spins/orbits; `catmullrom` (smooth) for limb motion. Add
+  anticipation before and follow-through after a strike; a touch of overshoot reads as weight.
+- **Batch, then verify.** Make all related keyframe edits in one pass, then read back / screenshot
+  at a few key poses — not after every tiny step.
+- **Avoid `risky_eval` for edits** — it bypasses clean Undo (you can lose geometry). Use the real
+  tools, which wrap `Undo.initEdit/finishEdit`.
+
 ## Available Tools
 
 | Tool | Purpose |
 |------|---------|
 | `create_animation` | Create animation with keyframes for bones |
-| `manage_keyframes` | Create/edit/delete keyframes per bone and channel |
+| `manage_keyframes` | Create/edit/delete keyframes per bone and channel (echoes stored values) |
+| `get_keyframes` | **Read back the actually-stored keyframe values** (verify writes) |
+| `get_bone_pose` | **Measure a bone's local + world rotation** (calibrate direction by number) |
 | `animation_graph_editor` | Fine-tune animation curves (smooth, linear, ease) |
-| `bone_rigging` | Create/modify bone structure for animation |
 | `animation_timeline` | Control playback, time, FPS, loop settings |
 | `batch_keyframe_operations` | Batch operations: offset, scale, reverse, mirror |
 | `animation_copy_paste` | Copy animation data between bones/animations |

@@ -297,15 +297,25 @@ server.registerTool(
     const tree = r.tree as SceneTree;
     const report = buildReport(validateScene(tree));
 
+    // EARLY mesh warning: meshes in a cubes-only format (GeckoLib/Bedrock) won't
+    // render in-game and are silently dropped on export — catch it now, not at export.
+    const meshCount = ((r.tree as any) && (r.tree as any).mesh_count) || 0;
+    const fmt = (r.tree as any) && (r.tree as any).format;
+    const meshWarn = fmt && fmt.meshes === false && meshCount > 0
+      ? `${meshCount} mesh element(s) present, but this format ("${fmt.id}") renders ONLY cubes — meshes won't show in-game and are silently dropped on export. Convert them to cubes.`
+      : null;
+    const totalWarnings = report.warnings.length + (meshWarn ? 1 : 0);
+
     const lines: string[] = [];
     lines.push(
-      `Validation ${report.ok ? "PASSED ✅" : "FAILED ❌"} — ${report.errors.length} error(s), ${report.warnings.length} warning(s).`
+      `Validation ${report.ok ? "PASSED ✅" : "FAILED ❌"} — ${report.errors.length} error(s), ${totalWarnings} warning(s).`
     );
+    if (meshWarn) lines.push(`  [warn ] (mesh-in-box-format) ${meshWarn}`);
     for (const issue of report.issues) {
       const tag = issue.severity === "error" ? "ERROR" : "warn ";
       lines.push(`  [${tag}] (${issue.rule}) ${issue.message}`);
     }
-    if (report.issues.length === 0) lines.push("  No issues found.");
+    if (report.issues.length === 0 && !meshWarn) lines.push("  No issues found.");
 
     return {
       isError: !report.ok,
@@ -553,6 +563,50 @@ server.registerTool(
     }
     if (r && r.ok === false) return fail(`list_animations failed: ${r.error}`);
     return ok(JSON.stringify(r.animations, null, 2));
+  }
+);
+
+server.registerTool(
+  "get_keyframes",
+  {
+    title: "Get Keyframes (read-back)",
+    description:
+      "Read back the ACTUALLY-STORED keyframe values for a bone — the values, not what you intended. ALWAYS " +
+      "call this right after manage_keyframes / animation_copy_paste to confirm the write landed (silent " +
+      "write failures cost whole sessions otherwise). Returns per-channel [{time, values:[x,y,z], interpolation}].",
+    inputSchema: {
+      bone_name: z.string().describe("Bone/group name."),
+      animation_id: z.string().optional().describe("Animation UUID or name. Default: the selected animation."),
+      channel: z.enum(["rotation", "position", "scale"]).optional().describe("One channel, or omit for all three."),
+    },
+  },
+  async (args) => {
+    let r: any;
+    try { r = await sendToBlockbench("get_keyframes", args); } catch (e: any) { return fail(e?.message || String(e)); }
+    if (r && r.ok === false) return fail(`get_keyframes failed: ${r.error}`);
+    return ok(JSON.stringify({ animation: r.animation, bone: r.bone, has_animator: r.has_animator, channels: r.channels }, null, 2));
+  }
+);
+
+server.registerTool(
+  "get_bone_pose",
+  {
+    title: "Get Bone Pose (measure rotation)",
+    description:
+      "Measure a bone's rotation by NUMBER instead of guessing it from a camera angle — returns its local " +
+      "rotation/origin AND its world-space rotation in degrees. Use it to CALIBRATE rotation direction ONCE at " +
+      "the start (set a known +X on a bone, read world_rotation, note which way +X tilts), then never guess " +
+      "again. Pass `time` to evaluate the selected animation at that moment first.",
+    inputSchema: {
+      bone_name: z.string().describe("Bone/group name."),
+      time: z.number().optional().describe("Seconds — evaluate the selected animation at this time before measuring."),
+    },
+  },
+  async (args) => {
+    let r: any;
+    try { r = await sendToBlockbench("get_bone_pose", args); } catch (e: any) { return fail(e?.message || String(e)); }
+    if (r && r.ok === false) return fail(`get_bone_pose failed: ${r.error}`);
+    return ok(JSON.stringify({ bone: r.bone, time: r.time, local_rotation: r.local_rotation, world_rotation: r.world_rotation, origin: r.origin }, null, 2));
   }
 );
 
@@ -1433,38 +1487,59 @@ server.registerTool(
     forward("paint_pixel_matrix", args, (r) => `Painted ${r.painted}px with "${r.palette}" at [${r.origin}] (size ${r.size?.[0]}x${r.size?.[1]}) on "${r.texture}".`)
 );
 
+// auto_shade was REMOVED 2026-06-16 (user request): it was a procedural
+// palette/ramp shader that applied the same formulaic gradient+AO+noise to every
+// cube, so it always looked the same and could never match a reference. Texture
+// instead with exact colours via the paint tools (paint_fill_tool / draw_shape_tool
+// / gradient_tool / paint_pixel_matrix — all take real hex), after pack_uv + validate_uv.
+
 server.registerTool(
-  "auto_shade",
+  "pack_uv",
   {
-    title: "Auto-Shade",
+    title: "Pack UV / Fit Texture to Model",
     description:
-      "Auto-generate shaded pixel-art onto a texture — the easy, high-quality way to texture (no hand-painted " +
-      "matrices). Give a cube_id (reads its box-UV net and shades each face by orientation: top bright, sides " +
-      "mid, bottom dark, with ambient occlusion at the seams) OR a flat region {x,y,w,h}. Pick a palette + a " +
-      "material style and the tool applies directional light (top-left), AO, per-pixel noise/dither, wood grain, " +
-      "and specular glints (hard materials) — all palette-locked (indices 0-4) and anti-aliasing-free. Optionally " +
-      "paints into a named texture layer. This is the preferred texturing tool; use paint_pixel_matrix only for " +
-      "fully hand-controlled art.",
+      "Give EVERY cube its own non-overlapping atlas region and resize the texture to fit the model. This is " +
+      "the fix for the #1 texturing failure: by default all cubes' UVs sit at [0,0] and overlap, so every " +
+      "paint pass overwrites the others → a garbled texture, and the atlas is far bigger than the " +
+      "model actually uses. pack_uv shelf-packs each cube's box-UV net into its own spot (setting uv_offset+" +
+      "autouv:0 AND the explicit per-face UV rects, so it works in box-UV and per-face/GeckoLib formats alike) " +
+      "and shrinks the texture to the packed size. **Run this right after building geometry and BEFORE " +
+      "create_texture / apply_texture / painting.** Then create_texture (no size = uses the fitted size), " +
+      "apply_texture, and paint each cube's region (paint tools take real hex) — now each lands in its own region with no bleed.",
     inputSchema: {
-      texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
-      cube_id: z.string().optional().describe("Cube name/uuid: shade its whole box-UV net (each face lit by orientation). Give the cube a texture/UV first."),
-      region: z
-        .object({ x: z.number().int(), y: z.number().int(), w: z.number().int().min(1), h: z.number().int().min(1) })
-        .optional()
-        .describe("Flat rectangle to shade (use when not shading a whole cube)."),
-      palette: z.string().describe(`Palette name (list_palettes). One of: ${PALETTE_NAMES.join(", ")}.`),
-      style: z
-        .enum(["weapon_metal", "metal", "crystal", "wood", "organic", "cloth"])
-        .optional()
-        .describe("Material style — sets contrast, noise, grain, specular. Default organic."),
-      base: z.number().int().min(0).max(4).optional().describe("Base palette index for region mode (default 2). Ignored for cube_id."),
-      seed: z.number().int().optional().describe("Noise seed for deterministic output."),
-      layer: z.string().optional().describe("TextureLayer name to paint into (non-destructive; created if missing)."),
+      target: z.string().optional().describe("Group name (packs its descendant cubes) or a single cube. Omit to pack ALL cubes."),
+      padding: z.number().int().min(0).max(8).optional().describe("Pixel gap between nets (default 1)."),
+      power_of_two: z.boolean().optional().describe("Round the fitted texture size up to a power of two (default false = exact fit)."),
+      resize_texture: z.boolean().optional().describe("Resize the project texture to the packed bounds (default true)."),
     },
   },
   async (args) =>
-    forward("auto_shade", args, (r) =>
-      `Auto-shaded ${r.regions} region(s) (${r.painted}px) with "${r.palette}"/${r.style} on "${r.texture}"${r.layer ? ` (layer ${r.layer})` : ""}.`
+    forward("pack_uv", args, (r) =>
+      `Packed ${r.cubes} cube(s) into a ${r.texture_width}x${r.texture_height} atlas (content ${r.packed_width}x${r.packed_height}, box_uv: ${r.box_uv}).` +
+      (r.warning ? `\n⚠️  ${r.warning}` : ` Now create_texture (no size), apply_texture, then paint each cube's region with the paint tools.`)
+    )
+);
+
+server.registerTool(
+  "validate_uv",
+  {
+    title: "Validate UV Layout",
+    description:
+      "Check the UV layout BEFORE painting. Detects the #1 texturing failure — multiple cubes " +
+      "sharing the same atlas area (overlapping UVs), so paint passes overwrite each other and the texture " +
+      "comes out smeared/blotchy — plus out-of-bounds, null, and zero-size UVs. Reports the UV mode " +
+      "(box_uv / per_face / mixed), cube & face counts, texture size, and a `valid` verdict. If not valid, run " +
+      "pack_uv and re-validate. Works for box-UV and per-face/GeckoLib models. ALWAYS validate before texturing.",
+    inputSchema: {
+      target: z.string().optional().describe("Group name (its descendant cubes) or a single cube. Omit to validate ALL cubes."),
+    },
+  },
+  async (args) =>
+    forward("validate_uv", args, (r) =>
+      `UV ${r.valid ? "VALID ✅" : "INVALID ❌"} — ${r.cubes} cube(s) / ${r.faces} face(s), mode: ${r.uv_mode}, atlas ${r.texture?.[0]}x${r.texture?.[1]}. ` +
+      `overlaps:${r.overlaps} out_of_bounds:${r.out_of_bounds} null:${r.null_uv} zero_size:${r.zero_size_uv}.` +
+      (r.overlaps ? `\nOverlapping cubes: ${(r.overlapping_pairs || []).join(", ")}` : "") +
+      `\n${r.recommendation}`
     )
 );
 

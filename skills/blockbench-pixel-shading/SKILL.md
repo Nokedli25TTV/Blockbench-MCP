@@ -9,24 +9,18 @@ Flat single-color fills look bad. Real Minecraft pixel art has hue-shifted ramps
 directional light, ambient occlusion, and texture noise. This is a HARD workflow, enforced
 by the tools.
 
-## Fastest path: `auto_shade` (use this FIRST)
-`auto_shade` applies everything in this guide automatically. Give it a `palette` + a `style`
-(`weapon_metal` / `metal` / `crystal` / `wood` / `organic` / `cloth`) and either:
-- a **`cube_id`** → shades the cube's whole box-UV net by face orientation (top lit, sides mid,
-  bottom dark) with ambient occlusion at the seams, or
-- a flat **`region {x,y,w,h}`**.
-It bakes in top-left directional light, AO, per-pixel noise/dither, wood grain and specular
-glints — palette-locked (indices 0-4), no anti-aliasing. Optionally paint into a `layer`.
-Reach for `paint_pixel_matrix` (below) only when you want full hand control over a specific
-motif (a readable face, a rune, an emblem). The rules below are exactly what `auto_shade` bakes
-in — and how to hand-paint when you need to.
+You texture by HAND-PAINTING the atlas with `paint_pixel_matrix` (and `paint_fill_tool` /
+`draw_shape_tool` / `gradient_tool` for blocks/ramps) — there is no auto-shader. That means you
+control every pixel and the EXACT colours (e.g. from a reference image), instead of a generic
+procedural look. Workflow: `pack_uv` → `validate_uv` → know each cube's UV region → paint it.
 
-## Core rule: palette indices only (no self-computed colors)
-- Color comes ONLY from a palette via `paint_pixel_matrix`. Each palette is a 5-step ramp:
-  **index 0 = deepest shadow / ambient occlusion → 4 = brightest highlight.**
-- Hue-shifting is BAKED INTO the palette (shadows lean cool blue/violet/teal, highlights lean
-  warm yellow). NEVER mix your own black/white into a color — that gives muddy/rusty results.
-  Just pick the index; the palette already did the hue-shift.
+## Core rule: pick your colours, then bake the shading in by hand
+- Use the EXACT colours you want (a reference's hexes, or the colours the user gave you). The
+  built-in palettes (`list_palettes` / `get_palette`) are a CONVENIENCE — a ready 5-step ramp
+  (index 0 = deepest shadow/AO → 4 = brightest highlight) — but you are free to pass your own hex
+  colours to the paint tools. Never ignore colours the user provided.
+- Each material wants a 5-ish-step ramp: a mid base, two darker+cooler shadow steps, two
+  lighter+warmer highlight steps. Build it from the reference's colour, don't just use grey+black.
 - `list_palettes` / `get_palette` to see them (wood, iron, gold, stone, crystal_purple,
   crystal_blue, crystal_green, ruby, ember, green, bone, leather, cloth_blue).
 

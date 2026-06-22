@@ -505,6 +505,11 @@ const options: PluginOptions = {
             to: node.to ? [...node.to] : [0, 0, 0],
             origin: node.origin ? [...node.origin] : [0, 0, 0],
             rotation: node.rotation ? [...node.rotation] : [0, 0, 0],
+            // UV state so the AI can SEE/verify UV without risky_eval (box_uv mode,
+            // the box-UV offset, and the auto-UV flag).
+            box_uv: !!node.box_uv,
+            autouv: node.autouv,
+            uv_offset: node.uv_offset ? [...node.uv_offset] : undefined,
             faces,
           };
         };
@@ -513,7 +518,11 @@ const options: PluginOptions = {
         const textures = (typeof Texture !== 'undefined' && (Texture as any).all ? (Texture as any).all : []).map(
           (t: any) => ({ uuid: t.uuid, name: t.name })
         );
-        return { ok: true, tree: { roots, textures } };
+        // Format + mesh count so validate_model can warn EARLY about meshes in a
+        // cubes-only format (GeckoLib renders cubes, not meshes → silent loss).
+        const format = (typeof Format !== 'undefined') ? { id: (Format as any).id, meshes: !!(Format as any).meshes } : null;
+        const mesh_count = (typeof Mesh !== 'undefined' && (Mesh as any).all) ? (Mesh as any).all.length : 0;
+        return { ok: true, tree: { roots, textures, format, mesh_count } };
       } catch (err: any) {
         console.error('[MCP Plugin] getSceneTree failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -760,6 +769,32 @@ const options: PluginOptions = {
       }
     };
 
+    // Write a keyframe's actual values into its data_points (x,y,z as strings, the
+    // Blockbench storage format). Blockbench's createKeyframe does NOT read a
+    // `.values` key, so passing values in the create-data silently saved 0 — this
+    // sets them explicitly so create/edit actually stick. `values` = [x,y,z] for
+    // rotation/position, or a number for uniform scale.
+    const setKeyframeValues = (kf: any, values: any): boolean => {
+      if (kf == null || values === undefined || values === null) return false;
+      const a = Array.isArray(values) ? values : [values, values, values];
+      const x = a[0] ?? 0, y = (a[1] ?? a[0]) ?? 0, z = (a[2] ?? a[0]) ?? 0;
+      if (kf.data_points && kf.data_points[0]) {
+        kf.data_points[0].x = String(x); kf.data_points[0].y = String(y); kf.data_points[0].z = String(z);
+        return true;
+      }
+      if (typeof kf.set === 'function') { try { kf.set('x', x); kf.set('y', y); kf.set('z', z); return true; } catch { /* */ } }
+      return false;
+    };
+    // Read a keyframe's actually-stored values back out (for self-verifying acks
+    // and the get_keyframes tool — measure, don't guess).
+    const readKeyframe = (kf: any): any => {
+      const dp = (kf.data_points && kf.data_points[0]) ? kf.data_points[0] : {};
+      const num = (v: any) => { const n = Number(v); return Number.isFinite(n) ? n : v; };
+      return { time: kf.time, values: [num(dp.x), num(dp.y), num(dp.z)], interpolation: kf.interpolation };
+    };
+    const readChannel = (animator: any, channel: string): any[] =>
+      ((animator && animator[channel]) || []).map(readKeyframe).sort((p: any, q: any) => p.time - q.time);
+
     // Create / delete / edit / select keyframes on one bone+channel.
     const manageKeyframes = (input: any): any => {
       try {
@@ -797,10 +832,10 @@ const options: PluginOptions = {
         switch (input.action) {
           case 'create':
             keyframes.forEach((kf: any) => {
-              const keyframe = animator.createKeyframe(
-                { time: kf.time, channel: input.channel, values: kf.values, interpolation: kf.interpolation },
-                kf.time, input.channel, false
-              );
+              const keyframe = animator.createKeyframe(undefined, kf.time, input.channel, false);
+              if (!keyframe) return;
+              setKeyframeValues(keyframe, kf.values); // explicit — createKeyframe ignores `.values`
+              if (kf.interpolation) keyframe.interpolation = kf.interpolation;
               applyBezier(keyframe, kf);
               affected++;
             });
@@ -812,7 +847,7 @@ const options: PluginOptions = {
             keyframes.forEach((kf: any) => {
               const k = findKf(kf.time);
               if (!k) return;
-              if (kf.values !== undefined) k.set('values', kf.values);
+              if (kf.values !== undefined) setKeyframeValues(k, kf.values); // was k.set('values',…) — 'values' is not an axis
               if (kf.interpolation) k.interpolation = kf.interpolation;
               applyBezier(k, kf);
               affected++;
@@ -829,8 +864,11 @@ const options: PluginOptions = {
 
         Undo.finishEdit(`${input.action} keyframes`);
         Animator.preview();
+        // Self-verifying: read the values ACTUALLY stored back out, so a silent
+        // write failure is visible in the ack instead of after 5 rounds.
+        const stored = readChannel(animator, input.channel);
         logToHistory(`${input.action} ${affected} keyframe(s) on ${input.bone_name}.${input.channel}`);
-        return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel };
+        return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel, stored };
       } catch (err: any) {
         console.error('[MCP Plugin] manageKeyframes failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -1119,10 +1157,10 @@ const options: PluginOptions = {
                 values[axisIndex] *= -1;
               }
               const time = kfData.time + (target.time_offset || 0);
-              const keyframe = animator.createKeyframe(
-                { time, channel, values, interpolation: kfData.interpolation },
-                time, channel, false
-              );
+              const keyframe = animator.createKeyframe(undefined, time, channel, false);
+              if (!keyframe) return;
+              setKeyframeValues(keyframe, values); // explicit — createKeyframe ignores `.values`
+              if (kfData.interpolation) keyframe.interpolation = kfData.interpolation;
               if (kfData.interpolation === 'bezier') {
                 if (kfData.bezier_left_time !== undefined) keyframe.bezier_left_time = kfData.bezier_left_time;
                 if (kfData.bezier_left_value) keyframe.bezier_left_value = kfData.bezier_left_value;
@@ -1174,6 +1212,54 @@ const options: PluginOptions = {
         console.error('[MCP Plugin] listAnimations failed:', err);
         return { ok: false, error: err?.message || String(err) };
       }
+    };
+
+    // Read back the ACTUAL stored keyframe values for a bone (verify writes, don't
+    // guess). Returns per-channel [{time, values:[x,y,z], interpolation}].
+    const getKeyframes = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        const animation = findAnimation(input.animation_id);
+        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        const group = findGroupByName(input.bone_name);
+        if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+        const animator = animation.animators[group.uuid];
+        const chans = input.channel ? [input.channel] : ['rotation', 'position', 'scale'];
+        const channels: any = {};
+        for (const ch of chans) channels[ch] = animator ? readChannel(animator, ch) : [];
+        return { ok: true, animation: animation.name, bone: input.bone_name, has_animator: !!animator, channels };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // Measure a bone's rotation — local AND world-space (degrees) — so rotation
+    // direction can be CALIBRATED by number, not guessed from a camera angle.
+    // Optionally evaluate the selected animation at `time` first.
+    const getBonePose = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const group = findGroupByName(input.bone_name);
+        if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+        if (input.time !== undefined) {
+          try { ensureAnimationMode(); (Timeline as any).time = input.time; if (typeof Animator !== 'undefined' && (Animator as any).preview) (Animator as any).preview(); } catch { /* */ }
+        }
+        let world: number[] | null = null;
+        try {
+          const mesh = (group as any).mesh;
+          if (mesh && typeof THREE !== 'undefined' && mesh.getWorldQuaternion) {
+            if (mesh.updateWorldMatrix) mesh.updateWorldMatrix(true, false);
+            const q = new (THREE as any).Quaternion(); mesh.getWorldQuaternion(q);
+            const e = new (THREE as any).Euler().setFromQuaternion(q, 'ZYX');
+            const deg = (r: number) => Math.round((r * 180 / Math.PI) * 100) / 100;
+            world = [deg(e.x), deg(e.y), deg(e.z)];
+          }
+        } catch { /* world is best-effort */ }
+        return {
+          ok: true, bone: input.bone_name, time: input.time ?? null,
+          local_rotation: group.rotation ? [...group.rotation] : null,
+          origin: group.origin ? [...group.origin] : null,
+          world_rotation: world,
+        };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
     // ---------------------------------------------------------------------
@@ -1428,8 +1514,8 @@ const options: PluginOptions = {
               model_identifier: (Project as any).model_identifier || null,
               save_path: (Project as any).save_path || null,
             },
-            plugin_build: '2026-06-15-t3-autoshade', // bump on each plugin rebuild to confirm the loaded build
-            tool_count: 106,
+            plugin_build: '2026-06-16-batch2', // bump on each plugin rebuild to confirm the loaded build
+            tool_count: 109,
             format: { id: fmt ? fmt.id : null, name: fmt ? (fmt.display_name || fmt.name) : null, animation_mode: fmt ? !!fmt.animation_mode : false },
             resolution: { texture_width: (Project as any).texture_width || null, texture_height: (Project as any).texture_height || null },
             counts: {
@@ -1534,8 +1620,12 @@ const options: PluginOptions = {
         if (allTextures().some((t: any) => t.name === input.name)) {
           return { ok: false, error: `Texture "${input.name}" already exists.` };
         }
-        const w = input.width || 16;
-        const h = input.height || 16;
+        // Default to the project's texture resolution (set by pack_uv / set_project)
+        // so the atlas matches the packed model instead of an arbitrary size.
+        const projW = (typeof Project !== 'undefined' && (Project as any).texture_width) || 0;
+        const projH = (typeof Project !== 'undefined' && (Project as any).texture_height) || 0;
+        const w = input.width || projW || 16;
+        const h = input.height || projH || 16;
         let tex: any;
 
         if (input.data && typeof input.data === 'string') {
@@ -2380,6 +2470,33 @@ const options: PluginOptions = {
       const s = (h.length === 3 ? h.split('').map((c) => c + c).join('') : h).slice(0, 6).padEnd(6, '0');
       const n = parseInt(s, 16) || 0;
       return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    };
+    // Build a 5-step hue-shifted pixel-art ramp (0=shadow → 4=highlight) from ONE
+    // base color, so auto_shade can use the USER'S colour instead of a preset
+    // palette. Shadows go cooler+darker, highlights warmer+lighter (the same
+    // philosophy as the built-in palettes), with the base kept exactly at index 2.
+    const rgbToHsl = (r: number, g: number, b: number): [number, number, number] => {
+      r /= 255; g /= 255; b /= 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0, s = 0; const l = (mx + mn) / 2;
+      if (d) { s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; }
+      return [h, s, l];
+    };
+    const hslToHex = (h: number, s: number, l: number): string => {
+      h = (((h % 360) + 360) % 360) / 360; s = Math.max(0, Math.min(1, s)); l = Math.max(0, Math.min(1, l));
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+      const ch = (t: number) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1 / 6) return p + (q - p) * 6 * t; if (t < 1 / 2) return q; if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; };
+      const r = s === 0 ? l : ch(h + 1 / 3), g = s === 0 ? l : ch(h), b = s === 0 ? l : ch(h - 1 / 3);
+      return '#' + [r, g, b].map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+    };
+    const rampFromBase = (hex: string): string[] => {
+      const [r, g, b] = hexToRgb(hex); const [h, s, l] = rgbToHsl(r, g, b);
+      return [
+        hslToHex(h - 14, s * 1.10, l * 0.42),                 // 0 deep shadow (cool)
+        hslToHex(h - 7,  s * 1.05, l * 0.68),                 // 1 shadow
+        hex.startsWith('#') ? hex : '#' + hex,                // 2 base (exact)
+        hslToHex(h + 9,  s * 0.95, l + (1 - l) * 0.42),       // 3 light (warm)
+        hslToHex(h + 18, s * 0.85, l + (1 - l) * 0.70),       // 4 highlight (warm)
+      ];
     };
 
     const paintFillTool = (input: any): any => {
@@ -3281,8 +3398,15 @@ const options: PluginOptions = {
     const autoShade = (input: any): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
-        const pal = getPalette(input.palette);
-        if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes to see options.` };
+        // Colour source priority: explicit `colors` (5 hex shadow→highlight) > `base_color`
+        // (one hex → auto hue-shifted ramp, keeps your exact colour at index 2) > a built-in
+        // `palette` name. This is how you texture to an EXACT reference colour instead of a preset.
+        let pal: string[] | null = null;
+        let palName = input.palette || 'custom';
+        if (Array.isArray(input.colors) && input.colors.length >= 5) { pal = input.colors.slice(0, 5).map((c: any) => String(c)); palName = 'colors'; }
+        else if (input.base_color) { pal = rampFromBase(String(input.base_color)); palName = `base ${input.base_color}`; }
+        else if (input.palette) { pal = getPalette(input.palette); if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes, OR pass base_color (one hex) / colors (5 hex shadow→highlight) for exact colours.` }; }
+        else return { ok: false, error: 'Provide a palette name, a base_color (one hex → auto ramp), or colors (5 hex shadow→highlight).' };
         const style = STYLE_KNOBS[input.style] || STYLE_KNOBS.organic;
         const seed = ((input.seed ?? 1) >>> 0) || 1;
         const texture = getAndActivateTexture(input.texture_id);
@@ -3323,6 +3447,13 @@ const options: PluginOptions = {
           const ctx = canvas.getContext('2d');
           const TW = canvas.width, TH = canvas.height;
           for (const reg of regions) {
+            // Scale detail to face size: a tiny face (e.g. a 2px blade side) must NOT
+            // get full AO/noise/specular or it turns into dark, blotchy static. Small
+            // faces get just base + a gentle gradient = a clean, readable lit solid.
+            const small = Math.min(reg.w, reg.h);
+            const doAO = small >= 4;        // need an interior beyond the 1-2px AO border
+            const doNoise = small >= 5;     // noise on <5px reads as random static
+            const doSpec = style.specular && small >= 5;
             for (let ly = 0; ly < reg.h; ly++) {
               for (let lx = 0; lx < reg.w; lx++) {
                 const px = reg.x + lx, py = reg.y + ly;
@@ -3333,12 +3464,11 @@ const options: PluginOptions = {
                 const dx = reg.w > 1 ? lx / (reg.w - 1) : 0;
                 idx += Math.round((0.5 - (dx + vt) / 2) * 2 * style.dir); // top-left light
                 const edge = Math.min(lx, reg.w - 1 - lx, ly, reg.h - 1 - ly);
-                if (edge === 0) idx -= 2;                              // hard AO outline at seam
-                else if (edge === 1) idx -= 1;                         // soft AO
-                if (style.grain && ((((lx + 1) * 2654435761) >>> 0) % 5) === 0) idx -= 1; // wood streak
-                idx += noiseAt(lx, ly);
-                if (style.specular && lx <= 1 && ly <= 1) idx = 4;     // glint near lit corner
-                else if (style.specular && lx === 2 && ly <= 1) idx = 1; // dark next to glint (4-next-to-1)
+                if (doAO) { if (edge === 0) idx -= 2; else if (edge === 1) idx -= 1; } // AO only when the face is big enough to have an interior
+                if (style.grain && doNoise && ((((lx + 1) * 2654435761) >>> 0) % 5) === 0) idx -= 1; // wood streak
+                if (doNoise) idx += noiseAt(lx, ly);
+                if (doSpec && lx <= 1 && ly <= 1) idx = 4;            // glint near lit corner
+                else if (doSpec && lx === 2 && ly <= 1) idx = 1;      // dark next to glint (4-next-to-1)
                 idx = Math.max(0, Math.min(4, idx));
                 ctx.fillStyle = pal[idx];
                 ctx.fillRect(px, py, 1, 1);
@@ -3350,8 +3480,157 @@ const options: PluginOptions = {
         Undo.finishEdit('Auto-shade via MCP');
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
-        logToHistory(`auto-shaded ${regions.length} region(s), ${painted}px (${input.palette}/${input.style || 'organic'}) on "${texture.name}"`);
-        return { ok: true, texture: texture.name, palette: input.palette, style: input.style || 'organic', regions: regions.length, painted, layer: layer ? layer.name : null };
+        logToHistory(`auto-shaded ${regions.length} region(s), ${painted}px (${palName}/${input.style || 'organic'}) on "${texture.name}"`);
+        return { ok: true, texture: texture.name, palette: palName, style: input.style || 'organic', regions: regions.length, painted, layer: layer ? layer.name : null };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // pack_uv: give EVERY cube its own non-overlapping atlas region and size
+    // the texture to fit the model. THE fix for "all cubes' UVs sit at [0,0],
+    // so any paint/auto_shade pass overwrites the others → garbage texture".
+    // Mode-agnostic: sets box-UV uv_offset (+autouv:0) AND writes the explicit
+    // per-face uv rects, so it works whether the format uses box-UV or per-face.
+    // Run AFTER building geometry, BEFORE create_texture / apply_texture / auto_shade.
+    // ---------------------------------------------------------------------
+    const packUv = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let cubes: any[] = [];
+        if (input.target) {
+          const g = findGroupByName(input.target);
+          if (g) { const collect = (grp: any) => { for (const ch of grp.children || []) { if (typeof Cube !== 'undefined' && ch instanceof Cube) cubes.push(ch); else if (typeof Group !== 'undefined' && ch instanceof Group) collect(ch); } }; collect(g); }
+          else { const c = findCubeByNameOrUuid(input.target); if (c) cubes = [c]; else return { ok: false, error: `"${input.target}" is not a group or cube.` }; }
+        } else { cubes = allCubes(); }
+        if (!cubes.length) return { ok: false, error: 'No cubes to pack.' };
+
+        const pad = Math.max(0, Math.round(input.padding ?? 1));
+        // Each cube's box-UV net is 2*(w+d) wide × (h+d) tall.
+        const items = cubes.map((c: any) => {
+          const w = Math.abs(c.to[0] - c.from[0]), h = Math.abs(c.to[1] - c.from[1]), d = Math.abs(c.to[2] - c.from[2]);
+          return { cube: c, w, h, d, fw: Math.max(1, Math.ceil(2 * (w + d))), fh: Math.max(1, Math.ceil(h + d)) };
+        });
+        const noResize = input.resize_texture === false;
+        const existW = (typeof Project !== 'undefined' && (Project as any).texture_width) || 0;
+        const existH = (typeof Project !== 'undefined' && (Project as any).texture_height) || 0;
+        const totalArea = items.reduce((s, it) => s + (it.fw + pad) * (it.fh + pad), 0);
+        const maxW = items.reduce((m, it) => Math.max(m, it.fw), 0);
+        // When NOT resizing, pack within the EXISTING texture width so UVs don't run
+        // off the texture; otherwise pick a square-ish width and resize to fit.
+        const targetW = noResize ? Math.max(maxW, existW || 16) : Math.max(maxW, Math.ceil(Math.sqrt(totalArea)));
+        const sorted = [...items].sort((a, b) => b.fh - a.fh); // tallest first (shelf pack)
+
+        // Standard box-UV net face rects for a cube placed at atlas origin (U,V).
+        const boxFaces = (U: number, V: number, w: number, h: number, d: number): Record<string, number[]> => ({
+          north: [U + d, V + d, U + d + w, V + d + h],
+          east:  [U, V + d, U + d, V + d + h],
+          south: [U + 2 * d + w, V + d, U + 2 * d + 2 * w, V + d + h],
+          west:  [U + d + w, V + d, U + 2 * d + w, V + d + h],
+          up:    [U + d + w, V + d, U + d, V],
+          down:  [U + d + 2 * w, V, U + d + w, V + d],
+        });
+
+        let x = 0, y = 0, shelfH = 0, packedW = 0;
+        Undo.initEdit({ elements: cubes, uv_only: true } as any);
+        for (const it of sorted) {
+          if (x > 0 && x + it.fw > targetW) { x = 0; y += shelfH + pad; shelfH = 0; }
+          const U = x, V = y;
+          it.cube.uv_offset = [U, V];
+          try { it.cube.autouv = 0; } catch { /* */ }
+          const rects = boxFaces(U, V, it.w, it.h, it.d);
+          for (const fk of Object.keys(rects)) {
+            const face = it.cube.faces && it.cube.faces[fk];
+            if (face) { try { face.uv = rects[fk]; } catch { /* */ } }
+          }
+          x += it.fw + pad; shelfH = Math.max(shelfH, it.fh); packedW = Math.max(packedW, x - pad);
+        }
+        const packedH = y + shelfH;
+        Undo.finishEdit('Pack UV via MCP', { elements: cubes });
+
+        const pow2 = (n: number) => { let p = 1; while (p < n) p *= 2; return p; };
+        let texW: number, texH: number, warning: string | null = null;
+        if (noResize) {
+          // Keep the existing texture size; report if the packed content overflows it.
+          texW = existW || Math.max(16, packedW); texH = existH || Math.max(16, packedH);
+          if (packedW > texW || packedH > texH) {
+            warning = `Packed content (${packedW}x${packedH}) exceeds the texture (${texW}x${texH}) — some UVs are out of bounds. Re-run with resize_texture:true, or enlarge the texture.`;
+          }
+        } else {
+          texW = Math.max(16, packedW); texH = Math.max(16, packedH);
+          if (input.power_of_two) { texW = pow2(texW); texH = pow2(texH); }
+          if (typeof setProjectResolution === 'function') (setProjectResolution as any)(texW, texH, false);
+          else { (Project as any).texture_width = texW; (Project as any).texture_height = texH; }
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        logToHistory(`packed UV for ${cubes.length} cube(s) → ${texW}x${texH}${warning ? ' [overflow]' : ''}`);
+        return {
+          ok: true, cubes: cubes.length, texture_width: texW, texture_height: texH,
+          packed_width: packedW, packed_height: packedH, fits: !warning, warning,
+          box_uv: !!(items[0] && items[0].cube.box_uv),
+          layout: sorted.map((it) => ({ name: it.cube.name, uv_offset: [...(it.cube.uv_offset || [0, 0])], footprint: [it.fw, it.fh] })),
+        };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // validate_uv: gate BEFORE any painting. Detects the #1 texturing failure
+    // (multiple cubes sharing the same atlas area → paint passes overwrite each
+    // other), plus out-of-bounds / null / zero-size UVs, and reports the UV mode
+    // (box_uv / per_face / mixed). Works regardless of format. If not valid →
+    // run pack_uv and re-validate before texturing.
+    // ---------------------------------------------------------------------
+    const validateUv = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let cubes: any[] = [];
+        if (input.target) {
+          const g = findGroupByName(input.target);
+          if (g) { const collect = (grp: any) => { for (const ch of grp.children || []) { if (typeof Cube !== 'undefined' && ch instanceof Cube) cubes.push(ch); else if (typeof Group !== 'undefined' && ch instanceof Group) collect(ch); } }; collect(g); }
+          else { const c = findCubeByNameOrUuid(input.target); if (c) cubes = [c]; else return { ok: false, error: `"${input.target}" not found.` }; }
+        } else { cubes = allCubes(); }
+        const texW = (typeof Project !== 'undefined' && (Project as any).texture_width) || 16;
+        const texH = (typeof Project !== 'undefined' && (Project as any).texture_height) || 16;
+
+        let faceCount = 0, nullUv = 0, zeroSize = 0, outOfBounds = 0, boxUvCount = 0;
+        const rects: Array<{ cube: string; x0: number; y0: number; x1: number; y1: number }> = [];
+        for (const c of cubes) {
+          if (c.box_uv) boxUvCount++;
+          let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity, hasFace = false;
+          for (const fk of Object.keys(c.faces || {})) {
+            faceCount++;
+            const uv = c.faces[fk] && c.faces[fk].uv;
+            if (!uv || uv.length < 4) { nullUv++; continue; }
+            const x0 = Math.min(uv[0], uv[2]), y0 = Math.min(uv[1], uv[3]), x1 = Math.max(uv[0], uv[2]), y1 = Math.max(uv[1], uv[3]);
+            if (x1 - x0 <= 0 || y1 - y0 <= 0) { zeroSize++; continue; }
+            if (x0 < 0 || y0 < 0 || x1 > texW || y1 > texH) outOfBounds++;
+            bx0 = Math.min(bx0, x0); by0 = Math.min(by0, y0); bx1 = Math.max(bx1, x1); by1 = Math.max(by1, y1); hasFace = true;
+          }
+          if (hasFace) rects.push({ cube: c.name, x0: bx0, y0: by0, x1: bx1, y1: by1 });
+        }
+        // Pairwise overlap between DIFFERENT cubes' UV bounding boxes (strict, so
+        // edge-touching packed nets do NOT count as overlap).
+        let overlaps = 0; const overlapPairs: string[] = [];
+        for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i], b = rects[j];
+          if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) { overlaps++; if (overlapPairs.length < 20) overlapPairs.push(`${a.cube}~${b.cube}`); }
+        }
+        // VALID hinges on the things that actually corrupt a texture: overlapping
+        // cubes (paint bleed) and out-of-bounds UVs. null / zero-size faces are just
+        // WARNINGS (e.g. billboard/collapsed faces) — they don't block texturing.
+        const valid = overlaps === 0 && outOfBounds === 0;
+        const warnings = nullUv > 0 || zeroSize > 0;
+        const uvMode = cubes.length === 0 ? 'none' : boxUvCount === cubes.length ? 'box_uv' : boxUvCount === 0 ? 'per_face' : 'mixed';
+        logToHistory(`validate_uv: ${cubes.length} cubes/${faceCount} faces, overlaps=${overlaps} oob=${outOfBounds} null=${nullUv} zero=${zeroSize}, mode=${uvMode}, tex=${texW}x${texH}`);
+        return {
+          ok: true, valid, warnings, cubes: cubes.length, faces: faceCount, uv_mode: uvMode, box_uv_cubes: boxUvCount,
+          texture: [texW, texH], overlaps, overlapping_pairs: overlapPairs, out_of_bounds: outOfBounds, null_uv: nullUv, zero_size_uv: zeroSize,
+          recommendation: !valid
+            ? 'Run pack_uv to fix overlapping/out-of-bounds UVs, then re-validate before painting.'
+            : warnings
+              ? 'Safe to paint — no overlaps. (Some zero-size/null faces exist, e.g. billboard/collapsed faces; harmless.)'
+              : 'UV layout is valid — safe to paint / auto_shade.',
+        };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -3393,6 +3672,8 @@ const options: PluginOptions = {
         batch_keyframe_operations: batchKeyframeOperations,
         animation_copy_paste: animationCopyPaste,
         list_animations: listAnimations,
+        get_keyframes: getKeyframes,
+        get_bone_pose: getBonePose,
         modify_cube: modifyCube,
         delete_element: deleteElement,
         reparent_element: reparentElement,
@@ -3479,7 +3760,8 @@ const options: PluginOptions = {
         texture_selection: textureSelection,
         texture_layer_management: textureLayerManagement,
         paint_pixel_matrix: paintPixelMatrix,
-        auto_shade: autoShade,
+        pack_uv: packUv,
+        validate_uv: validateUv,
       };
 
       let response: any;

@@ -368,12 +368,24 @@ export function createMockScene() {
       for (const r of rows) for (const ch of String(r)) if ("01234".includes(ch)) painted++;
       return { ok: true, texture: input.texture_id || "atlas", palette: input.palette, painted, origin: [input.origin?.x ?? 0, input.origin?.y ?? 0], size: [Math.max(...rows.map((r) => String(r).length)), rows.length] };
     },
-    auto_shade(input) {
-      if (!input.cube_id && !input.region) return { ok: false, error: "cube_id or region required" };
-      let painted = 0, regions = 0;
-      if (input.region) { regions = 1; painted = input.region.w * input.region.h; }
-      else { const c = findCube(input.cube_id); if (!c) return { ok: false, error: "cube not found" }; regions = Object.keys(c.faces || {}).length || 6; painted = regions * 16; }
-      return { ok: true, texture: input.texture_id || "atlas", palette: input.palette, style: input.style || "organic", regions, painted, layer: input.layer || null };
+    pack_uv(input) {
+      let cubes = [];
+      if (input.target) { const g = findGroup(input.target); if (g) walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); else { const c = findCube(input.target); if (c) cubes = [c]; } }
+      else walk(scene.roots, (n) => { if (n.type === "cube") cubes.push(n); });
+      if (!cubes.length) return { ok: false, error: "no cubes" };
+      let x = 0, W = 0, H = 0;
+      cubes.forEach((c) => {
+        const w = Math.abs((c.to?.[0] ?? 2) - (c.from?.[0] ?? 0)), h = Math.abs((c.to?.[1] ?? 2) - (c.from?.[1] ?? 0)), d = Math.abs((c.to?.[2] ?? 2) - (c.from?.[2] ?? 0));
+        const fw = Math.max(1, Math.ceil(2 * (w + d))), fh = Math.max(1, Math.ceil(h + d));
+        c.uv_offset = [x, 0]; x += fw + 1; W = x; H = Math.max(H, fh);
+      });
+      return { ok: true, cubes: cubes.length, texture_width: Math.max(16, W), texture_height: Math.max(16, H), packed_width: W, packed_height: H, box_uv: true, layout: cubes.map((c) => ({ name: c.name, uv_offset: c.uv_offset || [0, 0], footprint: [8, 8] })) };
+    },
+    validate_uv(input) {
+      let cubes = [];
+      if (input.target) { const g = findGroup(input.target); if (g) walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); else { const c = findCube(input.target); if (c) cubes = [c]; } }
+      else walk(scene.roots, (n) => { if (n.type === "cube") cubes.push(n); });
+      return { ok: true, valid: true, cubes: cubes.length, faces: cubes.length * 6, uv_mode: "box_uv", box_uv_cubes: cubes.length, texture: [16, 16], overlaps: 0, overlapping_pairs: [], out_of_bounds: 0, null_uv: 0, zero_size_uv: 0, recommendation: "UV layout is valid." };
     },
     get_scene_tree() { return { ok: true, tree: scene }; },
   };

@@ -7,23 +7,32 @@ description: Create and paint textures in Blockbench using MCP tools. Use when c
 
 Create and paint textures for 3D models using Blockbench MCP tools.
 
-## ★ Recommended workflow (read first)
-1. **One atlas.** `set_project` the texture size, then `create_texture` (add `layers: true` for
-   non-destructive base/shade/highlight passes). Minecraft/GeckoLib uses ONE atlas per model with box-UV.
-2. **Assign + map.** `apply_texture` on a cube, a mesh, or a whole **group** (textures every
-   descendant in one call). It uses Blockbench's native mapping + a render refresh.
-3. **Texture it — prefer `auto_shade`.** The easy, good-looking path: give a `cube_id` (shades the
-   cube's box-UV net by face orientation, with AO at the seams) or a `region`, plus a `palette` +
-   `style`. See the `blockbench-pixel-shading` skill. Use `paint_pixel_matrix` / the paint tools
-   only for hand-controlled motifs.
-4. **Verify.** `get_texture` (image) + `capture_screenshot`.
+## ★ Recommended workflow (read first — do these IN ORDER)
+1. **Build the geometry** (cubes/bones). Don't texture yet.
+2. **`pack_uv` — DO NOT SKIP.** Gives every cube its own non-overlapping atlas region AND sizes the
+   texture to fit the model. Without it, every cube's UV sits at `[0,0]` and overlaps, so any paint
+   pass overwrites the others → a garbled texture, and the atlas ends up far bigger than the model
+   uses. Run it once, after geometry: `pack_uv` (no args = all cubes).
+3. **`validate_uv` — the gate. NEVER paint on an invalid layout.** Confirms `valid: true`
+   (overlaps:0, out_of_bounds:0, null:0, zero_size:0). If it reports overlaps, re-run `pack_uv` and
+   validate again. This is what stops the AI from "thinking it succeeded" while every cube shares one
+   spot. (`get_scene_tree` also now shows each cube's `box_uv`/`autouv`/`uv_offset`.)
+4. **`create_texture`** — omit width/height so it uses the fitted size from `pack_uv`. Add
+   `layers: true` for non-destructive base/shade/highlight passes.
+5. **`apply_texture`** on a cube, mesh, or a whole **group** (textures every descendant in one call).
+6. **Paint it by hand with EXACT colours.** Because `pack_uv` gave each cube its own region, you can
+   now paint each region without bleed. Use `paint_pixel_matrix` (palette indices or your own art),
+   `paint_fill_tool` / `draw_shape_tool` / `gradient_tool` (these take real hex colours) — match the
+   reference's actual colours per part. There is NO auto-shader; see `blockbench-pixel-shading`.
+7. **Verify.** `get_texture` (image) + `capture_screenshot`.
 
-### ⚠ Critical: box-UV & `autouv`
-A box-UV cube is positioned on the atlas by its **`uv_offset`**, and that offset only STICKS when
-the cube's **`autouv` = 0**. Setting a manual `uv_offset` via `modify_cube` forces `autouv:0` for
-you. With `autouv:1`, Blockbench re-derives the box-UV and every cube collapses to `[0,0]` → the
-whole model samples one corner (the classic "everything is one colour" bug). A cube `(w,h,d)`
-occupies a footprint of `2·(w+d)` wide × `(h+d)` tall from its offset.
+### ⚠ Critical: UV must be packed first (the #1 texturing failure)
+By default ALL cubes' UV nets sit at the atlas origin and overlap — so the LAST thing you paint on
+that region wins and every other cube shows the wrong pixels. **`pack_uv` is the fix** (step 2). It
+works whether the format is box-UV (sets each cube's `uv_offset` + `autouv:0`) or per-face/GeckoLib
+(writes the explicit per-face UV rects). A cube `(w,h,d)` needs a footprint of `2·(w+d)` wide ×
+`(h+d)` tall. Manual alternative: `modify_cube` with a `uv_offset` (it forces `autouv:0` so the
+offset sticks; with `autouv:1` Blockbench re-collapses it to `[0,0]`).
 
 ## Available Tools
 
@@ -34,7 +43,8 @@ occupies a footprint of `2·(w+d)` wide × `(h+d)` tall from its offset.
 | `list_textures` | List all project textures |
 | `get_texture` | Get texture image data |
 | `apply_texture` | Apply texture to a cube/mesh/group (`apply_mode`: blank/all/none) |
-| `auto_shade` | **Auto-generate shaded pixel-art** (cube box-UV net or region) by palette + style |
+| `pack_uv` | Pack each cube's UV into its own region + fit the texture (run before painting) |
+| `validate_uv` | Check UVs (overlap/oob) before painting |
 
 ### Paint Tools
 | Tool | Purpose |
@@ -94,14 +104,11 @@ apply_texture: target="body", texture="skin", apply_mode="all"   # blank (defaul
 # target can be a cube, a mesh, or a GROUP (textures every descendant in one call)
 ```
 
-### Auto-Shade (recommended for good-looking results)
+### Pack UVs + fit the texture (do this BEFORE painting)
 
 ```
-# Shade a whole cube's box-UV net by face orientation (top lit → bottom dark, AO at seams):
-auto_shade: cube_id="blade", palette="iron", style="weapon_metal"
-
-# Or shade a flat atlas region, into a named layer:
-auto_shade: region={x: 0, y: 0, w: 16, h: 16}, palette="crystal_purple", style="crystal", layer="gem"
+pack_uv: {}            # every cube gets its own atlas region; texture sized to fit the model
+validate_uv: {}        # confirm valid (overlaps:0) before painting
 ```
 
 ## Painting
