@@ -20,10 +20,12 @@ Create and paint textures for 3D models using Blockbench MCP tools.
 4. **`create_texture`** — omit width/height so it uses the fitted size from `pack_uv`. Add
    `layers: true` for non-destructive base/shade/highlight passes.
 5. **`apply_texture`** on a cube, mesh, or a whole **group** (textures every descendant in one call).
-6. **Paint it by hand with EXACT colours.** Because `pack_uv` gave each cube its own region, you can
-   now paint each region without bleed. Use `paint_pixel_matrix` (palette indices or your own art),
-   `paint_fill_tool` / `draw_shape_tool` / `gradient_tool` (these take real hex colours) — match the
-   reference's actual colours per part. There is NO auto-shader; see `blockbench-pixel-shading`.
+6. **Texture each part — `shade_cube` is the easy, clean way.** `shade_cube {cube_id, color:"#hex"}`
+   paints a cube's faces with clean directional shading from your EXACT colour (top lit → bottom
+   shadow, sides gradient — no palette, no procedural noise). Use `target` (a group) to shade all its
+   cubes one colour, `edge_color` for a dark cutting edge, `sheen` for a blade highlight. For full hand
+   control use `paint_pixel_matrix` / `paint_fill_tool` / `draw_shape_tool` (all take real hex). Match
+   the reference's colours per part. (No procedural auto-shader; see `blockbench-pixel-shading`.)
 7. **Verify.** `get_texture` (image) + `capture_screenshot`.
 
 ### ⚠ Critical: UV must be packed first (the #1 texturing failure)
@@ -45,6 +47,7 @@ offset sticks; with `autouv:1` Blockbench re-collapses it to `[0,0]`).
 | `apply_texture` | Apply texture to a cube/mesh/group (`apply_mode`: blank/all/none) |
 | `pack_uv` | Pack each cube's UV into its own region + fit the texture (run before painting) |
 | `validate_uv` | Check UVs (overlap/oob) before painting |
+| `shade_cube` | **Shade a cube's faces from ONE exact hex** (clean directional, no palette/noise) |
 
 ### Paint Tools
 | Tool | Purpose |

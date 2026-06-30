@@ -1,6 +1,7 @@
 export type ToolType =
   | "hello_world"
   | "create_cube"
+  | "create_cubes"
   | "create_group"
   | "set_origin"
   | "set_rotation"
@@ -70,6 +71,7 @@ export type ToolType =
   | "create_mesh_face"
   | "create_cylinder"
   | "knife_tool"
+  | "list_actions"
   | "trigger_action"
   | "risky_eval"
   | "emulate_clicks"

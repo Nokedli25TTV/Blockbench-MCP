@@ -47,9 +47,50 @@ export function createMockScene() {
       else parent = selected;
       const from = input.from || [0, 0, 0];
       const to = input.to || [from[0] + (input.size || 8), from[1] + (input.size || 8), from[2] + (input.size || 8)];
-      const c = { type: "cube", uuid: randomUUID(), name: input.name || "element_1", from, to, origin: input.origin || from, rotation: [0, 0, 0], faces: {} };
+      const c = { type: "cube", uuid: randomUUID(), name: input.name || "element_1", from, to, origin: input.origin || from, rotation: [0, 0, 0], faces: {}, uv_offset: input.uv_offset };
       (parent ? parent.children : scene.roots).push(c);
       return { ok: true, name: c.name, from, to };
+    },
+    create_cubes(input) {
+      const groups = Array.isArray(input.groups) ? input.groups : [];
+      const cubes = Array.isArray(input.cubes) ? input.cubes : [];
+      if (!groups.length && !cubes.length) return { ok: false, error: "provide groups[] and/or cubes[]" };
+      // Pre-validate (all-or-nothing): unique names + resolvable parents.
+      const pending = new Set();
+      const batchGroups = new Set();
+      for (const g of groups) {
+        if (!g.name) return { ok: false, error: "group name required" };
+        if (taken(g.name) || pending.has(g.name)) return { ok: false, error: `Name "${g.name}" already exists` };
+        if (g.parent && !batchGroups.has(g.parent) && !findGroup(g.parent)) return { ok: false, error: `parent "${g.parent}" not found` };
+        pending.add(g.name); batchGroups.add(g.name);
+      }
+      for (const c of cubes) {
+        if (c.name && (taken(c.name) || pending.has(c.name))) return { ok: false, error: `Name "${c.name}" already exists` };
+        if (c.parent && !batchGroups.has(c.parent) && !findGroup(c.parent)) return { ok: false, error: `parent "${c.parent}" not found` };
+        if (c.name) pending.add(c.name);
+      }
+      // Apply.
+      const made = {};
+      const resolve = (name) => (name ? (made[name] || findGroup(name)) : null);
+      const createdGroups = [], createdCubes = [];
+      for (const g of groups) {
+        const node = { type: "group", uuid: randomUUID(), name: g.name, origin: g.origin || [0, 0, 0], rotation: [0, 0, 0], children: [] };
+        const parent = resolve(g.parent);
+        (parent ? parent.children : scene.roots).push(node);
+        made[g.name] = node; createdGroups.push(g.name);
+      }
+      let idx = 1;
+      for (const c of cubes) {
+        let name = c.name;
+        if (!name) { while (taken(`element_${idx}`) || pending.has(`element_${idx}`)) idx++; name = `element_${idx}`; pending.add(name); }
+        const from = c.from || [0, 0, 0];
+        const to = c.to || [from[0] + (c.size || 8), from[1] + (c.size || 8), from[2] + (c.size || 8)];
+        const node = { type: "cube", uuid: randomUUID(), name, from, to, origin: c.origin || from, rotation: [0, 0, 0], faces: {}, uv_offset: c.uv_offset };
+        const parent = resolve(c.parent);
+        (parent ? parent.children : scene.roots).push(node);
+        createdCubes.push(name);
+      }
+      return { ok: true, groups: createdGroups, cubes: createdCubes };
     },
     set_origin(input) {
       if (findCube(input.target)) return { ok: false, error: "target is a cube" };
@@ -333,6 +374,19 @@ export function createMockScene() {
     merge_mesh_vertices(input) { return { ok: true, mesh: input.mesh_id, merged: 0 }; },
     create_mesh_face(input) { return { ok: true, mesh: input.mesh_id || "mesh", face: "f0" }; },
     knife_tool(input) { return { ok: true, mesh: input.mesh_id, points: (input.points || []).length }; },
+    list_actions(input) {
+      input = input || {};
+      const all = [
+        { id: "add_cube", name: "Add Cube", description: "Add a cube", type: "Action", triggerable: true },
+        { id: "export_over", name: "Save", description: "Export over the file", type: "Action", triggerable: true },
+        { id: "add_group", name: "Add Group", description: "Add a group", type: "Action", triggerable: true },
+      ];
+      const q = (typeof input.search === "string" ? input.search : "").toLowerCase();
+      const limit = (typeof input.limit === "number" && input.limit > 0) ? Math.floor(input.limit) : 200;
+      const matched = q ? all.filter((a) => a.id.toLowerCase().includes(q) || (a.name || "").toLowerCase().includes(q) || (a.description || "").toLowerCase().includes(q)) : all;
+      const actions = matched.slice(0, limit);
+      return { ok: true, count: matched.length, truncated: matched.length > actions.length, actions };
+    },
     trigger_action(input) { return { ok: true, action: input.action, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
     risky_eval(input) { return { ok: true, result: "(eval ok)" }; },
     emulate_clicks() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
@@ -387,7 +441,58 @@ export function createMockScene() {
       else walk(scene.roots, (n) => { if (n.type === "cube") cubes.push(n); });
       return { ok: true, valid: true, cubes: cubes.length, faces: cubes.length * 6, uv_mode: "box_uv", box_uv_cubes: cubes.length, texture: [16, 16], overlaps: 0, overlapping_pairs: [], out_of_bounds: 0, null_uv: 0, zero_size_uv: 0, recommendation: "UV layout is valid." };
     },
-    get_scene_tree() { return { ok: true, tree: scene }; },
+    shade_cube(input) {
+      let cubes = [];
+      if (input.cube_id) { const c = findCube(input.cube_id); if (!c) return { ok: false, error: "cube not found" }; cubes = [c]; }
+      else if (input.target) { const g = findGroup(input.target); if (g) walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); else { const c = findCube(input.target); if (c) cubes = [c]; } }
+      else return { ok: false, error: "cube_id or target required" };
+      if (!input.color && !input.colors) return { ok: false, error: "color or colors required" };
+      let painted = 0; cubes.forEach((c) => { painted += Object.keys(c.faces || {}).length * 8; });
+      const ramp = input.colors ? input.colors.slice(0, 5) : [input.color, input.color, input.color, input.color, input.color];
+      return { ok: true, cubes: cubes.length, painted, texture: input.texture_id || "atlas", ramp, layer: input.layer || null };
+    },
+    get_bone_pose(input) {
+      const g = findGroup(input.bone_name);
+      if (!g) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+      // No THREE scene in the mock, so world_* are canned — this exercises the
+      // server-side field passthrough, NOT the real transform math (Blockbench-only).
+      return {
+        ok: true, bone: input.bone_name, time: input.time ?? null,
+        local_rotation: g.rotation || [0, 0, 0],
+        origin: g.origin || [0, 0, 0],
+        world_rotation: [0, 0, 0],
+        world_position: g.origin || [0, 0, 0],
+        world_bbox: { min: [0, -3, 0], max: [4, 5, 4], lowest_y: -3 },
+      };
+    },
+    get_scene_tree(input) {
+      input = input || {};
+      const hasFilter = Array.isArray(input.bone_names) || input.include_faces !== undefined || input.max_depth !== undefined;
+      if (!hasFilter) return { ok: true, tree: scene }; // default path unchanged
+      const includeFaces = input.include_faces !== false;
+      const maxDepth = (typeof input.max_depth === "number" && input.max_depth >= 0) ? Math.floor(input.max_depth) : undefined;
+      const mapNode = (node, depth) => {
+        if (node.type === "group") {
+          const out = { type: "group", uuid: node.uuid, name: node.name, origin: node.origin, rotation: node.rotation };
+          const kids = node.children || [];
+          if (maxDepth !== undefined && depth >= maxDepth) { out.children = []; if (kids.length) out.truncated_children = kids.length; }
+          else out.children = kids.map((c) => mapNode(c, depth + 1));
+          return out;
+        }
+        const cube = { type: "cube", uuid: node.uuid, name: node.name, from: node.from, to: node.to, origin: node.origin, rotation: node.rotation, uv_offset: node.uv_offset };
+        if (includeFaces) cube.faces = node.faces || {};
+        return cube;
+      };
+      let rootNodes, notFound;
+      const requested = Array.isArray(input.bone_names) ? input.bone_names.filter(Boolean) : [];
+      if (requested.length) {
+        rootNodes = []; notFound = [];
+        for (const n of requested) { const g = findGroup(n); if (g) rootNodes.push(g); else notFound.push(n); }
+      } else rootNodes = scene.roots;
+      const tree = { roots: rootNodes.map((n) => mapNode(n, 0)), textures: scene.textures, format: scene.format || null, mesh_count: scene.mesh_count || 0 };
+      if (notFound && notFound.length) tree.requested_bones_not_found = notFound;
+      return { ok: true, tree };
+    },
   };
 
   return { scene, handlers, findGroup, findCube };

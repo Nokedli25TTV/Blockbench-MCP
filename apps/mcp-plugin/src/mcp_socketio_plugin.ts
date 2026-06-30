@@ -221,6 +221,20 @@ const options: PluginOptions = {
     const isVec3 = (v: any): v is [number, number, number] =>
       Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && isFinite(n));
 
+    const isVec2 = (v: any): v is [number, number] =>
+      Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === 'number' && isFinite(n));
+
+    // Resolve the {autouv, uv_offset} a cube should be built/extended with. A manual
+    // uv_offset implies box-UV lock (autouv:0) unless the caller overrides it —
+    // otherwise Blockbench re-derives box-UV and the offset collapses to [0,0] (the
+    // recurring "everything one colour" bug). Mirrors modify_cube's rule.
+    const resolveCubeUv = (input: { uv_offset?: any; autouv?: any }): { autouv: 0 | 1 | 2; uv_offset?: [number, number] } => {
+      const autouv = input.autouv !== undefined
+        ? (Number(input.autouv) as 0 | 1 | 2)
+        : (input.uv_offset !== undefined ? 0 : 1);
+      return input.uv_offset !== undefined ? { autouv, uv_offset: input.uv_offset } : { autouv };
+    };
+
     const nonZeroAxes = (v: number[]): number => v.filter((n) => Math.abs(n) > 1e-6).length;
 
     const allCubes = (): any[] => (typeof Cube !== 'undefined' && (Cube as any).all) ? (Cube as any).all : [];
@@ -243,6 +257,8 @@ const options: PluginOptions = {
       size?: number;
       origin?: [number, number, number];
       parent?: string;
+      uv_offset?: [number, number];
+      autouv?: 0 | 1 | 2 | "0" | "1" | "2";
     }): { ok: boolean; name?: string; from?: number[]; to?: number[]; error?: string } => {
       try {
         console.log('[MCP Plugin] createCube called with', input);
@@ -268,6 +284,9 @@ const options: PluginOptions = {
         }
         if (input.size !== undefined && (typeof input.size !== 'number' || !isFinite(input.size) || input.size <= 0)) {
           return { ok: false, error: "'size' must be a positive finite number (rule #5)." };
+        }
+        if (input.uv_offset !== undefined && !isVec2(input.uv_offset)) {
+          return { ok: false, error: "'uv_offset' must be 2 finite numbers [u,v]." };
         }
 
         const rawFrom: [number, number, number] = input.from || [0, 0, 0];
@@ -311,12 +330,14 @@ const options: PluginOptions = {
         let cube: any = null;
         let createError: any = null;
         try {
+          // autouv:1 = Box UV auto-mapping so faces aren't left at [0,0] on export;
+          // a manual uv_offset flips it to autouv:0 (box-UV lock) so the offset sticks.
           cube = new Cube({
             name,
-            autouv: 1, // Box UV auto-mapping so faces aren't left at [0,0] on export.
             from,
             to,
             origin: input.origin || from,
+            ...resolveCubeUv(input),
           }).init();
 
           if (parentGroup) {
@@ -403,6 +424,125 @@ const options: PluginOptions = {
       }
     };
 
+    // Batch-create a whole sub-hierarchy (groups + cubes) in ONE call and ONE undo
+    // step — the single biggest tool-call reducer (a 25-cube model drops from ~50
+    // calls to 1). Everything is validated UP FRONT (names, vecs, parent refs) so the
+    // batch either fully applies or fails cleanly with nothing created. A parent may
+    // reference a group created EARLIER in this batch's groups[] or one that already
+    // exists. Groups are created first (in array order), then cubes.
+    const createCubes = (input: {
+      groups?: Array<{ name?: string; parent?: string; origin?: [number, number, number] }>;
+      cubes?: Array<{ name?: string; from?: [number, number, number]; to?: [number, number, number]; size?: number; origin?: [number, number, number]; parent?: string; uv_offset?: [number, number]; autouv?: 0 | 1 | 2 | "0" | "1" | "2" }>;
+    }): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open — create or open a model first.' };
+        const groups = Array.isArray(input.groups) ? input.groups : [];
+        const cubes = Array.isArray(input.cubes) ? input.cubes : [];
+        if (groups.length === 0 && cubes.length === 0) {
+          return { ok: false, error: 'Provide at least one group or cube to create (groups[] and/or cubes[]).' };
+        }
+
+        // ---- Pre-validation: no side effects, so a bad batch creates nothing ----
+        const pending = new Set<string>();        // names that WILL exist after this batch
+        const batchGroupNames = new Set<string>(); // group names declared in-batch, for parent refs
+        const reserve = (n: string): string | null => {
+          if (nameTaken(n)) return `Name "${n}" already exists (rule #4) — names must be unique.`;
+          if (pending.has(n)) return `Name "${n}" is used twice within the batch (rule #4).`;
+          pending.add(n);
+          return null;
+        };
+
+        for (let i = 0; i < groups.length; i++) {
+          const g = groups[i];
+          if (!g || !g.name) return { ok: false, error: `groups[${i}]: a unique, descriptive name is required (rule #4).` };
+          if (g.origin !== undefined && !isVec3(g.origin)) return { ok: false, error: `groups[${i}] ("${g.name}"): 'origin' must be 3 finite numbers [x,y,z] (rule #1).` };
+          if (g.parent && !batchGroupNames.has(g.parent) && !findGroupByName(g.parent)) {
+            return { ok: false, error: `groups[${i}] ("${g.name}"): parent "${g.parent}" not found. Declare it earlier in groups[] or create it first.` };
+          }
+          const err = reserve(g.name); if (err) return { ok: false, error: `groups[${i}]: ${err}` };
+          batchGroupNames.add(g.name);
+        }
+        for (let i = 0; i < cubes.length; i++) {
+          const c = cubes[i];
+          if (!c) return { ok: false, error: `cubes[${i}]: missing entry.` };
+          for (const key of ['from', 'to', 'origin'] as const) {
+            if (c[key] !== undefined && !isVec3(c[key])) return { ok: false, error: `cubes[${i}]: '${key}' must be 3 finite numbers [x,y,z] (rule #5).` };
+          }
+          if (c.size !== undefined && (typeof c.size !== 'number' || !isFinite(c.size) || c.size <= 0)) {
+            return { ok: false, error: `cubes[${i}]: 'size' must be a positive finite number (rule #5).` };
+          }
+          if (c.uv_offset !== undefined && !isVec2(c.uv_offset)) return { ok: false, error: `cubes[${i}]: 'uv_offset' must be 2 finite numbers [u,v].` };
+          if (c.parent && !batchGroupNames.has(c.parent) && !findGroupByName(c.parent)) {
+            return { ok: false, error: `cubes[${i}]: parent "${c.parent}" not found. Declare it in groups[] or create it first.` };
+          }
+          if (c.name) { const err = reserve(c.name); if (err) return { ok: false, error: `cubes[${i}]: ${err}` }; }
+        }
+
+        // ---- Apply in a single undo transaction --------------------------------
+        const createdGroupsByName = new Map<string, any>();
+        const createdGroups: any[] = [];
+        const createdCubes: any[] = [];
+        // A parent resolves to a group made in THIS batch first, else an existing one.
+        // Note: unlike create_cube, the batch never falls back to Group.selected —
+        // parents are always explicit, so the result is deterministic.
+        const resolveParent = (name?: string): any =>
+          name ? (createdGroupsByName.get(name) || findGroupByName(name)) : null;
+
+        Undo.initEdit({ elements: [], outliner: true, selection: true });
+        let failure: string | null = null;
+        try {
+          for (const g of groups) {
+            const group = new Group({ name: g.name!, origin: g.origin || [0, 0, 0] }).init();
+            const parent = resolveParent(g.parent);
+            if (parent) group.addTo(parent);
+            createdGroupsByName.set(g.name!, group);
+            createdGroups.push(group);
+          }
+          let autoIdx = 1;
+          for (const c of cubes) {
+            let name = c.name;
+            if (!name) { while (nameTaken(`element_${autoIdx}`) || pending.has(`element_${autoIdx}`)) autoIdx++; name = `element_${autoIdx}`; pending.add(name); }
+            const rawFrom: [number, number, number] = c.from || [0, 0, 0];
+            const size = typeof c.size === 'number' ? c.size : 8;
+            const rawTo: [number, number, number] = c.to || [rawFrom[0] + size, rawFrom[1] + size, rawFrom[2] + size];
+            const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
+            const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
+            const cube = new Cube({ name, from, to, origin: c.origin || from, ...resolveCubeUv(c) }).init();
+            const parent = resolveParent(c.parent);
+            if (parent) cube.addTo(parent);
+            createdCubes.push(cube);
+          }
+        } catch (e: any) {
+          failure = e?.message || String(e);
+        }
+
+        if (failure) {
+          // Never leave a half-built tree: roll the whole batch back.
+          if (typeof (Undo as any).cancelEdit === 'function') {
+            (Undo as any).cancelEdit();
+          } else {
+            for (const el of [...createdCubes, ...createdGroups]) { try { el.remove(); } catch { /* */ } }
+            Undo.finishEdit('Create cubes via MCP (rolled back)', { elements: [], outliner: true, selection: true });
+          }
+          if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+          return { ok: false, error: `Batch failed and was rolled back (nothing created): ${failure}` };
+        }
+
+        Undo.finishEdit('Create cubes via MCP', { elements: createdCubes, outliner: true, selection: true });
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        const groupNames = createdGroups.map((g) => g.name);
+        const cubeNames = createdCubes.map((c) => c.name);
+        Blockbench.showStatusMessage(`[MCP] Created ${groupNames.length} group(s) + ${cubeNames.length} cube(s).`, 4000);
+        logToHistory(`batch created ${groupNames.length} group(s) + ${cubeNames.length} cube(s)`);
+        return { ok: true, groups: groupNames, cubes: cubeNames };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createCubes failed:', err);
+        logToHistory('error: ' + (err?.message || String(err)));
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
     // Set the pivot/origin of a GROUP (rule #1: pivot-first). Rejects cubes.
     const setOrigin = (input: { target?: string; origin?: [number, number, number] }): any => {
       try {
@@ -474,30 +614,39 @@ const options: PluginOptions = {
     };
 
     // Return the full outliner hierarchy + registered textures as a plain JSON tree.
-    const getSceneTree = (): any => {
+    // Optional filters keep the payload small on big models (the default — no
+    // filters — returns the FULL tree, byte-for-byte as before, which validate_model
+    // relies on): `bone_names` scopes the result to those bones' subtrees,
+    // `include_faces:false` drops per-cube face data, `max_depth` caps nesting.
+    const getSceneTree = (input?: { bone_names?: string[]; include_faces?: boolean; max_depth?: number }): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const includeFaces = input?.include_faces !== false; // default true (back-compat)
+        const maxDepth = (typeof input?.max_depth === 'number' && isFinite(input.max_depth) && input.max_depth >= 0)
+          ? Math.floor(input.max_depth) : undefined;
 
-        const mapNode = (node: any): any => {
+        const mapNode = (node: any, depth: number): any => {
           const isGroup = (typeof Group !== 'undefined' && node instanceof Group) || node.type === 'group';
           if (isGroup) {
-            return {
+            const out: any = {
               type: 'group',
               uuid: node.uuid,
               name: node.name,
               origin: node.origin ? [...node.origin] : [0, 0, 0],
               rotation: node.rotation ? [...node.rotation] : [0, 0, 0],
-              children: (node.children || []).map(mapNode),
             };
-          }
-          const faces: Record<string, { texture: string | null }> = {};
-          if (node.faces) {
-            for (const f of Object.keys(node.faces)) {
-              const t = node.faces[f] ? node.faces[f].texture : null;
-              faces[f] = { texture: t ? String(t) : null };
+            const kids = node.children || [];
+            if (maxDepth !== undefined && depth >= maxDepth) {
+              // Cap reached: omit deeper nodes but tell the caller how many were hidden
+              // so it can re-query that subtree with bone_names + a larger max_depth.
+              out.children = [];
+              if (kids.length) out.truncated_children = kids.length;
+            } else {
+              out.children = kids.map((c: any) => mapNode(c, depth + 1));
             }
+            return out;
           }
-          return {
+          const cube: any = {
             type: 'cube',
             uuid: node.uuid,
             name: node.name,
@@ -510,11 +659,37 @@ const options: PluginOptions = {
             box_uv: !!node.box_uv,
             autouv: node.autouv,
             uv_offset: node.uv_offset ? [...node.uv_offset] : undefined,
-            faces,
           };
+          if (includeFaces) {
+            const faces: Record<string, { texture: string | null }> = {};
+            if (node.faces) {
+              for (const f of Object.keys(node.faces)) {
+                const t = node.faces[f] ? node.faces[f].texture : null;
+                faces[f] = { texture: t ? String(t) : null };
+              }
+            }
+            cube.faces = faces;
+          }
+          return cube;
         };
 
-        const roots = (typeof Outliner !== 'undefined' && Outliner.root ? Outliner.root : []).map(mapNode);
+        // Scope to specific bones' subtrees if requested; otherwise the outliner roots.
+        let rootNodes: any[];
+        let notFound: string[] | undefined;
+        const requested = Array.isArray(input?.bone_names)
+          ? input!.bone_names.filter((n) => typeof n === 'string' && n) : [];
+        if (requested.length) {
+          rootNodes = [];
+          notFound = [];
+          for (const n of requested) {
+            const g = findGroupByName(n);
+            if (g) rootNodes.push(g); else notFound.push(n);
+          }
+        } else {
+          rootNodes = (typeof Outliner !== 'undefined' && Outliner.root ? Outliner.root : []);
+        }
+
+        const roots = rootNodes.map((n) => mapNode(n, 0));
         const textures = (typeof Texture !== 'undefined' && (Texture as any).all ? (Texture as any).all : []).map(
           (t: any) => ({ uuid: t.uuid, name: t.name })
         );
@@ -522,7 +697,9 @@ const options: PluginOptions = {
         // cubes-only format (GeckoLib renders cubes, not meshes → silent loss).
         const format = (typeof Format !== 'undefined') ? { id: (Format as any).id, meshes: !!(Format as any).meshes } : null;
         const mesh_count = (typeof Mesh !== 'undefined' && (Mesh as any).all) ? (Mesh as any).all.length : 0;
-        return { ok: true, tree: { roots, textures, format, mesh_count } };
+        const tree: any = { roots, textures, format, mesh_count };
+        if (notFound && notFound.length) tree.requested_bones_not_found = notFound;
+        return { ok: true, tree };
       } catch (err: any) {
         console.error('[MCP Plugin] getSceneTree failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -1242,22 +1419,46 @@ const options: PluginOptions = {
         if (input.time !== undefined) {
           try { ensureAnimationMode(); (Timeline as any).time = input.time; if (typeof Animator !== 'undefined' && (Animator as any).preview) (Animator as any).preview(); } catch { /* */ }
         }
-        let world: number[] | null = null;
+        let world_rotation: number[] | null = null;
+        let world_position: number[] | null = null;
+        let world_bbox: { min: number[]; max: number[]; lowest_y: number } | null = null;
         try {
           const mesh = (group as any).mesh;
-          if (mesh && typeof THREE !== 'undefined' && mesh.getWorldQuaternion) {
-            if (mesh.updateWorldMatrix) mesh.updateWorldMatrix(true, false);
-            const q = new (THREE as any).Quaternion(); mesh.getWorldQuaternion(q);
-            const e = new (THREE as any).Euler().setFromQuaternion(q, 'ZYX');
-            const deg = (r: number) => Math.round((r * 180 / Math.PI) * 100) / 100;
-            world = [deg(e.x), deg(e.y), deg(e.z)];
+          if (mesh && typeof THREE !== 'undefined') {
+            // Update parents AND children so both the bone transform and the
+            // descendant geometry reflect the (animated) pose for the bbox below.
+            if (mesh.updateWorldMatrix) mesh.updateWorldMatrix(true, true);
+            const r2 = (n: number) => Math.round(n * 100) / 100;
+            if (mesh.getWorldQuaternion) {
+              const q = new (THREE as any).Quaternion(); mesh.getWorldQuaternion(q);
+              const e = new (THREE as any).Euler().setFromQuaternion(q, 'ZYX');
+              const deg = (r: number) => r2(r * 180 / Math.PI);
+              world_rotation = [deg(e.x), deg(e.y), deg(e.z)];
+            }
+            if (mesh.getWorldPosition) {
+              const p = new (THREE as any).Vector3(); mesh.getWorldPosition(p);
+              world_position = [r2(p.x), r2(p.y), r2(p.z)]; // bone pivot in scene/world space
+            }
+            // World-space AABB of this bone's geometry + ALL descendant cubes at this
+            // time — the numeric answer to "is anything below the floor?" (lowest_y).
+            // Empty bones (no descendant geometry) yield an empty box → left null.
+            try {
+              const box = new (THREE as any).Box3().setFromObject(mesh);
+              if (box && isFinite(box.min.x) && isFinite(box.max.x)) {
+                world_bbox = {
+                  min: [r2(box.min.x), r2(box.min.y), r2(box.min.z)],
+                  max: [r2(box.max.x), r2(box.max.y), r2(box.max.z)],
+                  lowest_y: r2(box.min.y),
+                };
+              }
+            } catch { /* bbox is best-effort */ }
           }
         } catch { /* world is best-effort */ }
         return {
           ok: true, bone: input.bone_name, time: input.time ?? null,
           local_rotation: group.rotation ? [...group.rotation] : null,
           origin: group.origin ? [...group.origin] : null,
-          world_rotation: world,
+          world_rotation, world_position, world_bbox,
         };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
@@ -1514,8 +1715,8 @@ const options: PluginOptions = {
               model_identifier: (Project as any).model_identifier || null,
               save_path: (Project as any).save_path || null,
             },
-            plugin_build: '2026-06-16-batch2', // bump on each plugin rebuild to confirm the loaded build
-            tool_count: 109,
+            plugin_build: '2026-06-16-shadecube', // bump on each plugin rebuild to confirm the loaded build
+            tool_count: 110,
             format: { id: fmt ? fmt.id : null, name: fmt ? (fmt.display_name || fmt.name) : null, animation_mode: fmt ? !!fmt.animation_mode : false },
             resolution: { texture_width: (Project as any).texture_width || null, texture_height: (Project as any).texture_height || null },
             counts: {
@@ -1828,6 +2029,22 @@ const options: PluginOptions = {
         }
         if (!selectedProject) return { ok: false, error: 'No project found.' };
         if (!selectedProject.selected) selectedProject.select();
+
+        // If a time is given, evaluate the (selected or named) animation at that moment
+        // SYNCHRONOUSLY before rendering. Otherwise the screenshot races the timeline and
+        // can capture the bind/rest pose instead of the animated frame — the same evaluate-
+        // then-measure pattern get_bone_pose uses. No time = render the current pose as-is.
+        if (input.time !== undefined) {
+          try {
+            ensureAnimationMode();
+            if (input.animation_id) {
+              const anim = findAnimation(input.animation_id);
+              if (anim && typeof anim.select === 'function') anim.select();
+            }
+            (Timeline as any).time = input.time;
+            if (typeof Animator !== 'undefined' && (Animator as any).preview) (Animator as any).preview();
+          } catch { /* best-effort: fall back to the current pose */ }
+        }
 
         const preview = (Preview as any).selected;
         if (!preview) return { ok: false, error: 'No preview available for the selected project.' };
@@ -2894,10 +3111,43 @@ const options: PluginOptions = {
     // UI + import tools (ported from upstream ui.ts + import.ts). Power tools:
     // trigger any Blockbench action, fill dialogs, eval (escape hatch), import geo.
     // ---------------------------------------------------------------------
+    // Discovery companion for trigger_action: without it, trigger_action is a blind
+    // string interface (no way to know valid BarItems ids). Returns the action list,
+    // filterable by a search substring, with a `triggerable` flag per entry.
+    const listActions = (input: any): any => {
+      try {
+        if (typeof BarItems === 'undefined' || !BarItems) return { ok: false, error: 'BarItems not available in this Blockbench build.' };
+        const q = (typeof input?.search === 'string' ? input.search : '').toLowerCase();
+        const limit = (typeof input?.limit === 'number' && input.limit > 0) ? Math.floor(input.limit) : 200;
+        const all = Object.keys(BarItems as any).map((id) => {
+          const a: any = (BarItems as any)[id];
+          const kb = (a?.keybind && typeof a.keybind.label === 'string' && a.keybind.label) ? a.keybind.label : undefined;
+          return {
+            id,
+            name: a?.name ?? undefined,
+            description: a?.description ?? undefined,
+            type: a?.constructor?.name ?? undefined,
+            category: a?.category ?? undefined,
+            keybind: kb,
+            triggerable: !!(a && (typeof a.trigger === 'function' || typeof a.click === 'function')),
+          };
+        });
+        const matched = q
+          ? all.filter((a) => a.id.toLowerCase().includes(q) || (a.name || '').toLowerCase().includes(q) || (a.description || '').toLowerCase().includes(q))
+          : all;
+        const total = matched.length;
+        const actions = matched.slice(0, limit);
+        return { ok: true, count: total, truncated: total > actions.length, actions };
+      } catch (e: any) {
+        console.error('[MCP Plugin] listActions failed:', e);
+        return { ok: false, error: e?.message || String(e) };
+      }
+    };
+
     const triggerAction = async (input: any): Promise<any> => {
       try {
         if (typeof BarItems === 'undefined' || !(input.action in (BarItems as any))) {
-          return { ok: false, error: `Action "${input.action}" not found.` };
+          return { ok: false, error: `Action "${input.action}" not found. Use list_actions (optionally with a search) to discover valid action ids.` };
         }
         let parsedArgs: any = {};
         if (input.confirmEvent) { try { parsedArgs = JSON.parse(input.confirmEvent); } catch { return { ok: false, error: 'Invalid JSON in confirmEvent.' }; } }
@@ -3629,8 +3879,74 @@ const options: PluginOptions = {
             ? 'Run pack_uv to fix overlapping/out-of-bounds UVs, then re-validate before painting.'
             : warnings
               ? 'Safe to paint — no overlaps. (Some zero-size/null faces exist, e.g. billboard/collapsed faces; harmless.)'
-              : 'UV layout is valid — safe to paint / auto_shade.',
+              : 'UV layout is valid — safe to paint / shade_cube.',
         };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // ---------------------------------------------------------------------
+    // shade_cube: paint a cube's faces with CLEAN directional shading from ONE
+    // exact colour (or a 5-hex ramp) — no palette lock, no procedural noise. This
+    // is the per-cube logic that made the hand-authored sword texture look good,
+    // as a tool: top face lit, sides a top→bottom gradient, bottom in shadow,
+    // optional dark cutting-edge colour and a centre sheen on broad faces. Reads
+    // each face's packed UV rect, so run pack_uv + validate_uv first.
+    // ---------------------------------------------------------------------
+    const shadeCube = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        let cubes: any[] = [];
+        if (input.cube_id) { const c = findCubeByNameOrUuid(input.cube_id); if (!c) return { ok: false, error: `Cube "${input.cube_id}" not found.` }; cubes = [c]; }
+        else if (input.target) {
+          const g = findGroupByName(input.target); if (!g) return { ok: false, error: `"${input.target}" is not a group.` };
+          const collect = (grp: any) => { for (const ch of grp.children || []) { if (typeof Cube !== 'undefined' && ch instanceof Cube) cubes.push(ch); else if (typeof Group !== 'undefined' && ch instanceof Group) collect(ch); } };
+          collect(g); if (!cubes.length) return { ok: false, error: `Group "${input.target}" has no descendant cubes.` };
+        } else return { ok: false, error: 'Provide cube_id (one cube) or target (a group of cubes).' };
+
+        let ramp: string[];
+        if (Array.isArray(input.colors) && input.colors.length >= 5) ramp = input.colors.slice(0, 5).map((c: any) => String(c));
+        else if (input.color) ramp = rampFromBase(String(input.color));
+        else return { ok: false, error: 'Provide color (one hex → auto ramp) or colors (5 hex shadow→highlight).' };
+        const edgeColor = input.edge_color ? String(input.edge_color) : null;
+        const sheen = !!input.sheen;
+
+        const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
+        let painted = 0;
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          const TW = canvas.width, TH = canvas.height;
+          for (const cube of cubes) {
+            for (const fk of Object.keys(cube.faces || {})) {
+              const uv = cube.faces[fk] && cube.faces[fk].uv;
+              if (!uv || uv.length < 4) continue;
+              const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
+              const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
+              const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
+              const isEdge = (fk === 'east' || fk === 'west');
+              const isBroad = (fk === 'north' || fk === 'south');
+              for (let ly = 0; ly < h; ly++) for (let lx = 0; lx < w; lx++) {
+                const px = x0 + lx, py = y0 + ly; if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
+                if (isEdge && edgeColor) { ctx.fillStyle = edgeColor; ctx.fillRect(px, py, 1, 1); painted++; continue; }
+                let idx: number;
+                if (fk === 'up') idx = 4;
+                else if (fk === 'down') idx = 0;
+                else {
+                  const t = h > 1 ? ly / (h - 1) : 0;          // 0 top → 1 bottom
+                  idx = t < 0.30 ? 3 : t < 0.72 ? 2 : 1;       // clean bands, NO noise
+                  if (isEdge) idx = Math.max(0, idx - 1);      // thin edges a touch darker
+                  if (sheen && isBroad && w >= 3 && Math.abs(lx - (w - 1) / 2) < 0.6) idx = Math.min(4, idx + 1);
+                }
+                ctx.fillStyle = ramp[idx]; ctx.fillRect(px, py, 1, 1); painted++;
+              }
+            }
+          }
+        }, { edit_name: 'Shade cube' });
+        Undo.finishEdit('Shade cube via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`shaded ${cubes.length} cube(s), ${painted}px on "${texture.name}"`);
+        return { ok: true, cubes: cubes.length, painted, texture: texture.name, ramp, layer: layer ? layer.name : null };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -3659,6 +3975,7 @@ const options: PluginOptions = {
           return { ok: true, tool: 'hello_world' };
         },
         create_cube: createCube,
+        create_cubes: createCubes,
         create_group: createGroup,
         set_origin: setOrigin,
         set_rotation: setRotation,
@@ -3730,6 +4047,7 @@ const options: PluginOptions = {
         create_mesh_face: createMeshFace,
         select_mesh_elements: selectMeshElements,
         knife_tool: knifeTool,
+        list_actions: listActions,
         trigger_action: triggerAction,
         risky_eval: riskyEval,
         emulate_clicks: emulateClicks,
@@ -3762,6 +4080,7 @@ const options: PluginOptions = {
         paint_pixel_matrix: paintPixelMatrix,
         pack_uv: packUv,
         validate_uv: validateUv,
+        shade_cube: shadeCube,
       };
 
       let response: any;

@@ -120,6 +120,8 @@ try {
   // 7.7 Phase 5 — camera & screenshots (return MCP image content).
   const ss = await h.call("capture_screenshot");
   check("capture_screenshot returns image", !ss.isError && ss.raw?.content?.[0]?.type === "image");
+  const ssT = await h.call("capture_screenshot", { time: 0.2 });
+  check("capture_screenshot accepts time (animation frame) and returns image", !ssT.isError && ssT.raw?.content?.[0]?.type === "image");
   const ca = await h.call("set_camera_angle", { position: [30, 20, 30], projection: "perspective" });
   check("set_camera_angle returns image", !ca.isError && ca.raw?.content?.[0]?.type === "image");
 
@@ -180,6 +182,10 @@ try {
   check("move_mesh_vertices works", !mv.isError);
 
   // 7.99 Phase 12 — UI + import.
+  const actsAll = JSON.parse((await h.call("list_actions")).text);
+  check("list_actions lists actions with ids", Array.isArray(actsAll.actions) && actsAll.actions.some((a) => a.id === "add_cube"));
+  const actsExport = JSON.parse((await h.call("list_actions", { search: "export" })).text);
+  check("list_actions search filters", actsExport.actions.every((a) => /export/i.test(a.id + a.name + a.description)) && actsExport.actions.length >= 1);
   const ta = await h.call("trigger_action", { action: "add_cube" });
   check("trigger_action returns image", !ta.isError && ta.raw?.content?.[0]?.type === "image");
   const ev = await h.call("risky_eval", { code: "1+1" });
@@ -219,6 +225,8 @@ try {
   check("pack_uv packs cubes + fits texture", !pk.isError && pk.text.includes("Packed"));
   const vu = await h.call("validate_uv", {});
   check("validate_uv reports a verdict", !vu.isError && (vu.text.includes("VALID") || vu.text.includes("INVALID")));
+  const sc = await h.call("shade_cube", { cube_id: "staff_handle", color: "#cc2233" });
+  check("shade_cube shades a cube from one hex", !sc.isError && sc.text.includes("Shaded"));
 
   // 8. validate_model — should PASS on this clean, GeckoLib-safe model.
   const validation = await h.call("validate_model");

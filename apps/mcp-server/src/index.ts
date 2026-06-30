@@ -36,12 +36,71 @@ io.on("connection", (socket) => {
   });
 });
 
+// Fail fast (and loudly) if the port is already taken. The #1 real-world failure
+// is two MCP clients (Claude Desktop AND a Claude Code session) each spawning a
+// server on 9999: the loser otherwise hangs silently until the client's ~4-minute
+// timeout, and every call appears to "time out". Surface the real cause instead.
+httpServer.on("error", (err: any) => {
+  if (err && err.code === "EADDRINUSE") {
+    log(
+      `FATAL: bridge port ${PORT} is already in use. Another MCP server already owns the ` +
+        `Blockbench bridge (e.g. Claude Desktop AND a Claude Code session both started one). ` +
+        `Only one server may own port ${PORT} at a time — close the other client/server and ` +
+        `restart, or set MCP_BRIDGE_PORT to use a different port.`
+    );
+  } else {
+    log("FATAL: bridge HTTP server error:", err);
+  }
+  process.exit(1);
+});
+
 httpServer.listen(PORT, () => {
   log(`Socket.IO bridge listening on http://localhost:${PORT}`);
 });
 
+// Per-tool timeout tiers. A single global 8s timeout makes genuinely-slow but
+// CORRECT operations (codec export, UV packing, rendering, whole-scene reads)
+// fail spuriously — and a spurious failure is worse than slow: the plugin may
+// STILL apply the edit after the server gave up, leaving the model and the AI's
+// view out of sync (a retry then duplicates it). Give heavy tools real headroom;
+// everything else keeps a tight default so a genuinely hung call surfaces fast.
+// Typed as Record<string, number> (not Record<ToolType,…>) so tools that exist at
+// runtime but aren't in the shared ToolType union (pack_uv/validate_uv/shade_cube)
+// can be tuned here too.
+const DEFAULT_TIMEOUT_MS = 10_000;
+const TOOL_TIMEOUTS: Record<string, number> = {
+  // Render + PNG encode, or drive the UI then screenshot.
+  capture_screenshot: 30_000,
+  capture_app_screenshot: 30_000,
+  set_camera_angle: 30_000,
+  trigger_action: 30_000,
+  emulate_clicks: 30_000,
+  // Codec compile of the whole project / all animations.
+  export_model: 60_000,
+  export_animations: 60_000,
+  // Whole-scene reads / validation that pull the full tree.
+  get_scene_tree: 20_000,
+  validate_model: 20_000,
+  validate_uv: 20_000,
+  find_elements_by_criteria: 20_000,
+  // Batch geometry creation can build a whole model in one call.
+  create_cubes: 30_000,
+  // Geometry/UV packing and large canvas paints.
+  pack_uv: 30_000,
+  paint_pixel_matrix: 20_000,
+  shade_cube: 20_000,
+  draw_shape_tool: 20_000,
+  gradient_tool: 20_000,
+  paint_fill_tool: 20_000,
+  // Fetches a remote URL, or runs arbitrary user code.
+  from_geo_json: 30_000,
+  risky_eval: 30_000,
+};
+const timeoutFor = (tool: ToolType): number => TOOL_TIMEOUTS[tool] ?? DEFAULT_TIMEOUT_MS;
+
 /** Send a command to the Blockbench plugin and await its ack (result object). */
-function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs = 8000): Promise<any> {
+function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?: number): Promise<any> {
+  const ms = timeoutMs ?? timeoutFor(tool);
   return new Promise((resolve, reject) => {
     if (!blockbench || blockbench.disconnected) {
       reject(
@@ -55,8 +114,8 @@ function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs 
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      reject(new Error("Timed out waiting for a response from Blockbench."));
-    }, timeoutMs);
+      reject(new Error(`Timed out waiting for a response from Blockbench after ${ms}ms (tool: ${tool}).`));
+    }, ms);
     blockbench.emit("tool_command", { tool, input }, (response: any) => {
       if (settled) return;
       settled = true;
@@ -68,7 +127,25 @@ function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs 
 
 // Helpers to turn a plugin ack into an MCP tool result.
 const ok = (text: string) => ({ content: [{ type: "text" as const, text }] });
-const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text }] });
+// Classify a failure message into a stable, machine-readable code so the AI can
+// branch on the KIND of error instead of parsing prose. Derived from the message
+// (plugin handlers already return descriptive strings) and prepended as `[CODE] ` —
+// additive: the full human-readable text is preserved after the code.
+function errorCode(text: string): string {
+  const m = (text || "").toLowerCase();
+  if (m.includes("not connected")) return "NOT_CONNECTED";
+  if (m.includes("timed out") || m.includes("timeout")) return "TIMEOUT";
+  if (m.includes("no project")) return "NO_PROJECT";
+  if (m.includes("already exists") || /used \d+ times/.test(m)) return "DUPLICATE_NAME";
+  if (m.includes("multi-axis") || m.includes("cannot be rotated") || m.includes("rotated on")) return "ILLEGAL_ROTATION";
+  if (m.includes("not registered") || m.includes("missing texture")) return "MISSING_TEXTURE";
+  if (m.includes("not found") || m.includes("could not find")) return "NOT_FOUND";
+  if (m.includes("does not support") || m.includes("not compatible") || m.includes("renders only cubes") || m.includes("unsupported")) return "FORMAT_UNSUPPORTED";
+  if (m.includes(" uv") || m.includes("overlap")) return "UV_ERROR";
+  if (m.includes("finite numbers") || m.includes("must be") || m.includes("required") || m.includes("inverted") || m.includes("invalid")) return "INVALID_INPUT";
+  return "ERROR";
+}
+const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text: `[${errorCode(text)}] ${text}` }] });
 // Turn a data: URL into MCP image content (falls back to text if not a data URL).
 const image = (dataUrl: string) => {
   const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
@@ -147,9 +224,62 @@ server.registerTool(
       size: z.number().optional().describe("Edge length when 'to' is omitted. Default 8."),
       origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from'."),
       parent: z.string().optional().describe("Name of a group/bone to nest this cube under (rule #6)."),
+      uv_offset: z
+        .array(z.number())
+        .length(2)
+        .optional()
+        .describe("Box-UV offset [u,v] on the atlas. Setting it locks the cube to autouv:0 so it sticks (avoids the 'everything one colour' collapse) — saves a follow-up modify_cube call."),
+      autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off (manual box-UV), 1 on (default), 2 relative."),
     },
   },
   async (args) => forward("create_cube", args, (r) => `Created cube "${r.name ?? args.name ?? "cube"}".`)
+);
+
+server.registerTool(
+  "create_cubes",
+  {
+    title: "Create Cubes (batch)",
+    description:
+      "Create a whole sub-hierarchy — many groups/bones AND cubes — in ONE call and ONE undo step. " +
+      "This is the efficient way to build geometry: a 25-cube model goes from ~50 tool calls to 1. " +
+      "Groups are created first (in array order), then cubes; a parent may reference a group declared " +
+      "EARLIER in groups[] or one that already exists. Same per-element rules as create_cube/create_group " +
+      "(unique names, single-axis via nesting, optional box-UV offset). The batch is validated up front and " +
+      "is ALL-OR-NOTHING: if anything is invalid, nothing is created.",
+    inputSchema: {
+      groups: z
+        .array(
+          z.object({
+            name: z.string().describe("Unique, descriptive bone name."),
+            parent: z.string().optional().describe("Parent group: a name from earlier in groups[] or an existing group."),
+            origin: vec3.optional().describe("Pivot/origin [x,y,z] (define before rotating)."),
+          })
+        )
+        .optional()
+        .describe("Groups/bones to create, in dependency order (parents before children)."),
+      cubes: z
+        .array(
+          z.object({
+            name: z.string().optional().describe("Unique, descriptive name. Auto-generated if omitted."),
+            from: vec3.optional().describe("Lower corner [x,y,z]. Default [0,0,0]."),
+            to: vec3.optional().describe("Upper corner [x,y,z]. If omitted, derived from 'from' + 'size'."),
+            size: z.number().optional().describe("Edge length when 'to' is omitted. Default 8."),
+            origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from'."),
+            parent: z.string().optional().describe("Group to nest under: a name from groups[] or an existing group."),
+            uv_offset: z.array(z.number()).length(2).optional().describe("Box-UV offset [u,v] (locks autouv:0 so it sticks)."),
+            autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off, 1 on (default), 2 relative."),
+          })
+        )
+        .optional()
+        .describe("Cubes to create. Each may nest under a group from groups[] or an existing one."),
+    },
+  },
+  async (args) =>
+    forward("create_cubes", args, (r) =>
+      `Created ${(r.groups || []).length} group(s) + ${(r.cubes || []).length} cube(s).` +
+      ((r.groups || []).length ? ` Groups: ${(r.groups || []).join(", ")}.` : "") +
+      ((r.cubes || []).length ? ` Cubes: ${(r.cubes || []).join(", ")}.` : "")
+    )
 );
 
 server.registerTool(
@@ -212,13 +342,31 @@ server.registerTool(
     title: "Get Scene Tree",
     description:
       "Return the current outliner hierarchy (groups + cubes, with origins, rotations, faces) and the " +
-      "registered textures, as JSON. Use before acting to verify state (rule #3/#8).",
-    inputSchema: {},
+      "registered textures, as JSON. Use before acting to verify state (rule #3/#8). On big models, narrow " +
+      "the payload with the optional filters: `bone_names` returns ONLY those bones' subtrees, " +
+      "`include_faces:false` drops per-cube face data, and `max_depth` caps nesting (a capped group reports " +
+      "`truncated_children` so you can re-query that subtree). With no filters it returns the FULL tree.",
+    inputSchema: {
+      bone_names: z
+        .array(z.string())
+        .optional()
+        .describe("Only return the subtrees rooted at these bone/group names. Omit for the whole tree."),
+      include_faces: z
+        .boolean()
+        .optional()
+        .describe("Include per-cube face/texture data. Default true; set false to shrink the payload when you only need geometry."),
+      max_depth: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Max nesting depth below each returned root (0 = roots only). Capped groups report `truncated_children`. Omit for unlimited."),
+    },
   },
-  async () => {
+  async (args) => {
     let r: any;
     try {
-      r = await sendToBlockbench("get_scene_tree", {});
+      r = await sendToBlockbench("get_scene_tree", args);
     } catch (e: any) {
       return fail(e?.message || String(e));
     }
@@ -367,7 +515,9 @@ server.registerTool(
       "Create a new named animation with keyframes for bones (GeckoLib/Bedrock style). " +
       "Each bone key must be an EXISTING group name (verify with get_scene_tree first — rule #3/#8). " +
       "Keyframe times are in seconds; rotation in degrees; multi-axis keyframe values are fine for " +
-      "animations (the single-axis rule applies to static model rotation, not keyframes).",
+      "animations (the single-axis rule applies to static model rotation, not keyframes). " +
+      "Rotation sign can differ between the Blockbench UI and the exported GeckoLib/Bedrock JSON — " +
+      "calibrate direction ONCE with get_bone_pose rather than assuming a sign.",
     inputSchema: {
       name: z.string().describe("Animation name (without the 'animation.' prefix). Must be unique."),
       loop: z.boolean().optional().describe("Whether the animation loops. Default false."),
@@ -409,7 +559,9 @@ server.registerTool(
     title: "Manage Keyframes",
     description:
       "Create, delete, edit, or select keyframes for one bone and channel in an animation. " +
-      "The bone group must exist and the animation must exist (or be selected).",
+      "The bone group must exist and the animation must exist (or be selected). After writing, confirm " +
+      "with get_keyframes (catches silent write failures). Rotation sign can differ between the BB UI " +
+      "and exported GeckoLib JSON — calibrate once with get_bone_pose instead of assuming a direction.",
     inputSchema: {
       animation_id: animationIdOptional,
       action: z.enum(["create", "delete", "edit", "select"]).describe("Action to perform."),
@@ -591,12 +743,16 @@ server.registerTool(
 server.registerTool(
   "get_bone_pose",
   {
-    title: "Get Bone Pose (measure rotation)",
+    title: "Get Bone Pose (measure rotation + world position)",
     description:
-      "Measure a bone's rotation by NUMBER instead of guessing it from a camera angle — returns its local " +
-      "rotation/origin AND its world-space rotation in degrees. Use it to CALIBRATE rotation direction ONCE at " +
-      "the start (set a known +X on a bone, read world_rotation, note which way +X tilts), then never guess " +
-      "again. Pass `time` to evaluate the selected animation at that moment first.",
+      "Measure a bone by NUMBER instead of guessing from a camera angle. Returns its local rotation/origin, " +
+      "its world-space rotation (degrees), its world-space pivot POSITION, and `world_bbox` — the world-space " +
+      "bounding box of the bone + all its descendant cubes, with `lowest_y`. Pass `time` to evaluate the " +
+      "selected animation at that moment FIRST, so all values are for that animated frame. Two key uses: " +
+      "(1) CALIBRATE rotation direction once (set a known +X, read world_rotation, note which way it tilts); " +
+      "(2) GROUND-CLIPPING — read `world_bbox.lowest_y` at the relevant times to check numerically whether the " +
+      "model dips below the floor, instead of eyeballing a screenshot. Coordinates are Blockbench scene/world " +
+      "space; if you need an absolute ground plane, calibrate once against a bone you know sits on the floor.",
     inputSchema: {
       bone_name: z.string().describe("Bone/group name."),
       time: z.number().optional().describe("Seconds — evaluate the selected animation at this time before measuring."),
@@ -606,7 +762,7 @@ server.registerTool(
     let r: any;
     try { r = await sendToBlockbench("get_bone_pose", args); } catch (e: any) { return fail(e?.message || String(e)); }
     if (r && r.ok === false) return fail(`get_bone_pose failed: ${r.error}`);
-    return ok(JSON.stringify({ bone: r.bone, time: r.time, local_rotation: r.local_rotation, world_rotation: r.world_rotation, origin: r.origin }, null, 2));
+    return ok(JSON.stringify({ bone: r.bone, time: r.time, local_rotation: r.local_rotation, world_rotation: r.world_rotation, world_position: r.world_position, world_bbox: r.world_bbox, origin: r.origin }, null, 2));
   }
 );
 
@@ -1122,8 +1278,15 @@ server.registerTool(
     title: "Capture Screenshot",
     description:
       "Render the current 3D preview and return it as an image. Use this to SEE the model and verify " +
-      "visual results (geometry, textures) directly instead of relying on the user's viewport.",
-    inputSchema: { project: z.string().optional().describe("Project name/uuid; default the open one.") },
+      "visual results (geometry, textures) directly instead of relying on the user's viewport. To verify an " +
+      "ANIMATION frame, pass `time` (seconds) — the tool evaluates the animation at that moment right before " +
+      "rendering, so you get the posed frame, NOT the rest pose (without it, a screenshot after animation_timeline " +
+      "set_time can race the timeline and show the bind pose). Pass `animation_id` to pick which animation.",
+    inputSchema: {
+      project: z.string().optional().describe("Project name/uuid; default the open one."),
+      time: z.number().optional().describe("Seconds — evaluate the animation at this moment before rendering (for posed/animation frames)."),
+      animation_id: z.string().optional().describe("Animation UUID or name to evaluate at `time`. Default: the selected animation."),
+    },
   },
   async (args) => forwardImage("capture_screenshot", args)
 );
@@ -1543,6 +1706,34 @@ server.registerTool(
     )
 );
 
+server.registerTool(
+  "shade_cube",
+  {
+    title: "Shade Cube (exact colour)",
+    description:
+      "Paint a cube's faces with CLEAN directional shading from ONE exact colour — top face lit, sides a " +
+      "top→bottom gradient, bottom in shadow — with NO palette lock and NO procedural noise. This is the " +
+      "reliable way to texture to a reference colour (the per-cube logic behind a good hand-made skin, as a " +
+      "tool). Give `cube_id` (one cube) or `target` (a group → all its cubes, same colour) plus `color` (one " +
+      "hex → auto hue-shifted ramp) or `colors` (5 hex shadow→highlight). Run pack_uv + validate_uv FIRST so " +
+      "each cube has its own UV region (otherwise cubes overwrite each other).",
+    inputSchema: {
+      cube_id: z.string().optional().describe("One cube name/uuid to shade."),
+      target: z.string().optional().describe("Group name → shade all its descendant cubes the same colour (use instead of cube_id)."),
+      color: z.string().optional().describe("⭐ One hex (e.g. '#cc2233') → clean hue-shifted ramp, your colour at the mid. The normal way to hit a reference colour."),
+      colors: z.array(z.string()).min(5).max(5).optional().describe("Full control: 5 hex [shadow → highlight]. Overrides color."),
+      edge_color: z.string().optional().describe("Optional hex for the thin east/west faces (e.g. a dark blade outline / cutting edge)."),
+      sheen: z.boolean().optional().describe("Add a brighter centre stripe on the broad north/south faces (blade sheen / blood-groove look)."),
+      texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
+      layer: z.string().optional().describe("TextureLayer name to paint into (non-destructive; created if missing)."),
+    },
+  },
+  async (args) =>
+    forward("shade_cube", args, (r) =>
+      `Shaded ${r.cubes} cube(s) (${r.painted}px) on "${r.texture}"${r.layer ? ` (layer ${r.layer})` : ""}. Ramp: ${(r.ramp || []).join(" ")}`
+    )
+);
+
 // ---------------------------------------------------------------------------
 // Remaining paint tools (ported from upstream paint.ts).
 // ---------------------------------------------------------------------------
@@ -1753,14 +1944,36 @@ server.registerTool(
 // UI + import tools (ported from upstream ui.ts + import.ts).
 // ---------------------------------------------------------------------------
 server.registerTool(
+  "list_actions",
+  {
+    title: "List Actions",
+    description:
+      "List the Blockbench BarItems action ids you can pass to trigger_action — the discovery companion so " +
+      "you don't have to guess action strings. Filter with `search` (matches id / name / description; e.g. " +
+      "'export', 'cube'). Each entry has id, name, description, type, keybind, and a `triggerable` flag.",
+    inputSchema: {
+      search: z.string().optional().describe("Case-insensitive substring matched against id/name/description."),
+      limit: z.number().int().min(1).max(1000).optional().describe("Max actions to return. Default 200."),
+    },
+  },
+  async (args) => {
+    let r: any;
+    try { r = await sendToBlockbench("list_actions", args); } catch (e: any) { return fail(e?.message || String(e)); }
+    if (r && r.ok === false) return fail(`list_actions failed: ${r.error}`);
+    return ok(JSON.stringify({ count: r.count, truncated: r.truncated, actions: r.actions }, null, 2));
+  }
+);
+
+server.registerTool(
   "trigger_action",
   {
     title: "Trigger Action",
     description:
       "Trigger any Blockbench action by its BarItems id (e.g. 'add_cube', 'export_over'). Returns an app " +
-      "screenshot. Powerful escape hatch for actions without a dedicated MCP tool.",
+      "screenshot. Powerful escape hatch for actions without a dedicated MCP tool. Discover valid ids with " +
+      "list_actions (it won't guess for you).",
     inputSchema: {
-      action: z.string().describe("BarItems action id."),
+      action: z.string().describe("BarItems action id (find it with list_actions)."),
       confirmDialog: z.boolean().optional().describe("Auto-confirm a resulting dialog (default true)."),
       confirmEvent: z.string().optional().describe("Stringified JSON event args."),
     },

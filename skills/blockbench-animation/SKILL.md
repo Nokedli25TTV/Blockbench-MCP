@@ -13,7 +13,16 @@ Create animations for 3D models using Blockbench MCP tools.
   the stored values in its ack. Catches silent write failures in round 1, not round 5.
 - **Calibrate rotation direction ONCE, up front.** Don't guess "forward/back" from a camera angle —
   set a known +X on a bone, call **`get_bone_pose`** to read its world-space rotation (a number),
-  note "for this rig +X = forward/back", then never guess again.
+  note "for this rig +X = forward/back", then never guess again. **Sign conventions can differ
+  between the Blockbench UI display and the exported GeckoLib/Bedrock JSON** — a rotation can read one
+  way in the editor and the opposite in-game. Trust the calibrated `get_bone_pose` number, not the
+  viewport, and don't hard-code an assumed sign flip.
+- **Check ground-clipping by NUMBER, not by eye.** `get_bone_pose` with a `time` also returns
+  `world_position` (the bone's animated pivot) and `world_bbox.lowest_y` (the lowest point of the
+  bone + its cubes at that moment). Read `lowest_y` at the key times to see if the model dips below
+  the floor — calibrate the floor once against a bone you know rests on the ground. To VERIFY a pose
+  visually, call `capture_screenshot` with a `time`: it evaluates that frame before rendering,
+  otherwise the screenshot can show the rest pose instead of the animated one.
 - **GeckoLib renders CUBES only — no meshes.** Model the whole mob/item from cubes in a
   Bedrock/GeckoLib format from minute one. A mesh model means redo geometry + UVs + texture near
   export. (`validate_model` / `export_model` warn if meshes are present.)
@@ -38,7 +47,7 @@ Create animations for 3D models using Blockbench MCP tools.
 | `create_animation` | Create animation with keyframes for bones |
 | `manage_keyframes` | Create/edit/delete keyframes per bone and channel (echoes stored values) |
 | `get_keyframes` | **Read back the actually-stored keyframe values** (verify writes) |
-| `get_bone_pose` | **Measure a bone's local + world rotation** (calibrate direction by number) |
+| `get_bone_pose` | **Measure a bone's local + world rotation, world position & bbox** (calibrate direction / check ground-clipping by number) |
 | `animation_graph_editor` | Fine-tune animation curves (smooth, linear, ease) |
 | `animation_timeline` | Control playback, time, FPS, loop settings |
 | `batch_keyframe_operations` | Batch operations: offset, scale, reverse, mirror |
