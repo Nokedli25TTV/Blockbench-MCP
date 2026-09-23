@@ -134,10 +134,13 @@ only that `uv` offset — NOT per-face texture assignments.
 
 - A cube of size `(w,h,d)` occupies a box-UV footprint of **`2·(w+d)` wide × `(h+d)` tall**, anchored
   at `uv_offset`. Size each atlas region ≥ the largest net that uses it.
-- **CRITICAL:** `uv_offset` only sticks when the cube's **`autouv` = 0**. With `autouv = 1` Blockbench
-  re-derives box-UV automatically and every cube collapses toward `[0,0]` → the whole model samples
-  one corner (the recurring "everything is one colour / grey" bug). In a `.bbmodel` the field is
-  `uv_offset` on the element; per-face `faces[].uv` rects are derived from it, not the source of truth.
+- `uv_offset` only sticks when the cube's **`autouv` = 0** — and the tools handle that: a manual
+  `uv_offset` (`create_cube(s)`, `modify_cube(s)`) switches the cube to `autouv:0`, `pack_uv` locks
+  every cube it packs, and `apply_texture` only re-maps cubes still in auto mode. (The old "everything
+  is one colour / grey" bug came from `apply_texture` calling `mapAutoUV()` on every cube, which
+  overwrote deliberate offsets — fixed.) New cubes without an offset all sit at `[0,0]` and overlap
+  until `pack_uv`, so always pack before painting. In a `.bbmodel` the field is `uv_offset` on the
+  element; per-face `faces[].uv` rects are derived from it, not the source of truth.
 - Painting tools (`draw_shape_tool`, `gradient_tool`, `paint_fill_tool`) write **directly to the
   texture canvas** via `texture.edit(canvas => ctx…)`. (Earlier they used the Blockbench Painter UI
   API — `Painter.startPaintTool/useShapeTool` — which **no-ops when driven headlessly**; the
@@ -145,8 +148,9 @@ only that `uv` offset — NOT per-face texture assignments.
 - For real pixel art use **`paint_pixel_matrix`** + a palette from `palettes.ts` (index `0`=shadow →
   `4`=highlight). It renders an index-matrix 1px/cell → crisp, anti-aliasing-free, palette-locked.
 
-Recommended order: `set_project` (texture size) → `create_texture` (atlas) → paint the atlas regions
-→ `apply_texture` (cube or whole group) → `modify_cube { uv_offset, autouv:"0" }` per cube.
+Recommended order (as in the `blockbench-texturing` skill): build the geometry → `pack_uv` (every cube
+its own region, texture sized to fit) → `validate_uv` → `create_texture` (no size) → `apply_texture`
+(cube or whole group) → paint: `shade_cubes` for per-part colours, `paint_pixel_matrix` for detail.
 
 ## 7. Conventions & guardrails
 
