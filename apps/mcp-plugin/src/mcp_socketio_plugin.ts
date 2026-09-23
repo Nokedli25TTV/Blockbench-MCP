@@ -2822,7 +2822,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           (src.children || []).forEach((child: any, i: number) => { if (cp.children?.[i]) adjust(child, cp.children[i], false); });
         };
 
-        Undo.initEdit({ elements: [], outliner: true, selection: true } as any);
+        // Same aspects as Blockbench's own "Duplicate group": new groups go in "groups",
+        // everything else in "elements" — with outliner alone, undo left new groups behind.
+        Undo.initEdit({ elements: [], groups: [], outliner: true, selection: true } as any);
         let copy: any = null;
         try {
           copy = (element as any).duplicate();
@@ -2832,9 +2834,13 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           Undo.cancelEdit(false);
           return { ok: false, error: `duplicate_element failed, nothing was kept: ${e?.message || String(e)}` };
         }
-        // Groups are recorded by the outliner aspect; "elements" takes only cubes/meshes/locators.
         const isGroup = (n: any) => typeof Group !== 'undefined' && n instanceof Group;
-        Undo.finishEdit('Duplicate element via MCP', { elements: copies.filter((n) => !isGroup(n)), outliner: true, selection: true } as any);
+        Undo.finishEdit('Duplicate element via MCP', {
+          elements: copies.filter((n) => !isGroup(n)),
+          groups: copies.filter(isGroup),
+          outliner: true,
+          selection: true,
+        } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
         logToHistory(`duplicated "${element.name}" → "${copy.name}" (${copies.length} element(s))`);
         return { ok: true, source: element.name, name: copy.name, uuid: copy.uuid, count: copies.length, names: copies.map((n) => n.name) };
