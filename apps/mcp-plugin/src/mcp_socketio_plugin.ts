@@ -12,7 +12,7 @@ let commandListElement: HTMLElement;
 const commandHistory: Array<{ timestamp: Date; type: 'sent' | 'received'; command: string; data?: any }> = [];
 // Reported by get_project_info so you can confirm Blockbench loaded THIS build
 // after a rebuild (File → Plugins → reload). Bump it whenever the plugin changes.
-const PLUGIN_BUILD = '2026-09-23-r2';
+const PLUGIN_BUILD = '2026-09-23-r3';
 let pluginToolCount = 0; // set from the dispatch map on every tool call
 
 const options: PluginOptions = {
@@ -30,7 +30,9 @@ const options: PluginOptions = {
   website: "https://github.com/enfpdev/blockbench-mcp",
   repository: "https://github.com/enfpdev/blockbench-mcp",
   onload: () => {
-    const socket = io("http://localhost:9999");
+    // 127.0.0.1, not "localhost": the server binds to IPv4 loopback only, and
+    // "localhost" may resolve to IPv6 ::1 first on Windows.
+    const socket = io("http://127.0.0.1:9999");
     mcpSocket = socket;
 
     // Function to update the command history HTML
@@ -883,20 +885,54 @@ const options: PluginOptions = {
     const isAnimationSelected = (anim: any): boolean =>
       !!anim && (((Animator as any).selected === anim) || ((Animation as any).selected === anim) || anim.selected === true);
 
+    const allAnimations = (): any[] => (typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : [];
+
+    // Resolve by UUID, exact name, or short name (create_animation prefixes
+    // "animation."). With no id: the selected animation, or — when the project has
+    // exactly one — that one, so single-animation work never fails on "nothing
+    // selected" (5 such errors in the June logs).
     const findAnimation = (idOrName?: string): any => {
-      const all = (typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : [];
+      const all = allAnimations();
       if (idOrName) {
-        // Resolve by UUID, exact name, or short name (create_animation prefixes "animation.").
         return (
           all.find((a: any) => a.uuid === idOrName || a.name === idOrName) ||
           all.find((a: any) => a.name === `animation.${idOrName}`)
         );
       }
-      return (Animation as any).selected;
+      return (Animation as any).selected || (all.length === 1 ? all[0] : undefined);
+    };
+
+    // Timeline/preview only act on the SELECTED animation: select the only one if
+    // nothing is selected yet. Returns the selected animation or undefined.
+    const ensureSelectedAnimation = (): any => {
+      let selected = (Animation as any).selected;
+      const all = allAnimations();
+      if (!selected && all.length === 1 && typeof all[0].select === 'function') {
+        try { all[0].select(); } catch { /* */ }
+        selected = (Animation as any).selected || all[0];
+      }
+      return selected;
+    };
+
+    // One "which animation?" error that tells the caller what exists.
+    const animationNotFound = (idOrName?: string): string => {
+      const names = allAnimations().map((a: any) => a.name);
+      const list = names.length
+        ? ` Available: ${names.slice(0, 20).join(', ')}${names.length > 20 ? ', …' : ''}.`
+        : ' The project has no animations yet — create one with create_animation.';
+      return idOrName ? `Animation "${idOrName}" not found.${list}` : `No animation selected — pass animation_id.${list}`;
     };
 
     // Clipboard for animation_copy_paste (module-scoped, survives across calls).
     let animationClipboard: any = null;
+
+    // Blockbench's Bedrock/GeckoLib animation codec flips signs between the file and
+    // the values Blockbench stores and shows — measured live 2026-09-23: rotation X
+    // and Y, position X; scale unchanged. create_animation imports through that
+    // codec, so it pre-flips its input: every animation tool then speaks the STORED
+    // convention (what get_keyframes and the Blockbench UI show), and export flips back.
+    const toBedrockRotation = (v: number[]): number[] => [-v[0], -v[1], v[2]];
+    const toBedrockPosition = (v: number[]): number[] => [-v[0], v[1], v[2]];
 
     // Create a complete animation from per-bone keyframes via Animator.loadFile
     // (bedrock animation JSON — the same path Blockbench uses for imports).
@@ -927,8 +963,8 @@ const options: PluginOptions = {
               const boneData: Record<string, Record<string, any>> = {};
               (keyframes || []).forEach((kf: any) => {
                 const timeKey = String(kf.time);
-                if (kf.position) (boneData.position ??= {})[timeKey] = kf.position;
-                if (kf.rotation) (boneData.rotation ??= {})[timeKey] = kf.rotation;
+                if (kf.position) (boneData.position ??= {})[timeKey] = toBedrockPosition(kf.position);
+                if (kf.rotation) (boneData.rotation ??= {})[timeKey] = toBedrockRotation(kf.rotation);
                 if (kf.scale !== undefined) (boneData.scale ??= {})[timeKey] = kf.scale;
               });
               return [boneName, boneData];
@@ -998,7 +1034,7 @@ const options: PluginOptions = {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         ensureAnimationMode();
         const animation = findAnimation(input.animation_id);
-        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        if (!animation) return { ok: false, error: animationNotFound(input.animation_id) };
         const group = findGroupByName(input.bone_name);
         if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found. Use get_scene_tree to inspect.` };
         if (!input.channel) return { ok: false, error: 'channel is required (rotation/position/scale).' };
@@ -1086,7 +1122,7 @@ const options: PluginOptions = {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         ensureAnimationMode();
         const animation = findAnimation(input.animation_id);
-        if (!animation) return { ok: false, error: 'No animation found or selected. Pass animation_id.' };
+        if (!animation) return { ok: false, error: animationNotFound(input.animation_id) };
         const entries: any[] = Array.isArray(input.keyframes) ? input.keyframes : [];
         if (!entries.length) return { ok: false, error: 'keyframes[] is required (each: bone, channel, time, values).' };
 
@@ -1165,7 +1201,7 @@ const options: PluginOptions = {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         ensureAnimationMode();
         const animation = findAnimation(input.animation_id);
-        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        if (!animation) return { ok: false, error: animationNotFound(input.animation_id) };
         const group = findGroupByName(input.bone_name);
         if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
         const animator = animation.animators[group.uuid];
@@ -1236,11 +1272,11 @@ const options: PluginOptions = {
         // the timeline only acts on the selected animation).
         if (input.animation_id) {
           const anim = findAnimation(input.animation_id);
-          if (!anim) return { ok: false, error: `Animation "${input.animation_id}" not found (use UUID, full name, or short name).` };
+          if (!anim) return { ok: false, error: animationNotFound(input.animation_id) };
           if (typeof anim.select === 'function') anim.select();
         }
-        const selected = (Animation as any).selected;
-        if (!selected) return { ok: false, error: 'No animation selected. Pass animation_id or create one first.' };
+        const selected = ensureSelectedAnimation();
+        if (!selected) return { ok: false, error: animationNotFound() };
 
         let message = '';
         switch (input.action) {
@@ -1284,8 +1320,8 @@ const options: PluginOptions = {
       try {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         ensureAnimationMode();
-        const selected = (Animation as any).selected;
-        if (!selected) return { ok: false, error: 'No animation selected.' };
+        const selected = ensureSelectedAnimation();
+        if (!selected) return { ok: false, error: animationNotFound() };
         const params = input.parameters || {};
 
         let kfs: any[] = [];
@@ -1507,7 +1543,7 @@ const options: PluginOptions = {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         if (!input.animation_id) return { ok: false, error: 'animation_id (UUID, full or short name) is required.' };
         const anim = findAnimation(input.animation_id);
-        if (!anim) return { ok: false, error: `Animation "${input.animation_id}" not found (use list_animations).` };
+        if (!anim) return { ok: false, error: animationNotFound(input.animation_id) };
         const all = () => ((typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : []);
 
         if (input.action === 'delete') {
@@ -1560,7 +1596,7 @@ const options: PluginOptions = {
       try {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         const animation = findAnimation(input.animation_id);
-        if (!animation) return { ok: false, error: 'No animation found or selected.' };
+        if (!animation) return { ok: false, error: animationNotFound(input.animation_id) };
         const chans = input.channel ? [input.channel] : KEYFRAME_CHANNELS;
 
         if (input.bone_name && !Array.isArray(input.bone_names)) {
@@ -1596,6 +1632,32 @@ const options: PluginOptions = {
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
+    // World AABB of the ELEMENTS (cubes, meshes) under an outliner node (a group, or
+    // the outliner root when `node` is null). Only element geometry counts: the
+    // earlier Box3.setFromObject(group.mesh) also swept in editor helpers — a selected
+    // bone's pivot_marker gizmo (±5.5 units) — which is why lowest_y read -5.11
+    // instead of -0.19 (measured live 2026-09-23). Returns null when there is none.
+    const elementsWorldBox = (node: any): any => {
+      const T = (globalThis as any).THREE;
+      if (!T) return null;
+      const box = new T.Box3();
+      const tmp = new T.Box3();
+      const visit = (children: any[]) => {
+        for (const ch of children || []) {
+          if (typeof Group !== 'undefined' && ch instanceof Group) { visit(ch.children); continue; }
+          const m = ch && ch.mesh;
+          const geo = m && m.geometry;
+          if (!geo) continue;
+          if (m.updateWorldMatrix) m.updateWorldMatrix(true, false);
+          geo.computeBoundingBox();
+          tmp.copy(geo.boundingBox).applyMatrix4(m.matrixWorld);
+          box.union(tmp);
+        }
+      };
+      visit(node ? node.children : ((typeof Outliner !== 'undefined' && Outliner.root) ? Outliner.root : []));
+      return box.isEmpty() ? null : box;
+    };
+
     // Measure a bone's rotation — local AND world-space (degrees) — so rotation
     // direction can be CALIBRATED by number, not guessed from a camera angle.
     // Optionally evaluate the selected animation at `time` first.
@@ -1627,12 +1689,12 @@ const options: PluginOptions = {
               const p = new (THREE as any).Vector3(); mesh.getWorldPosition(p);
               world_position = [r2(p.x), r2(p.y), r2(p.z)]; // bone pivot in scene/world space
             }
-            // World-space AABB of this bone's geometry + ALL descendant cubes at this
-            // time — the numeric answer to "is anything below the floor?" (lowest_y).
-            // Empty bones (no descendant geometry) yield an empty box → left null.
+            // World-space AABB of the bone's descendant elements at this time — the
+            // numeric answer to "is anything below the floor?" (lowest_y). Empty
+            // bones (no descendant geometry) yield no box → left null.
             try {
-              const box = new (THREE as any).Box3().setFromObject(mesh);
-              if (box && isFinite(box.min.x) && isFinite(box.max.x)) {
+              const box = elementsWorldBox(group);
+              if (box) {
                 world_bbox = {
                   min: [r2(box.min.x), r2(box.min.y), r2(box.min.z)],
                   max: [r2(box.max.x), r2(box.max.y), r2(box.max.z)],
@@ -1649,6 +1711,91 @@ const options: PluginOptions = {
           world_rotation, world_position, world_bbox,
         };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // One-call animation lint for the mistakes that otherwise take screenshot
+    // rounds: keyframes past the end, suspicious rotation jumps, loops that pop,
+    // keyframes on bones that no longer exist, and (with floor_y) the model dipping
+    // below the floor — found by sampling the whole animation numerically.
+    const checkAnimation = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        const animation = findAnimation(input.animation_id);
+        if (!animation) return { ok: false, error: animationNotFound(input.animation_id) };
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        const length = Number(animation.length) || 0;
+        const loopMode = animation.loop;
+        const maxJump = typeof input.max_jump === 'number' && input.max_jump > 0 ? input.max_jump : 90;
+        const issues: Array<{ severity: 'error' | 'warning' | 'info'; rule: string; message: string }> = [];
+        const add = (severity: 'error' | 'warning' | 'info', rule: string, message: string) => issues.push({ severity, rule, message });
+        const boneNames = new Set(allGroups().map((g: any) => g.name));
+        const keyTimes = new Set<number>();
+        let bones = 0, keyframes = 0;
+
+        for (const an of Object.values(animation.animators || {}) as any[]) {
+          if (!an || !an.name || (an.constructor && an.constructor.name === 'EffectAnimator')) continue;
+          let animated = false;
+          for (const ch of KEYFRAME_CHANNELS) {
+            const kfs = readChannel(an, ch);
+            if (!kfs.length) continue;
+            animated = true;
+            keyframes += kfs.length;
+            for (const k of kfs) {
+              keyTimes.add(k.time);
+              if (length > 0 && k.time > length + 1e-3) add('warning', 'beyond-length', `${an.name}.${ch} has a keyframe at ${k.time}s, after the ${length}s end — it never plays.`);
+            }
+            if (ch === 'rotation') {
+              for (let i = 1; i < kfs.length; i++) {
+                const a = kfs[i - 1].values, b = kfs[i].values;
+                if (![...a, ...b].every((v: any) => typeof v === 'number')) continue;
+                const d = Math.max(...[0, 1, 2].map((j) => Math.abs(b[j] - a[j])));
+                if (d > maxJump) add('warning', 'rotation-jump', `${an.name}.rotation turns ${r2(d)}° between ${kfs[i - 1].time}s and ${kfs[i].time}s — an intended spin, or a sign/unit mistake?`);
+              }
+            }
+            if (loopMode === 'loop' && length > 0 && kfs.length >= 2) {
+              const first = kfs[0], last = kfs[kfs.length - 1];
+              if (first.time <= 1e-3 && Math.abs(last.time - length) <= 1e-3) {
+                const diff = Math.max(...[0, 1, 2].map((j) => Math.abs(Number(first.values[j]) - Number(last.values[j]))));
+                if (diff > 0.01) add('warning', 'loop-seam', `${an.name}.${ch} starts at [${first.values.join(', ')}] but ends at [${last.values.join(', ')}] — the loop will visibly pop.`);
+              } else {
+                add('info', 'loop-seam', `${an.name}.${ch} has no keyframes at both 0s and ${length}s — check that the loop blends.`);
+              }
+            }
+          }
+          if (animated) {
+            bones++;
+            if (!boneNames.has(an.name)) add('error', 'missing-bone', `Keyframes target "${an.name}", which is not a bone in this model — they will not play.`);
+          }
+        }
+
+        // Floor check: sample the whole model over the animation (evenly spaced
+        // times plus every keyframe time), then restore the timeline.
+        let lowest: { y: number; time: number } | null = null;
+        if (typeof input.floor_y === 'number' && length > 0) {
+          ensureAnimationMode();
+          if (animation !== (Animation as any).selected && typeof animation.select === 'function') animation.select();
+          const prevTime = (Timeline as any).time;
+          const samples = Math.min(200, Math.max(2, Math.floor(input.samples ?? 24)));
+          const times = new Set<number>(keyTimes);
+          for (let i = 0; i <= samples; i++) times.add(Math.round((length * i / samples) * 1000) / 1000);
+          for (const t of [...times].filter((t) => t >= 0 && t <= length).sort((a, b) => a - b)) {
+            (Timeline as any).time = t;
+            (Animator as any).preview();
+            const box = elementsWorldBox(null);
+            if (box && (!lowest || box.min.y < lowest.y)) lowest = { y: r2(box.min.y), time: t };
+          }
+          (Timeline as any).time = prevTime;
+          (Animator as any).preview();
+          if (lowest && lowest.y < input.floor_y - 0.01) {
+            add('warning', 'below-floor', `The model reaches y=${lowest.y} at ${lowest.time}s — ${r2(input.floor_y - lowest.y)} below the floor (y=${input.floor_y}). Raise the root/body by that much there, or adjust the limbs.`);
+          }
+        }
+
+        return { ok: true, animation: animation.name, length, loop: loopMode, bones, keyframes, issues, ...(lowest ? { lowest } : {}) };
+      } catch (e: any) {
+        console.error('[MCP Plugin] checkAnimation failed:', e);
+        return { ok: false, error: e?.message || String(e) };
+      }
     };
 
     // ---------------------------------------------------------------------
@@ -2382,6 +2529,21 @@ const options: PluginOptions = {
       return dataUrl;
     };
 
+    // If `time` is given, evaluate the (named or selected) animation at that moment
+    // SYNCHRONOUSLY before rendering — otherwise a render races the timeline and can
+    // show the rest pose instead of the animated frame (the evaluate-then-measure
+    // pattern get_bone_pose uses). No time = leave the current pose as-is.
+    const poseAtTime = (input: any): void => {
+      if (input.time === undefined) return;
+      try {
+        ensureAnimationMode();
+        const anim = input.animation_id ? findAnimation(input.animation_id) : ensureSelectedAnimation();
+        if (anim && anim !== (Animation as any).selected && typeof anim.select === 'function') anim.select();
+        (Timeline as any).time = input.time;
+        if (typeof Animator !== 'undefined' && (Animator as any).preview) (Animator as any).preview();
+      } catch { /* best-effort: fall back to the current pose */ }
+    };
+
     const captureScreenshot = (input: any): any => {
       try {
         let selectedProject: any = (typeof Project !== 'undefined') ? Project : null;
@@ -2393,22 +2555,7 @@ const options: PluginOptions = {
         if (!selectedProject) return { ok: false, error: 'No project found.' };
         if (!selectedProject.selected) selectedProject.select();
 
-        // If a time is given, evaluate the (selected or named) animation at that moment
-        // SYNCHRONOUSLY before rendering. Otherwise the screenshot races the timeline and
-        // can capture the bind/rest pose instead of the animated frame — the same evaluate-
-        // then-measure pattern get_bone_pose uses. No time = render the current pose as-is.
-        if (input.time !== undefined) {
-          try {
-            ensureAnimationMode();
-            if (input.animation_id) {
-              const anim = findAnimation(input.animation_id);
-              if (anim && typeof anim.select === 'function') anim.select();
-            }
-            (Timeline as any).time = input.time;
-            if (typeof Animator !== 'undefined' && (Animator as any).preview) (Animator as any).preview();
-          } catch { /* best-effort: fall back to the current pose */ }
-        }
-
+        poseAtTime(input);
         const preview = (Preview as any).selected;
         if (!preview) return { ok: false, error: 'No preview available for the selected project.' };
 
@@ -2458,6 +2605,7 @@ const options: PluginOptions = {
         // screenshot:false = just move the camera (e.g. before a capture_screenshot
         // with a `time`), saving a whole image round-trip for the model.
         if (input.screenshot === false) return { ok: true, message: `Camera set to [${(input.position || []).join(', ')}].` };
+        poseAtTime(input);
         const dataUrl = renderPreviewDataURL(preview, screenshotMax(input));
         if (!dataUrl) return { ok: false, error: 'Failed to capture screenshot after setting angle.' };
         return { ok: true, data_url: dataUrl };
@@ -4411,6 +4559,7 @@ const options: PluginOptions = {
         list_animations: listAnimations,
         manage_animation: manageAnimation,
         set_keyframes: setKeyframes,
+        check_animation: checkAnimation,
         get_keyframes: getKeyframes,
         get_bone_pose: getBonePose,
         modify_cube: modifyCube,

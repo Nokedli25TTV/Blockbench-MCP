@@ -21,7 +21,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch: many parts, own colours, one call), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
-| Animation | `create_animation`, `set_keyframes` (batch: many bones × channels × times), `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes` (one, several or all bones), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
+| Animation | `create_animation`, `set_keyframes` (batch: many bones × channels × times), `check_animation` (lint + floor check), `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes` (one, several or all bones), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
 | Camera | `capture_screenshot` (`time`, `max_size`), `set_camera_angle` (`screenshot:false`), `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
 | Export | `list_export_formats`, `export_model`, `export_animations` |
@@ -68,12 +68,12 @@ export_model: codec_id="bedrock"   +   export_animations
 ```
 create_animation: name="idle", loop=true, animation_length=2,
   bones={"blade_bone":[{time:0, rotation:[0,0,0]}, {time:1, rotation:[4,0,0]}, {time:2, rotation:[0,0,0]}]}
-get_keyframes: bone_name="blade_bone"          # confirm what was stored
+check_animation: floor_y=0                     # jumps, loop pops, floor dips — one call
 capture_screenshot: time=1                     # posed frame, not the rest pose
 ```
 
-Read `blockbench-animation` before animating: keyframes ADD to a bone's rest rotation, and
-`create_animation` stores X rotations negated while `manage_keyframes` stores values as given.
+Read `blockbench-animation` before animating: keyframes ADD to a bone's rest rotation. All animation
+tools use the values Blockbench shows; the exporter converts to the GeckoLib file convention.
 
 ## Errors
 

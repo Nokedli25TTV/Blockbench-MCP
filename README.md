@@ -60,7 +60,9 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
   overlaps before painting, `shade_cubes` paints every part in its exact colour in one call, and there
   are pixel-art palettes and paint tools for hand work.
 - **Animate** — create animations, write many bones' keyframes at once (`set_keyframes`), read back
-  exactly what was stored, and measure a bone's world rotation / position numerically.
+  exactly what was stored, measure a bone's world rotation / position numerically, and lint a whole
+  animation — including "does it go through the floor?" — with `check_animation`. Every tool uses the
+  values Blockbench shows; the exporter handles the GeckoLib file convention.
 - **See the result** — screenshots from any camera angle, also of a specific animation frame
   (`capture_screenshot` with `time`).
 - **Export for GeckoLib** — `.geo.json` via `export_model` plus `.animation.json` via `export_animations`.
@@ -82,8 +84,9 @@ mcp-server  (Node — apps/mcp-server)      ── Socket.IO bridge on port 9999
 
 - The **server** speaks MCP to the AI client and forwards each tool call to the plugin, waiting for
   its answer (each call has its own timeout).
-- The **plugin** is a Socket.IO *client*: when Blockbench loads it, it connects to `localhost:9999`
+- The **plugin** is a Socket.IO *client*: when Blockbench loads it, it connects to `127.0.0.1:9999`
   by itself and reconnects automatically when the server restarts. There is no "Connect" button.
+- The bridge is **local-only**: it listens on `127.0.0.1` and refuses connections from web pages.
 - **Only one server can own port 9999.** If two AI clients each start this server, the second one
   exits with `FATAL: bridge port 9999 is already in use` — use Blockbench from one client at a time.
 
@@ -152,7 +155,7 @@ see [Troubleshooting](#-troubleshooting).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 68 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 118. |
+| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 69 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 119. |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
 To set the profile, add `"env": { "BLOCKBENCH_MCP_PROFILE": "full" }` next to `"args"` in the Claude
@@ -167,7 +170,7 @@ Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
 | Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
-| Animation | `create_animation`, `set_keyframes` (batch), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
+| Animation | `create_animation`, `set_keyframes` (batch), `check_animation` (lint + floor check), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
 | Camera | `capture_screenshot`, `set_camera_angle`, `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
 | Export | `list_export_formats`, `export_model`, `export_animations` |
@@ -258,9 +261,9 @@ union in `packages/shared/src/types.ts` — plus a mock handler and a check in t
 
 - **`risky_eval` runs arbitrary JavaScript inside Blockbench**, with the app's permissions. Only allow
   it when you understand the code being run.
-- **The bridge listens on port 9999 on all network interfaces**, not only on localhost, and treats
-  the most recently connected Socket.IO client as Blockbench. Use it on a trusted network and don't
-  allow inbound connections to port 9999 in your firewall.
+- **The bridge is local-only:** it listens on `127.0.0.1:9999` (not reachable from the network) and
+  refuses Socket.IO connections that come from a web page (an `http`/`https` or sandboxed `null`
+  Origin), so a site open in your browser can't pose as Blockbench. Other programs running on your own machine can still connect.
 - `export_model` / `export_animations` can write files to the path you give (Blockbench asks for file
   system permission).
 - GeckoLib renders cubes only — mesh elements are dropped on export (`validate_model` warns about it).

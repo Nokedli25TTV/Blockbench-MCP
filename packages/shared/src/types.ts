@@ -16,6 +16,7 @@ export type ToolType =
   | "list_animations"
   | "manage_animation"
   | "set_keyframes"
+  | "check_animation"
   | "get_keyframes"
   | "get_bone_pose"
   | "modify_cube"

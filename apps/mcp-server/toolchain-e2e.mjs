@@ -153,6 +153,12 @@ try {
   const scBad = await h.call("shade_cubes", { items: [{ cube_id: "grip", color: "#ffffff" }, { cube_id: "ghost", color: "#000000" }] });
   check("shade_cubes rejects the whole batch on a bad item", scBad.isError && /items\[1\]/.test(scBad.text), scBad.text);
 
+  console.log("\n--- Round 3: check_animation ---");
+  await h.call("set_keyframes", { keyframes: [{ bone: "crystal_x", channel: "rotation", time: 1.5, values: [150, 0, 0] }] });
+  const ca = await h.call("check_animation", { floor_y: 0 });
+  check("check_animation flags a >90° rotation jump", !ca.isError && /\(rotation-jump\) crystal_x\.rotation turns 140/.test(ca.text), ca.text);
+  check("check_animation reports the lowest point when floor_y is given", /Lowest point: y=-0\.5 at 1s/.test(ca.text), ca.text);
+
   console.log("\n--- Validation (expected PASS) ---");
   const v1 = await h.call("validate_model");
   console.log(v1.text);
@@ -176,6 +182,15 @@ try {
   check("validate_model FAILS on corrupted scene", v2.isError && v2.text.includes("FAILED"));
   check("detects illegal cube rotation", v2.text.includes("illegal-cube-rotation"));
   check("detects duplicate name", v2.text.includes("duplicate-name"));
+
+  console.log("\n--- Bridge security (4.1) + camera time (3.4) ---");
+  check("bridge refuses a connection from a web page origin", (await h.probeConnect({ Origin: "https://evil.example" })) === "rejected");
+  check("bridge refuses a sandboxed-iframe origin (null)", (await h.probeConnect({ Origin: "null" })) === "rejected");
+  check("bridge accepts a local non-browser client", (await h.probeConnect({})) === "connected");
+  const afterProbe = await h.call("get_scene_tree", { max_depth: 0 });
+  check("the plugin connection survives a short-lived extra client (fallback)", !afterProbe.isError, afterProbe.text.slice(0, 80));
+  const camT = await h.call("set_camera_angle", { position: [10, 10, 10], projection: "perspective", time: 0.5 });
+  check("set_camera_angle accepts time", !camT.isError && camT.raw?.content?.[0]?.type === "image", camT.text);
 
   console.log("\n--- Tool profile: default 'geckolib' drops the non-cube tool groups ---");
   const g = await startHarness({ profile: "geckolib" });

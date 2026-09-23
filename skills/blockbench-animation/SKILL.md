@@ -16,26 +16,21 @@ Create animations for 3D models using Blockbench MCP tools.
   times, one undo step, upsert by time); `clear_first:true` rewrites the listed channels.
 - **Calibrate rotation direction ONCE, up front.** Don't guess "forward/back" from a camera angle —
   set a known +X on a bone, call **`get_bone_pose`** to read its world-space rotation (a number),
-  note "for this rig +X = forward/back", then never guess again. **Sign conventions can differ
-  between the Blockbench UI display and the exported GeckoLib/Bedrock JSON** — a rotation can read one
-  way in the editor and the opposite in-game. Trust the calibrated `get_bone_pose` number, not the
-  viewport, and don't hard-code an assumed sign flip.
-- **Check ground-clipping by NUMBER where it's reliable.** `get_bone_pose` returns `world_position`
-  (the bone's pivot) and `world_bbox.lowest_y` (lowest point of the bone + its cubes). Without `time`
-  (rest pose) `lowest_y` is reliable — calibrate the floor once against a bone that rests on the
-  ground. **With `time`, `world_rotation`/`world_position` are reliable but `world_bbox` currently is
-  NOT** (known bug: a real-Blockbench test read -2.6 where the geometry was at ~-0.35). For animated
-  frames, confirm floor contact with `capture_screenshot {time}` — it evaluates that frame before
-  rendering (without `time` a screenshot can show the rest pose).
+  note "for this rig +X = forward/back", then never guess again. What Blockbench shows is what plays
+  in-game — the exporter handles the file's sign convention.
+- **Check the whole animation in one call.** `check_animation` (with `floor_y: 0` for entities) samples
+  the whole model across the animation and reports the lowest point, when it happens and how much to
+  raise the model — plus keyframes past the end, rotation jumps over 90°, loops that pop, and keyframes
+  on missing bones. For one bone at one moment, `get_bone_pose {time}` returns `world_rotation`,
+  `world_position` and `world_bbox.lowest_y`. Confirm the look with `capture_screenshot {time}` (or
+  `set_camera_angle {time}`), which evaluates that frame before rendering.
 - **Keyframes ADD to the bone's rest rotation.** A bone set to `[18,0,0]` with `set_rotation` and a
   rotation keyframe of `[4,0,0]` shows 22°. To move a posed bone from 18° to 22°, key `0 → 4 → 0`,
   not `18 → 22 → 18`.
-- **`create_animation` and `manage_keyframes` use different X signs (known issue).**
-  `create_animation` imports through GeckoLib/Bedrock JSON, so an X rotation you pass is STORED
-  NEGATED (18 → -18); `manage_keyframes` and `get_keyframes` use the stored (Blockbench-internal)
-  values as-is. Don't mix the two on one bone without reading back with `get_keyframes` (Y is not yet
-  verified). Editing with `manage_keyframes` after a `create_animation` means working in the stored,
-  flipped values.
+- **One value convention everywhere.** `create_animation`, `set_keyframes`, `manage_keyframes` and
+  `get_keyframes` all use the values Blockbench stores and shows in its keyframe panel. The GeckoLib /
+  Bedrock `.animation.json` uses flipped signs (rotation X and Y, position X) — `export_animations`
+  converts automatically, so never pre-flip values yourself.
 - **`manage_keyframes` edit/delete/select match existing keyframes by time (±0.001 s).** If no
   keyframe sits at that time, nothing changes — the reply now says so and lists the channel's stored
   keyframes, so check it instead of assuming the edit landed.
@@ -61,9 +56,12 @@ Create animations for 3D models using Blockbench MCP tools.
 | Tool | Purpose |
 |------|---------|
 | `create_animation` | Create animation with keyframes for bones |
+| `set_keyframes` | **Batch**: many bones × channels × times in one call (upsert, echoes stored values) |
 | `manage_keyframes` | Create/edit/delete keyframes per bone and channel (echoes stored values) |
-| `get_keyframes` | **Read back the actually-stored keyframe values** (verify writes) |
-| `get_bone_pose` | **Measure a bone's local + world rotation, world position & bbox** (calibrate direction / check ground-clipping by number) |
+| `get_keyframes` | **Read back the actually-stored keyframe values** — one, several or all bones |
+| `check_animation` | **Lint the animation**: past-the-end keys, >90° jumps, loop pops, missing bones, floor dips (`floor_y`) |
+| `get_bone_pose` | **Measure a bone's local + world rotation, world position & bbox** (calibrate direction by number) |
+| `manage_animation` | Delete / rename / duplicate a whole animation |
 | `animation_graph_editor` | Fine-tune animation curves (smooth, linear, ease) |
 | `animation_timeline` | Control playback, time, FPS, loop settings |
 | `batch_keyframe_operations` | Batch operations: offset, scale, reverse, mirror |

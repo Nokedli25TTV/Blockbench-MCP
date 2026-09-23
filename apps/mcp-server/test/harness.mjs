@@ -116,6 +116,23 @@ export function createMockScene() {
       for (const key of touched) stored[key] = keyframes[key].map((k) => ({ ...k }));
       return { ok: true, animation: "animation.mock", created, updated, cleared, stored };
     },
+    check_animation(input) {
+      const maxJump = input.max_jump || 90;
+      const issues = [];
+      const bones = new Set();
+      let count = 0;
+      for (const [key, kfs] of Object.entries(keyframes)) {
+        if (!kfs.length) continue;
+        const [bone, ch] = key.split(".");
+        bones.add(bone); count += kfs.length;
+        if (!findGroup(bone)) issues.push({ severity: "error", rule: "missing-bone", message: `Keyframes target "${bone}", which is not a bone in this model.` });
+        if (ch === "rotation") for (let i = 1; i < kfs.length; i++) {
+          const d = Math.max(...[0, 1, 2].map((j) => Math.abs(kfs[i].values[j] - kfs[i - 1].values[j])));
+          if (d > maxJump) issues.push({ severity: "warning", rule: "rotation-jump", message: `${bone}.rotation turns ${d}° between ${kfs[i - 1].time}s and ${kfs[i].time}s.` });
+        }
+      }
+      return { ok: true, animation: "animation.mock", length: 2, loop: "loop", bones: bones.size, keyframes: count, issues, ...(typeof input.floor_y === "number" ? { lowest: { y: -0.5, time: 1 } } : {}) };
+    },
     get_keyframes(input) {
       const chans = input.channel ? [input.channel] : ["rotation", "position", "scale"];
       const read = (bone) => Object.fromEntries(chans.map((c) => [c, (keyframes[`${bone}.${c}`] || []).map((k) => ({ ...k }))]));
@@ -674,7 +691,7 @@ export async function startHarness({ profile = "full" } = {}) {
   const listToolDefs = async () => (await rpc("tools/list", {})).result.tools;
   const listTools = async () => (await listToolDefs()).map((t) => t.name);
 
-  const socket = io(`http://localhost:${port}`, { transports: ["websocket", "polling"] });
+  const socket = io(`http://127.0.0.1:${port}`, { transports: ["websocket", "polling"] });
   socket.on("tool_command", (cmd, ack) => {
     const fn = mock.handlers[cmd.tool];
     ack(fn ? fn(cmd.input || {}) : { ok: false, error: `unknown tool ${cmd.tool}` });
@@ -691,5 +708,14 @@ export async function startHarness({ profile = "full" } = {}) {
   });
 
   const stop = () => { try { socket.disconnect(); } catch {} try { child.kill(); } catch {} };
-  return { call, rpc, notify, listTools, listToolDefs, scene: mock.scene, mock, stop };
+  // Try one extra Socket.IO connection (e.g. with a browser Origin header) and
+  // disconnect it again; resolves "connected" or "rejected".
+  const probeConnect = (extraHeaders = {}) => new Promise((resolve) => {
+    const s = io(`http://127.0.0.1:${port}`, { transports: ["websocket"], extraHeaders, reconnection: false, timeout: 3000 });
+    const done = (r) => { try { s.disconnect(); } catch {} resolve(r); };
+    s.on("connect", () => done("connected"));
+    s.on("connect_error", () => done("rejected"));
+  });
+
+  return { call, rpc, notify, listTools, listToolDefs, probeConnect, scene: mock.scene, mock, stop };
 }

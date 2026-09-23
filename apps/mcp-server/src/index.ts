@@ -21,8 +21,29 @@ const log = (...args: any[]) => console.error("[MCP]", ...args);
 // ---------------------------------------------------------------------------
 // Socket.IO bridge toward the Blockbench plugin
 // ---------------------------------------------------------------------------
+// The bridge is local-only: it binds to the loopback interface, so nothing on the
+// network can reach it, and it refuses connections that come from a web page — any
+// site open in a browser could otherwise open a WebSocket to 127.0.0.1:9999, pose
+// as Blockbench and read the tool calls. Web pages always send an Origin: http(s)
+// for normal pages, "null" for sandboxed iframes. The Blockbench plugin sends none
+// (verified live 2026-09-23), and neither do Node clients (tests).
+const BRIDGE_HOST = "127.0.0.1";
+const isWebOrigin = (origin: string | undefined): boolean =>
+  !!origin && (/^https?:\/\//i.test(origin) || origin.trim().toLowerCase() === "null");
+
 const httpServer = createServer();
-const io = new IOServer(httpServer, { cors: { origin: "*" } });
+const io = new IOServer(httpServer, {
+  cors: { origin: "*" },
+  allowRequest: (req, callback) => {
+    const origin = req.headers.origin;
+    if (isWebOrigin(origin)) {
+      log(`Rejected a bridge connection from web origin ${origin} (only the Blockbench plugin may connect).`);
+      callback("web origins are not allowed", false);
+      return;
+    }
+    callback(null, true);
+  },
+});
 
 let blockbench: Socket | null = null;
 
@@ -31,12 +52,18 @@ let blockbench: Socket | null = null;
 // completes, and every call is confirmed by its own ack under a per-tool
 // timeout — so no separate "ready" gate is needed. client_ready is only logged.
 io.on("connection", (socket) => {
-  log("Blockbench plugin connected:", socket.id);
+  log("Blockbench plugin connected:", socket.id, `(origin: ${socket.handshake.headers.origin ?? "none"})`);
   blockbench = socket;
   socket.on("client_ready", () => log("Blockbench plugin is ready"));
   socket.on("disconnect", () => {
     log("Blockbench plugin disconnected:", socket.id);
-    if (blockbench === socket) blockbench = null;
+    if (blockbench === socket) {
+      // Fall back to a client that is still connected (e.g. the real plugin after a
+      // short-lived extra connection), instead of dropping the bridge altogether.
+      const others = [...io.of("/").sockets.values()].filter((s) => s.id !== socket.id && s.connected);
+      blockbench = others.length ? others[others.length - 1] : null;
+      if (blockbench) log("Bridge fell back to still-connected client:", blockbench.id);
+    }
   });
 });
 
@@ -58,8 +85,8 @@ httpServer.on("error", (err: any) => {
   process.exit(1);
 });
 
-httpServer.listen(PORT, () => {
-  log(`Socket.IO bridge listening on http://localhost:${PORT}`);
+httpServer.listen(PORT, BRIDGE_HOST, () => {
+  log(`Socket.IO bridge listening on http://${BRIDGE_HOST}:${PORT} (local only)`);
 });
 
 // Per-tool timeout tiers. A timeout never slows a normal call — it only decides
@@ -101,6 +128,8 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   replace_texture: 20_000,
   // Batches: many edits in one call.
   set_keyframes: 20_000,
+  // Samples the whole model across the animation when floor_y is given.
+  check_animation: 30_000,
   modify_cubes: 20_000,
   shade_cubes: 30_000,
   // Geometry/UV packing and large canvas paints.
@@ -291,7 +320,7 @@ const instructions = (buildInstructions(skills) || "") + profileNote;
 // timeline view state may still move (e.g. capture_screenshot with a `time`).
 const READ_ONLY_TOOLS = new Set([
   "get_scene_tree", "get_project_info", "validate_model", "validate_uv", "list_animations", "get_keyframes",
-  "get_bone_pose", "list_export_formats", "list_textures", "get_texture", "find_elements_by_criteria",
+  "get_bone_pose", "check_animation", "list_export_formats", "list_textures", "get_texture", "find_elements_by_criteria",
   "filter_by_material", "get_selection", "get_undo_stack", "capture_screenshot", "capture_app_screenshot",
   "list_materials", "get_material_info", "get_face_material_instances", "list_material_instances",
   "list_palettes", "get_palette", "list_actions", "list_armatures", "get_armature", "list_armature_bones",
@@ -633,8 +662,9 @@ server.registerTool(
       "Each bone key must be an EXISTING group name (verify with get_scene_tree first — rule #3/#8). " +
       "Keyframe times are in seconds; rotation in degrees; multi-axis keyframe values are fine for " +
       "animations (the single-axis rule applies to static model rotation, not keyframes). " +
-      "Rotation sign can differ between the Blockbench UI and the exported GeckoLib/Bedrock JSON — " +
-      "calibrate direction ONCE with get_bone_pose rather than assuming a sign.",
+      "Values are stored exactly as given — the same convention as set_keyframes / manage_keyframes / " +
+      "get_keyframes and the Blockbench UI; the exporter converts to the GeckoLib/Bedrock file convention. " +
+      "Rotations ADD to each bone's rest rotation.",
     inputSchema: {
       name: z.string().describe("Animation name (without the 'animation.' prefix). Must be unique."),
       loop: z.boolean().optional().describe("Whether the animation loops. Default false."),
@@ -678,8 +708,8 @@ server.registerTool(
       "Create, delete, edit, or select keyframes for one bone and channel in an animation. " +
       "The bone group must exist and the animation must exist (or be selected). The reply lists the " +
       "channel's stored keyframes, so no separate get_keyframes is needed. For several bones/channels at " +
-      "once use set_keyframes. Rotation sign can differ between the BB UI and exported GeckoLib JSON — " +
-      "calibrate once with get_bone_pose instead of assuming a direction.",
+      "once use set_keyframes. Values are stored as given (the Blockbench UI convention, shared by every " +
+      "animation tool); the exporter converts to the GeckoLib file convention.",
     inputSchema: {
       animation_id: animationIdOptional,
       action: z.enum(["create", "delete", "edit", "select"]).describe("Action to perform."),
@@ -709,9 +739,9 @@ server.registerTool(
       "Write keyframes for MANY bones, channels and times in ONE call and ONE undo step — the fast way to key " +
       "or fix a whole pose or animation. Upsert: a keyframe already at that time (±0.001 s) is overwritten, " +
       "otherwise it is created. All entries are validated first; nothing is written if one is invalid. " +
-      "`clear_first:true` empties each listed bone/channel before writing (rewrite a curve). Values are the " +
-      "STORED values — the same convention as manage_keyframes / get_keyframes (create_animation's input has X " +
-      "negated) — and rotations ADD to the bone's rest rotation. The reply lists every touched channel as stored.",
+      "`clear_first:true` empties each listed bone/channel before writing (rewrite a curve). Values are stored " +
+      "as given — the same convention as every other animation tool and the Blockbench UI — and rotations ADD " +
+      "to the bone's rest rotation. The reply lists every touched channel as stored.",
     inputSchema: {
       animation_id: animationIdOptional,
       keyframes: z
@@ -938,6 +968,37 @@ server.registerTool(
 );
 
 server.registerTool(
+  "check_animation",
+  {
+    title: "Check Animation (lint)",
+    description:
+      "Check an animation in ONE call for the mistakes that otherwise take screenshot rounds: keyframes after " +
+      "the end, rotation jumps above `max_jump` degrees (default 90) between neighbouring keyframes, looping " +
+      "channels whose start and end differ (the loop pops), and keyframes on bones that no longer exist. With " +
+      "`floor_y` (usually 0 for entities) it also samples the whole model over the animation and reports the " +
+      "lowest point, when it happens, and how much to raise the model if it goes below the floor. Run it after " +
+      "creating or editing an animation, before screenshots or export.",
+    inputSchema: {
+      animation_id: animationIdOptional,
+      floor_y: z.number().optional().describe("Floor height to check against (e.g. 0). Omit to skip the floor check."),
+      samples: z.number().int().min(2).max(200).optional().describe("Evenly spaced sample times for the floor check (default 24; keyframe times are always added)."),
+      max_jump: z.number().min(1).optional().describe("Degrees between neighbouring rotation keyframes that count as suspicious (default 90)."),
+    },
+  },
+  async (args) =>
+    forward("check_animation", args, (r) => {
+      const issues: any[] = r.issues || [];
+      const head =
+        `${r.animation} (${r.length}s, ${r.loop}): ${r.bones} animated bone(s), ${r.keyframes} keyframe(s) — ` +
+        (issues.length ? `${issues.length} issue(s):` : "no issues found.");
+      const lines = issues.slice(0, 40).map((i) => `  [${i.severity}] (${i.rule}) ${i.message}`);
+      if (issues.length > 40) lines.push(`  … (+${issues.length - 40} more)`);
+      const low = r.lowest ? `\nLowest point: y=${r.lowest.y} at ${r.lowest.time}s.` : "";
+      return [head, ...lines].join("\n") + low;
+    })
+);
+
+server.registerTool(
   "get_bone_pose",
   {
     title: "Get Bone Pose (measure rotation + world position)",
@@ -947,10 +1008,9 @@ server.registerTool(
       "bounding box of the bone + all its descendant cubes, with `lowest_y`. Pass `time` to evaluate the " +
       "selected animation at that moment FIRST, so all values are for that animated frame. Two key uses: " +
       "(1) CALIBRATE rotation direction once (set a known +X, read world_rotation, note which way it tilts); " +
-      "(2) GROUND-CLIPPING — `world_bbox.lowest_y` is reliable for the rest pose (no `time`). KNOWN ISSUE: " +
-      "with `time`, world_rotation/world_position are correct but world_bbox can be wrong — confirm animated " +
-      "floor contact with capture_screenshot {time}. Coordinates are Blockbench scene/world space; for an " +
-      "absolute ground plane, calibrate once against a bone you know sits on the floor.",
+      "(2) GROUND-CLIPPING — `world_bbox.lowest_y` at a `time` tells numerically whether that bone dips below " +
+      "the floor. For the WHOLE model over the WHOLE animation use check_animation with `floor_y` instead. " +
+      "Coordinates are Blockbench scene/world space (entity models usually stand on y=0).",
     inputSchema: {
       bone_name: z.string().describe("Bone/group name."),
       time: z.number().optional().describe("Seconds — evaluate the selected animation at this time before measuring."),
@@ -1559,14 +1619,17 @@ server.registerTool(
     title: "Set Camera Angle",
     description:
       "Position the preview camera (position, optional target/rotation, projection). Returns the resulting " +
-      "screenshot unless `screenshot:false` — use false when you only move the camera before a " +
-      "capture_screenshot (e.g. with a `time`), to skip reading an extra image.",
+      "screenshot unless `screenshot:false` — use false when you only move the camera, to skip reading an " +
+      "extra image. Pass `time` (and optionally `animation_id`) to render that ANIMATION frame instead of the " +
+      "current pose — one call for 'this angle, this frame'.",
     inputSchema: {
       position: vec3.describe("Camera position [x,y,z]."),
       target: vec3.optional().describe("Look-at target [x,y,z]."),
       rotation: vec3.optional().describe("Camera rotation [x,y,z]."),
       projection: z.enum(["unset", "orthographic", "perspective"]).describe("Projection type."),
       screenshot: z.boolean().optional().describe("Return a screenshot after moving the camera (default true)."),
+      time: z.number().optional().describe("Seconds — evaluate the animation at this moment before rendering."),
+      animation_id: z.string().optional().describe("Animation UUID or name for `time`. Default: the selected (or only) animation."),
       max_size: screenshotMaxSize,
     },
   },

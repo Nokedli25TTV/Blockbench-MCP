@@ -6,7 +6,7 @@ How this project is built and where everything lives. Companion to `MODELING_CON
 ## 1. What it is
 
 A custom integration that lets **Claude (Claude Desktop)** do 3D modeling in **Blockbench**
-over the **Model Context Protocol (MCP)**. 118 MCP tools cover modeling, animation, export,
+over the **Model Context Protocol (MCP)**. 119 MCP tools cover modeling, animation, export,
 texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 
 ## 2. The three processes + data flow
@@ -23,7 +23,8 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 - The **server** owns the MCP protocol (stdout = JSON-RPC; **all logging goes to stderr**) and
   bridges each tool call to the plugin over Socket.IO, awaiting the plugin's ack.
 - The **plugin** runs in Blockbench, executes the real Blockbench API calls, and acks `{ ok, ... }`.
-- Only **one** process may own port 9999 at a time (the plugin connects to `localhost:9999` only).
+- The bridge is **local-only**: it binds to `127.0.0.1` and refuses Socket.IO handshakes whose Origin is a web page (`http`/`https`, or `null` from a sandboxed iframe) — the plugin sends no Origin — so a browser tab can't pose as Blockbench. If the active client disconnects, the bridge falls back to another still-connected one.
+- Only **one** process may own port 9999 at a time (the plugin connects to `127.0.0.1:9999` only).
   Both the Claude app (`%APPDATA%\Claude\claude_desktop_config.json` — its server starts with the app)
   and Claude Code (`~/.claude.json`) are configured to spawn this server; whichever starts first owns
   the bridge, and the other exits at once with `FATAL: bridge port 9999 is already in use` (visible
@@ -34,7 +35,7 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
   plugin is usable immediately — there is no separate "ready" gate.
 - **Tool profile** (`BLOCKBENCH_MCP_PROFILE`, default `geckolib`): skips 50 mesh / armature /
   Bedrock-PBR / brush-emulation tools that don't apply to cube models — the tools/list sent to the
-  model shrinks from ~24k to ~16k tokens. `full` loads all 118. Set it in the client's MCP server
+  model shrinks from ~24k to ~16k tokens. `full` loads all 119. Set it in the client's MCP server
   config (`"env": { "BLOCKBENCH_MCP_PROFILE": "full" }`). Every tool also carries MCP annotations
   (`readOnlyHint` / `destructiveHint`).
 - Screenshots (`capture_screenshot`, `set_camera_angle`, app captures) are downscaled to 800 px on
@@ -48,7 +49,7 @@ blockbench-mcp/
 ├─ apps/
 │  ├─ mcp-server/                 # the external MCP server (Node, stdio + Socket.IO bridge)
 │  │  ├─ src/
-│  │  │  ├─ index.ts              # ★ registers ALL 118 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
+│  │  │  ├─ index.ts              # ★ registers ALL 119 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
 │  │  │  └─ skills.ts             # loads skills/*, builds the MCP `instructions` index, get_skill content
 │  │  ├─ test/
 │  │  │  ├─ harness.mjs           # spawns real server + a MOCK Blockbench scene + an MCP stdio client
@@ -136,3 +137,9 @@ Recommended order: `set_project` (texture size) → `create_texture` (atlas) →
 - Plugin imports `packages/shared` by **relative path** for runtime (vite can't resolve the
   `@blockbench-mcp/shared/*` alias at runtime; only type-only imports of it are erased).
 - Animations only select/play in Animation mode — `ensureAnimationMode()` calls `Animator.join()`.
+- **One animation value convention.** Every animation tool reads/writes the values Blockbench stores
+  and shows. The Bedrock/GeckoLib `.animation.json` flips rotation X and Y and position X (scale is
+  unchanged) — measured live 2026-09-23. `create_animation` imports through that codec, so it
+  pre-flips its input (`toBedrockRotation` / `toBedrockPosition`); export flips back.
+- **World bounding boxes** come from element geometry only (`elementsWorldBox`): `Box3.setFromObject`
+  on a bone also picks up editor helpers such as a selected bone's `pivot_marker` (±5.5 units).
