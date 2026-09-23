@@ -2,6 +2,54 @@
 
 BlockbenchMCP connects Blockbench to Claude AI through the Model Context Protocol (MCP), allowing Claude to directly interact with and control Blockbench. This integration enables AI-assisted 3D modeling, texture creation, and block model manipulation.
 
+> [!IMPORTANT]
+> **This is a personal, non-commercial fork — not the original project.**
+
+## 📌 About this fork
+
+### 🇬🇧 English
+
+- **The original project** is **Blockbench MCP by [enfpdev](https://github.com/enfpdev)** —
+  [enfp-dev-studio/blockbench-mcp](https://github.com/enfp-dev-studio/blockbench-mcp).
+  The foundation of this repository (the MCP server ↔ Blockbench plugin bridge) is their work;
+  all credit for it goes to them.
+- Many tool definitions were ported from
+  [jasonjgardner/blockbench-mcp-project](https://github.com/jasonjgardner/blockbench-mcp-project).
+- I ([Nokedli25TTV](https://github.com/Nokedli25TTV)) only **extended it for my own use** —
+  Minecraft / GeckoLib modding. It is **not sold, not monetized, and made without any intent of
+  profit**. No support or updates are promised.
+- The extensions were written **with AI assistance** (Claude Code, OpenAI Codex). They are covered
+  by automated tests against a mock Blockbench and were partly tried in real Blockbench, but they
+  **may still contain bugs**.
+- **If you use it, you do so at your own risk:** back up your `.bbmodel` files, read the code before
+  trusting it, and keep in mind that the `risky_eval` tool can run arbitrary JavaScript inside
+  Blockbench.
+- The project stays under the **MIT License**; the original copyright notice is kept in
+  [LICENSE](LICENSE). What changed compared to the original: see the commit history and
+  [ARCHITECTURE.md](ARCHITECTURE.md).
+
+### 🇭🇺 Magyarul
+
+- **Az eredeti projekt** a **Blockbench MCP, [enfpdev](https://github.com/enfpdev) munkája** —
+  [enfp-dev-studio/blockbench-mcp](https://github.com/enfp-dev-studio/blockbench-mcp).
+  Ennek a repónak az alapja (az MCP szerver ↔ Blockbench plugin híd) az ő munkájuk, minden érdem
+  az övék.
+- Számos tool-definíció a
+  [jasonjgardner/blockbench-mcp-project](https://github.com/jasonjgardner/blockbench-mcp-project)
+  projektből lett átvéve.
+- Én ([Nokedli25TTV](https://github.com/Nokedli25TTV)) **csak továbbfejlesztettem saját
+  felhasználásra** — Minecraft / GeckoLib modolás. **Nem árulom, nem pénzelem, semmilyen
+  profitszerzési célja nincs.** Támogatást és frissítéseket nem ígérek.
+- A fejlesztések **mesterséges intelligencia segítségével** készültek (Claude Code, OpenAI Codex).
+  Automatikus tesztek ellenőrzik őket egy szimulált Blockbench ellen, és részben valódi
+  Blockbenchben is ki lettek próbálva, de **tartalmazhatnak hibákat**.
+- **Ha használod, a saját felelősségedre teszed:** készíts biztonsági mentést a `.bbmodel`
+  fájljaidról, nézd át a kódot, mielőtt megbízol benne, és ne feledd, hogy a `risky_eval` tool
+  tetszőleges JavaScriptet futtathat a Blockbenchben.
+- A projekt továbbra is **MIT-licenc** alatt áll; az eredeti szerzői jogi közlemény a
+  [LICENSE](LICENSE) fájlban megmaradt. Hogy mi változott az eredetihez képest: lásd a commit-előzményt
+  és az [ARCHITECTURE.md](ARCHITECTURE.md) fájlt.
+
 ## 🚀 Features
 
 - **Two-way communication**: Connect Claude AI to Blockbench through a socket-based server
@@ -44,8 +92,8 @@ npm install -g pnpm
 ### 1. Clone and Setup
 
 ```bash
-git clone https://github.com/enfpdev/blockbench-mcp.git
-cd blockbench-mcp
+git clone https://github.com/Nokedli25TTV/Blockbench-MCP.git
+cd Blockbench-MCP
 pnpm install
 ```
 
@@ -191,6 +239,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
+- Original project: [enfp-dev-studio/blockbench-mcp](https://github.com/enfp-dev-studio/blockbench-mcp) by [enfpdev](https://github.com/enfpdev)
+- Tool definitions ported from [jasonjgardner/blockbench-mcp-project](https://github.com/jasonjgardner/blockbench-mcp-project)
 - Inspired by [BlenderMCP](https://github.com/ahujasid/blender-mcp)
 - Built with the [Model Context Protocol](https://modelcontextprotocol.io/)
 - Thanks to the Blockbench community for the amazing 3D modeling tool
