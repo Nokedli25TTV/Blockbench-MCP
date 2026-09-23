@@ -1,6 +1,8 @@
-# BlockbenchMCP - Blockbench Model Context Protocol Integration
+# Blockbench MCP — personal fork
 
-BlockbenchMCP connects Blockbench to Claude AI through the Model Context Protocol (MCP), allowing Claude to directly interact with and control Blockbench. This integration enables AI-assisted 3D modeling, texture creation, and block model manipulation.
+Lets an AI assistant (Claude Desktop, Claude Code or any other MCP client) build, texture, animate and
+export models **inside Blockbench** through the [Model Context Protocol](https://modelcontextprotocol.io/).
+This fork is tuned for **Minecraft / GeckoLib** cube models.
 
 > [!IMPORTANT]
 > **This is a personal, non-commercial fork — not the original project.**
@@ -50,192 +52,223 @@ BlockbenchMCP connects Blockbench to Claude AI through the Model Context Protoco
   [LICENSE](LICENSE) fájlban megmaradt. Hogy mi változott az eredetihez képest: lásd a commit-előzményt
   és az [ARCHITECTURE.md](ARCHITECTURE.md) fájlt.
 
-## 🚀 Features
+## ✨ What it can do
 
-- **Two-way communication**: Connect Claude AI to Blockbench through a socket-based server
-- **Real-time command tracking**: Monitor all MCP commands with a dedicated history panel
-- **Model manipulation**: Create, modify, and delete block models in Blockbench
-- **Live feedback**: Get instant responses from Blockbench operations
-- **Extensible architecture**: Easy to add new tools and capabilities
+- **Build a model in one call** — a whole bone hierarchy plus its cubes with `create_cubes`, with
+  guardrails: unique names, pivots first, one rotation axis per bone (multi-axis = nested bones).
+- **Texture precisely** — `pack_uv` gives every cube its own atlas region, `validate_uv` catches
+  overlaps before painting, `shade_cubes` paints every part in its exact colour in one call, and there
+  are pixel-art palettes and paint tools for hand work.
+- **Animate** — create animations, write many bones' keyframes at once (`set_keyframes`), read back
+  exactly what was stored, and measure a bone's world rotation / position numerically.
+- **See the result** — screenshots from any camera angle, also of a specific animation frame
+  (`capture_screenshot` with `time`).
+- **Export for GeckoLib** — `.geo.json` via `export_model` plus `.animation.json` via `export_animations`.
+- **Stay safe** — edits are normal Blockbench undo steps; `save_checkpoint` / `undo` / `redo`;
+  `validate_model` checks the rules in [MODELING_CONSTRAINTS.md](MODELING_CONSTRAINTS.md) before export.
+- **Guide the AI** — eight bundled skill guides (modeling, texturing, animation, pixel shading, …)
+  that the server tells the assistant to read before it starts.
 
-## 🏗️ Components
-
-The system consists of two main components:
-
-1. **Blockbench Plugin** (`apps/mcp-plugin`): A Blockbench plugin that creates a socket server within Blockbench to receive and execute commands
-2. **MCP Server** (`apps/mcp-server`): A Node.js server that implements the Model Context Protocol and connects to the Blockbench plugin
-
-## 📦 Project Structure
+## 🏗️ How it works
 
 ```
-blockbench-mcp/
-├── apps/
-│   ├── mcp-server/      # MCP server implementation
-│   └── mcp-plugin/      # Blockbench plugin
-└── packages/
-    └── shared/          # Shared TypeScript types
+AI client (Claude Desktop / Claude Code)
+        │  MCP over stdio
+        ▼
+mcp-server  (Node — apps/mcp-server)      ── Socket.IO bridge on port 9999 ──▶
+                                                        mcp-plugin (runs inside Blockbench — apps/mcp-plugin)
+                                                        calls the Blockbench API, answers every call
 ```
 
-## �️ Installation
+- The **server** speaks MCP to the AI client and forwards each tool call to the plugin, waiting for
+  its answer (each call has its own timeout).
+- The **plugin** is a Socket.IO *client*: when Blockbench loads it, it connects to `localhost:9999`
+  by itself and reconnects automatically when the server restarts. There is no "Connect" button.
+- **Only one server can own port 9999.** If two AI clients each start this server, the second one
+  exits with `FATAL: bridge port 9999 is already in use` — use Blockbench from one client at a time.
 
-### Prerequisites
+More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-- **Blockbench** 4.0 or newer
-- **Node.js** 18.0 or newer
-- **pnpm** package manager
+## 📦 Requirements
 
-Install pnpm if you haven't already:
-```bash
-npm install -g pnpm
-```
+- **Blockbench desktop app** (the plugin is desktop-only; a recent 5.x version is recommended)
+- **Node.js 18+**
+- **pnpm 10** — `npm install -g pnpm`
 
-### 1. Clone and Setup
+## 🛠️ Installation
+
+### 1. Clone and build
 
 ```bash
 git clone https://github.com/Nokedli25TTV/Blockbench-MCP.git
 cd Blockbench-MCP
 pnpm install
-```
-
-### 2. Build the Project
-
-```bash
 pnpm build
 ```
 
-### 3. Install the Blockbench Plugin
+This produces the server (`apps/mcp-server/dist/index.js`) and the plugin
+(`apps/mcp-plugin/dist/mcp_socketio_plugin.js`).
 
-1. Build the plugin: `cd apps/mcp-plugin && pnpm build`
-2. Open Blockbench
-3. Go to **File** > **Plugins** > **Load Plugin from File**
-4. Select the built plugin file from `apps/mcp-plugin/dist/`
-5. Enable the plugin by checking the box next to "MCP Plugin"
+### 2. Load the plugin into Blockbench
 
-### 4. Claude Desktop Integration
+1. Open Blockbench → **File → Plugins**.
+2. Choose **Load Plugin from File** and select `apps/mcp-plugin/dist/mcp_socketio_plugin.js`.
+3. The **MCP Command History** panel appears on the right; it lists every command the AI sends.
 
-Add the following to your Claude Desktop configuration file:
+### 3. Connect your AI client (pick ONE)
 
-**Location:**
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+**Claude Desktop** — add this to `claude_desktop_config.json`
+(Windows: `%APPDATA%\Claude\claude_desktop_config.json`, macOS:
+`~/Library/Application Support/Claude/claude_desktop_config.json`), then restart Claude Desktop:
 
-**Configuration:**
 ```json
 {
   "mcpServers": {
     "blockbench": {
       "command": "node",
-      "args": [
-        "/path/to/blockbench-mcp/apps/mcp-server/dist/index.js"
-      ]
+      "args": ["C:/path/to/Blockbench-MCP/apps/mcp-server/dist/index.js"]
     }
   }
 }
 ```
 
-## 🎮 Usage
-
-### Starting the Connection
-
-1. In Blockbench, open the plugin panel (if not visible, go to **View** > **Panels**)
-2. Find the "MCP Plugin" panel
-3. Click "Connect to MCP Server"
-4. The plugin will start listening on port 9999
-
-### Using with Claude
-
-Once the configuration is set in Claude Desktop and the plugin is running in Blockbench, you'll see a hammer icon with tools for Blockbench MCP.
-
-#### Capabilities
-
-- Get model and project information
-- Create, delete, and modify block models
-- Apply textures and materials
-- Execute custom modeling operations
-- Real-time command history tracking
-
-### Example Commands
-
-Here are some examples of what you can ask Claude to do:
-
-- "Create a simple sword model with proper proportions"
-- "Add a crossguard to the existing sword model"
-- "Create a chest model with opening animation"
-- "Generate a pickaxe tool with different material variants"
-- "Show me the current model structure and elements"
-- "Create a character head with facial features"
-
-## 🔧 Development
-
-### Development Mode
+**Claude Code:**
 
 ```bash
-# Start both server and plugin in development mode
-pnpm dev
-
-# Or start individually
-cd apps/mcp-server && pnpm dev
-cd apps/mcp-plugin && pnpm dev
+claude mcp add blockbench -- node C:/path/to/Blockbench-MCP/apps/mcp-server/dist/index.js
 ```
 
-### Version Management
+> [!WARNING]
+> Don't run both at once. The Claude Desktop app starts its server as soon as the app opens, so a
+> Claude Code session started afterwards can't get port 9999 (and vice versa).
 
-This project uses [Changesets](https://github.com/changesets/changesets) for version management:
+### 4. Check that it works
 
-```bash
-# Record changes
-pnpm changeset
+Open or create a model in Blockbench, then ask the assistant to call **`get_project_info`**. The reply
+contains `plugin_build` (the loaded plugin version) and `tool_count`. If you get `[NOT_CONNECTED]`,
+see [Troubleshooting](#-troubleshooting).
 
-# Update versions
-pnpm version
+## ⚙️ Configuration
 
-# Build all packages
-pnpm build
-```
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 68 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 118. |
+| `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
+
+To set the profile, add `"env": { "BLOCKBENCH_MCP_PROFILE": "full" }` next to `"args"` in the Claude
+Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
+
+## 🧰 Tools
+
+| Domain | Tools |
+|---|---|
+| Project | `get_project_info`, `create_project` (new project in `geckolib` / `bedrock` / `java` format), `set_project` |
+| Geometry | `create_cubes` (batch), `modify_cubes` (batch), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation`, `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
+| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
+| Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
+| Paint | `shade_cubes` (batch), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
+| Animation | `create_animation`, `set_keyframes` (batch), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
+| Camera | `capture_screenshot`, `set_camera_angle`, `capture_app_screenshot` |
+| History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
+| Export | `list_export_formats`, `export_model`, `export_animations` |
+| Guides | `list_skills`, `get_skill` (also readable as `skill://…` resources) |
+| Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` |
+
+Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`), so clients can tell reads
+from edits. Failures start with a stable code: `[NOT_CONNECTED]`, `[TIMEOUT]`, `[NO_PROJECT]`,
+`[DUPLICATE_NAME]`, `[NOT_FOUND]`, `[MISSING_TEXTURE]`, `[ILLEGAL_ROTATION]`, `[FORMAT_UNSUPPORTED]`,
+`[UV_ERROR]`, `[INVALID_INPUT]` or `[ERROR]`. Non-fatal notes arrive as `⚠️` lines in a successful reply.
+
+## 💬 Usage
+
+### Example requests
+
+- "Create a new GeckoLib project called `dagger` and build a dagger stuck in the ground at an angle."
+- "Pack the UVs, then texture the blade steel `#b9c2cb` with a dark edge, the guard gold and the grip brown."
+- "Add a 2-second looping idle animation where the head sways a few degrees."
+- "Show me the model at 1.0 s of the `idle` animation from the front."
+- "Validate the model and export the `.geo.json` and `.animation.json` to my mod's assets folder."
+
+### Tips for fast sessions
+
+Measured over ~1,700 real calls: a tool call takes about **40 ms**, but the pause between calls is about
+**10 s** — the session speed comes from how many round-trips there are and how much the AI has to read.
+
+1. **Batch:** `create_cubes`, `modify_cubes`, `shade_cubes`, `set_keyframes` do in one call what used
+   to take dozens. They are all-or-nothing and one undo step each.
+2. **Read narrowly:** use `get_scene_tree` with `bone_names` / `include_faces:false` on big models.
+3. **Screenshots sparingly:** they are downscaled to 800 px (`max_size`); use
+   `set_camera_angle screenshot:false` to move the camera and take one screenshot at the end.
+4. **Trust the replies:** write tools echo what they stored (e.g. `set_keyframes` lists every channel).
+
+## 🔁 After changing the code
+
+| You changed… | Do this |
+|---|---|
+| the server (`apps/mcp-server`) | `pnpm --filter mcp-server build`, then **restart the AI client** |
+| the plugin (`apps/mcp-plugin`) | `pnpm --filter mcp-plugin build`, then in Blockbench **File → Plugins → reload** the plugin (restarting the AI client does *not* reload it) |
+
+Confirm with `get_project_info` → `plugin_build`, and bump `PLUGIN_BUILD` in the plugin source whenever
+you change it.
 
 ## 🐛 Troubleshooting
 
-- **Connection issues**: Make sure the Blockbench plugin is running and the MCP server is configured in Claude Desktop
-- **Port conflicts**: The plugin uses port 9999 by default. Make sure no other application is using this port
-- **Plugin not loading**: Verify that the plugin file is properly built and Blockbench version is compatible
-- **Command timeouts**: Try simplifying your requests or breaking them into smaller steps
+| Symptom | Cause / fix |
+|---|---|
+| Server exits with `FATAL: bridge port 9999 is already in use` | Another MCP client already runs this server (e.g. the Claude Desktop app **and** Claude Code). Close one and restart the other. Log (Windows): `%APPDATA%\Claude\logs\mcp-server-blockbench.log`. |
+| `[NOT_CONNECTED] Blockbench is not connected` | Blockbench isn't running, the plugin isn't loaded, or no model is open. The plugin reconnects on its own once the server is up. |
+| A tool is missing (e.g. `create_sphere`) | It's hidden by the `geckolib` profile — set `BLOCKBENCH_MCP_PROFILE=full`. |
+| A code change had no effect | See [After changing the code](#-after-changing-the-code); check `plugin_build`. |
+| `[TIMEOUT]` | Blockbench was busy or a dialog was open. The edit may still have happened — check with `get_scene_tree` before retrying. |
+| A screenshot shows the rest pose instead of the animation | Pass `time` (and `animation_id`) to `capture_screenshot`. |
 
-## 🔧 Technical Details
-
-### Communication Protocol
-
-The system uses Socket.IO for real-time communication between components:
-
-- **WebSocket connection** on port 9999
-- **JSON-based commands** with type and payload structure
-- **Event-driven architecture** for responsive interactions
-
-### Architecture
+## 🔧 Development
 
 ```
-Claude AI ← MCP Protocol → MCP Server ← Socket.IO → Blockbench Plugin
+Blockbench-MCP/
+├── apps/
+│   ├── mcp-server/        # MCP server: tool registrations, Socket.IO bridge (src/index.ts), skill loader
+│   │   ├── test/          # mock-Blockbench harness + full-model test
+│   │   └── toolchain-e2e.mjs
+│   └── mcp-plugin/        # Blockbench plugin: one handler per tool (src/mcp_socketio_plugin.ts)
+├── packages/shared/       # tool-name types, model validation, pixel-art palettes
+├── skills/                # the 8 skill guides served to the AI
+├── ARCHITECTURE.md        # how it all fits together
+├── MODELING_CONSTRAINTS.md
+└── AGENTS.md
 ```
 
-## ⚠️ Limitations & Security Considerations
+```bash
+pnpm build                                  # build server + plugin
+pnpm --filter mcp-server dev                # rebuild the server on change
+pnpm --filter mcp-plugin dev                # rebuild the plugin on change
+pnpm --filter mcp-server test:model         # every tool against a mock Blockbench (build first)
+pnpm --filter mcp-server test:e2e           # hierarchy, batches, profiles, rejections
+```
 
-- The plugin allows executing code within Blockbench, which can be powerful but potentially risky
-- Always save your work before using experimental features
-- Complex operations might need to be broken down into smaller steps
-- Network communication happens over localhost only for security
+The tests start the real server on a random port with a simulated Blockbench, so they need neither
+Blockbench nor port 9999. They check the server and its wiring; the Blockbench API calls themselves
+are only exercised in real Blockbench.
 
-## 🤝 Contributing
+**Adding a tool** touches three places: the `registerTool` call in `apps/mcp-server/src/index.ts`, a
+handler plus its dispatch entry in `apps/mcp-plugin/src/mcp_socketio_plugin.ts`, and the `ToolType`
+union in `packages/shared/src/types.ts` — plus a mock handler and a check in the tests.
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## ⚠️ Limitations & security
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+- **`risky_eval` runs arbitrary JavaScript inside Blockbench**, with the app's permissions. Only allow
+  it when you understand the code being run.
+- **The bridge listens on port 9999 on all network interfaces**, not only on localhost, and treats
+  the most recently connected Socket.IO client as Blockbench. Use it on a trusted network and don't
+  allow inbound connections to port 9999 in your firewall.
+- `export_model` / `export_animations` can write files to the path you give (Blockbench asks for file
+  system permission).
+- GeckoLib renders cubes only — mesh elements are dropped on export (`validate_model` warns about it).
+- Always save your work before large AI-driven edits; most tool edits are undoable, but a crash is not.
 
-## � License
+## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE). The original copyright notice is kept.
 
 ## 🙏 Acknowledgments
 
@@ -247,4 +280,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Disclaimer:** This is a third-party integration and not officially affiliated with Blockbench.
+**Disclaimer:** This is a third-party integration and not officially affiliated with Blockbench,
+Mojang, GeckoLib or Anthropic.
