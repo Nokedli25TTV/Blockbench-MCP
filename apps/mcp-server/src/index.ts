@@ -911,7 +911,13 @@ server.registerTool(
             })
           )
         )
-        .describe("Keyframes per bone, keyed by existing group/bone name."),
+        // Spelled out: some clients flatten record schemas to a bare object, so the
+        // shape must also be in the text (seen live 2026-09-23).
+        .describe(
+          "Keyframes per bone, keyed by existing group/bone name. Each bone maps to an ARRAY of " +
+            "{ time, rotation?, position?, scale? }, e.g. { \"arm\": [{ \"time\": 0, \"rotation\": [0,0,0] }, " +
+            "{ \"time\": 1, \"rotation\": [0,0,45] }] }."
+        ),
       particle_effects: z
         .record(z.string(), z.string())
         .optional()
