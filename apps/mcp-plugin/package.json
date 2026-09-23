@@ -1,6 +1,6 @@
 {
   "name": "mcp-plugin",
-  "version": "0.0.1",
+  "version": "0.3.0",
   "description": "A Blockbench plugin for MCP (Model Context Protocol) using Socket.IO",
   "main": "index.js",
   "scripts": {
@@ -9,7 +9,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "packageManager": "pnpm@10.11.0",
   "dependencies": {
     "socket.io-client": "^4.8.1",
@@ -23,7 +23,7 @@
   },
   "blockbenchConfig": {
     "title": "MCP Plugin",
-    "author": "enfpdev",
+    "author": "enfpdev (fork: Nokedli25TTV)",
     "icon": "icon.png",
     "description": "A plugin for Blockbench to interact with MCP (Model Context Protocol) using Socket.IO.",
     "has_changelog": true,

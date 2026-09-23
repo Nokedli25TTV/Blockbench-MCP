@@ -1,14 +1,17 @@
 {
   "name": "blockbench-mcp",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "description": "",
   "private": true,
   "scripts": {
     "dev": "pnpm run --recursive --parallel dev",
-    "build": "pnpm run --recursive build"
+    "build": "pnpm run --recursive build",
+    "test": "pnpm --filter mcp-server test:model && pnpm --filter mcp-server test:e2e",
+    "typecheck": "pnpm --filter mcp-server exec tsc --noEmit -p . && node tools/check-plugin-types.mjs",
+    "report": "node tools/usage-report.mjs"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "packageManager": "pnpm@10.11.0"
 }

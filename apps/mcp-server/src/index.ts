@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Server as IOServer, Socket } from "socket.io";
-import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createServer, request as httpRequest, IncomingMessage, ServerResponse } from "http";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -14,6 +14,8 @@ import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 // MCP_BRIDGE_PORT so they run on an isolated port and never hijack (or get
 // hijacked by) a real Blockbench instance listening on 9999.
 const PORT = Number(process.env.MCP_BRIDGE_PORT) || 9999;
+// Keep in step with apps/*/package.json (the plugin takes its version from there).
+const SERVER_VERSION = "0.3.0";
 
 // IMPORTANT: when running as an MCP server over stdio, stdout is reserved for
 // the JSON-RPC protocol. ALL logging must go to stderr or it corrupts the stream.
@@ -71,7 +73,7 @@ function bridgeHttpHandler(req: IncomingMessage, res: ServerResponse) {
     return send(403, { error: "forbidden" });
   }
   relaysSeen.set(String(req.headers["x-blockbench-mcp-client"] || "relay"), Date.now());
-  if (req.url === PING_PATH) return send(200, { bridge: "blockbench-mcp", plugin_connected: !!(blockbench && blockbench.connected) });
+  if (req.url === PING_PATH) return send(200, { bridge: "blockbench-mcp", version: SERVER_VERSION, plugin_connected: !!(blockbench && blockbench.connected) });
   if (req.method !== "POST") return send(405, { error: "POST only" });
   const chunks: Buffer[] = [];
   let size = 0;
@@ -133,6 +135,40 @@ const relayHeaders = () => ({
   "content-type": "application/json",
 });
 
+// One request to the bridge on this machine. Plain node:http with no keep-alive
+// (agent: false) instead of fetch(): fetch pools sockets, and on Windows exiting
+// while a pooled socket is open aborts Node (libuv UV_HANDLE_CLOSING assertion).
+// A fresh connection per call also makes "owner gone" an unambiguous refusal.
+function localRequest(pathname: string, body: any, timeoutMs: number): Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const data = body == null ? null : Buffer.from(JSON.stringify(body));
+    const req = httpRequest(
+      {
+        host: BRIDGE_HOST,
+        port: PORT,
+        path: pathname,
+        method: data ? "POST" : "GET",
+        agent: false,
+        headers: { ...relayHeaders(), ...(data ? { "content-length": data.length } : {}) },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("aborted", () => req.destroy(Object.assign(new Error("response aborted"), { code: "ECONNRESET" })));
+        res.on("end", () => {
+          clearTimeout(timer);
+          let json: any = null;
+          try { json = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {}
+          resolve({ status: res.statusCode || 0, json });
+        });
+      }
+    );
+    const timer = setTimeout(() => req.destroy(Object.assign(new Error("timed out"), { code: "LOCAL_TIMEOUT" })), timeoutMs);
+    req.on("error", (e) => { clearTimeout(timer); reject(e); });
+    req.end(data ?? undefined);
+  });
+}
+
 // Try to own the port once; "in-use" means another process has it.
 let listenAttempt: ((err: any) => void) | null = null;
 httpServer.on("error", (err: any) => {
@@ -158,31 +194,46 @@ const listenOnce = (): Promise<"listening" | "in-use"> =>
   });
 
 // Is the port owned by a blockbench-mcp bridge (as opposed to another program)?
-const pingOwner = async (): Promise<boolean> => {
+// Returns the owner's ping reply, or null if nothing answers like a blockbench-mcp bridge.
+const pingOwner = async (): Promise<{ bridge: string; version?: string } | null> => {
   try {
-    const r = await fetch(`http://${BRIDGE_HOST}:${PORT}${PING_PATH}`, { headers: relayHeaders(), signal: AbortSignal.timeout(2000) });
-    const j: any = await r.json();
-    return r.ok && j?.bridge === "blockbench-mcp";
+    const { status, json } = await localRequest(PING_PATH, null, 2000);
+    return status === 200 && json?.bridge === "blockbench-mcp" ? json : null;
   } catch {
-    return false;
+    return null;
   }
 };
 
 // Become the owner if the port is free, otherwise a relay of the bridge that owns it.
+// A few attempts, in case the owner exits between our listen and our ping.
 async function establishBridge(): Promise<void> {
-  if ((await listenOnce()) === "listening") {
-    const tookOver = role === "relay";
-    role = "owner";
-    ownerSince = Date.now();
-    log(`Socket.IO bridge listening on http://${BRIDGE_HOST}:${PORT} (local only)${tookOver ? " — took over from the previous owner" : ""}.`);
-    return;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 500));
+    if ((await listenOnce()) === "listening") {
+      const tookOver = role === "relay";
+      role = "owner";
+      ownerSince = Date.now();
+      log(`Socket.IO bridge listening on http://${BRIDGE_HOST}:${PORT} (local only)${tookOver ? " — took over from the previous owner" : ""}.`);
+      return;
+    }
+    const owner = await pingOwner();
+    if (owner) {
+      if (role !== "relay") {
+        log(
+          `Port ${PORT} is owned by another blockbench-mcp server — joined it as a relay (shared bridge).` +
+            (owner.version !== SERVER_VERSION
+              ? ` Note: the owner runs v${owner.version}, this server v${SERVER_VERSION}; restart the owner's client to use this version's tools.`
+              : "")
+        );
+      }
+      role = "relay";
+      return;
+    }
   }
-  if (await pingOwner()) {
-    if (role !== "relay") log(`Port ${PORT} is owned by another blockbench-mcp server — joined it as a relay (shared bridge).`);
-    role = "relay";
-    return;
-  }
-  log(`FATAL: bridge port ${PORT} is in use by a program that is not a blockbench-mcp bridge. Free the port or set MCP_BRIDGE_PORT.`);
+  log(
+    `FATAL: bridge port ${PORT} is in use by a program that is not a blockbench-mcp bridge (or by a blockbench-mcp ` +
+      `server older than 0.3.0, which cannot share it — restart the client that runs it). Free the port or set MCP_BRIDGE_PORT.`
+  );
   process.exit(1);
 }
 
@@ -201,8 +252,8 @@ const takeOverIfOwnerGone = (): Promise<void> => {
 const bridgeInfo = () => {
   const recent = [...relaysSeen.values()].filter((t) => Date.now() - t < 10_000).length;
   return role === "owner"
-    ? { role, port: PORT, relays_connected: recent }
-    : { role, port: PORT, note: "calls go through the server that owns the port" };
+    ? { role, port: PORT, server_version: SERVER_VERSION, relays_connected: recent }
+    : { role, port: PORT, server_version: SERVER_VERSION, note: "calls go through the server that owns the port" };
 };
 
 const bridgeReady = establishBridge();
@@ -294,23 +345,18 @@ async function sendToBlockbench(tool: ToolType, input: Record<string, any>, time
 class OwnerUnreachable extends Error {}
 
 async function sendViaOwner(tool: string, input: Record<string, any>, ms: number, callId: string): Promise<any> {
-  let r: Response;
+  let r: { status: number; json: any };
   try {
-    r = await fetch(`http://${BRIDGE_HOST}:${PORT}${RELAY_PATH}`, {
-      method: "POST",
-      headers: relayHeaders(),
-      body: JSON.stringify({ tool, input, timeoutMs: ms, callId }),
-      signal: AbortSignal.timeout(ms + 12_000), // owner answers within its own grace + ms
-    });
+    // The owner answers within its own plugin-wait grace + ms.
+    r = await localRequest(RELAY_PATH, { tool, input, timeoutMs: ms, callId }, ms + 12_000);
   } catch (e: any) {
-    if (e?.name === "TimeoutError") throw new Error(`Timed out waiting for a response from Blockbench after ${ms}ms (tool: ${tool}, via the shared bridge).`);
+    if (e?.code === "LOCAL_TIMEOUT") throw new Error(`Timed out waiting for a response from Blockbench after ${ms}ms (tool: ${tool}, via the shared bridge).`);
     // Refused, reset or closed before an answer: the owner is (probably) gone.
-    throw new OwnerUnreachable(e?.cause?.code || e?.message || String(e));
+    throw new OwnerUnreachable(e?.code || e?.message || String(e));
   }
-  const j: any = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(`The shared bridge refused the call (HTTP ${r.status}: ${j?.error ?? "unknown"}).`);
-  if (j.transportError) throw new Error(j.transportError);
-  return j.response;
+  if (r.status !== 200) throw new Error(`The shared bridge refused the call (HTTP ${r.status}: ${r.json?.error ?? "unknown"}).`);
+  if (r.json?.transportError) throw new Error(r.json.transportError);
+  return r.json?.response;
 }
 
 // Right after this process became the owner the plugin is still in its reconnect
@@ -525,7 +571,7 @@ const toolAnnotations = (name: string) =>
       };
 
 const server = new McpServer(
-  { name: "blockbench-mcp", version: "0.2.0" },
+  { name: "blockbench-mcp", version: SERVER_VERSION },
   instructions ? { instructions } : undefined
 );
 

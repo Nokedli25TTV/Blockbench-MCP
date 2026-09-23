@@ -213,8 +213,9 @@ Measured over ~1,700 real calls: a tool call takes about **40 ms**, but the paus
 | the server (`apps/mcp-server`) | `pnpm --filter mcp-server build`, then **restart the AI client** |
 | the plugin (`apps/mcp-plugin`) | `pnpm --filter mcp-plugin build`, then in Blockbench **File → Plugins → reload** the plugin (restarting the AI client does *not* reload it) |
 
-Confirm with `get_project_info` → `plugin_build`, and bump `PLUGIN_BUILD` in the plugin source whenever
-you change it.
+Confirm with `get_project_info`: `plugin_build` is stamped at build time as
+`<version>+<UTC date.time>.<git commit>` (`-dirty` = built with uncommitted changes), and
+`mcp_bridge.server_version` shows the server.
 
 ## 🐛 Troubleshooting
 
@@ -238,6 +239,8 @@ Blockbench-MCP/
 │   └── mcp-plugin/        # Blockbench plugin: one handler per tool (src/mcp_socketio_plugin.ts)
 ├── packages/shared/       # tool-name types, model validation, pixel-art palettes
 ├── skills/                # the 8 skill guides served to the AI
+├── tools/                 # usage report, plugin typecheck ratchet
+├── .github/workflows/     # CI: build, typecheck, tests on Ubuntu + Windows
 ├── ARCHITECTURE.md        # how it all fits together
 ├── MODELING_CONSTRAINTS.md
 └── AGENTS.md
@@ -247,13 +250,22 @@ Blockbench-MCP/
 pnpm build                                  # build server + plugin
 pnpm --filter mcp-server dev                # rebuild the server on change
 pnpm --filter mcp-plugin dev                # rebuild the plugin on change
-pnpm --filter mcp-server test:model         # every tool against a mock Blockbench (build first)
-pnpm --filter mcp-server test:e2e           # hierarchy, batches, profiles, rejections
+pnpm test                                   # model test + e2e against a mock Blockbench (build first)
+pnpm typecheck                              # server tsc + plugin error ratchet
+pnpm report                                 # usage report from Claude's logs (add --since 2026-09-01)
 ```
 
 The tests start the real server on a random port with a simulated Blockbench, so they need neither
-Blockbench nor port 9999. They check the server and its wiring; the Blockbench API calls themselves
-are only exercised in real Blockbench.
+Blockbench nor port 9999. They check the server and its wiring (including the shared bridge: relay,
+takeover, resend); the Blockbench API calls themselves are only exercised in real Blockbench. CI runs
+build, typecheck and tests on every push to `main`.
+
+The plugin still has 56 known type errors from outdated `blockbench-types` (APIs that exist at runtime
+but not in the typings). `pnpm typecheck` fails only if that number goes up.
+
+`pnpm report` reads the Claude app's `mcp-server-blockbench.log` and Claude Code's
+`mcp-logs-blockbench/*.jsonl`: call counts, latency, think time between calls, error codes, per-tool
+numbers, and bridge events (port conflicts, relay joins, takeovers). Nothing is sent anywhere.
 
 **Adding a tool** touches three places: the `registerTool` call in `apps/mcp-server/src/index.ts`, a
 handler plus its dispatch entry in `apps/mcp-plugin/src/mcp_socketio_plugin.ts`, and the `ToolType`

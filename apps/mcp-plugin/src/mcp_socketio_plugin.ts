@@ -11,24 +11,28 @@ let mcpInterval: ReturnType<typeof setInterval> | null = null;
 let commandListElement: HTMLElement;
 const commandHistory: Array<{ timestamp: Date; type: 'sent' | 'received'; command: string; data?: any }> = [];
 // Reported by get_project_info so you can confirm Blockbench loaded THIS build
-// after a rebuild (File → Plugins → reload). Bump it whenever the plugin changes.
-const PLUGIN_BUILD = '2026-09-23-r3';
+// after a rebuild (File → Plugins → reload). Stamped by vite.config.ts at build time.
+declare const __PLUGIN_VERSION__: string;
+declare const __PLUGIN_BUILD__: string;
+const PLUGIN_VERSION = typeof __PLUGIN_VERSION__ !== 'undefined' ? __PLUGIN_VERSION__ : '0.0.0';
+const PLUGIN_BUILD = typeof __PLUGIN_BUILD__ !== 'undefined' ? __PLUGIN_BUILD__ : 'dev';
 let pluginToolCount = 0; // set from the dispatch map on every tool call
 
 const options: PluginOptions = {
   title: "MCP Plugin",
-  author: "enfpdev",
+  // Original plugin by enfpdev; this is a personal fork.
+  author: "enfpdev (fork: Nokedli25TTV)",
   description: "A plugin for interacting with MCP using Socket.IO.",
   about:
     "This plugin allows you to connect to the MCP server using Socket.IO and provides various utilities for interacting with it.",
-  version: "0.0.1",
+  version: PLUGIN_VERSION,
   icon: "icon.png",
   tags: ["mcp", "ai", "agent"],
   variant: "desktop",
   await_loading: true,
   new_repository_format: true,
-  website: "https://github.com/enfpdev/blockbench-mcp",
-  repository: "https://github.com/enfpdev/blockbench-mcp",
+  website: "https://github.com/Nokedli25TTV/Blockbench-MCP",
+  repository: "https://github.com/Nokedli25TTV/Blockbench-MCP",
   onload: () => {
     // 127.0.0.1, not "localhost": the server binds to IPv4 loopback only, and
     // "localhost" may resolve to IPv6 ::1 first on Windows.

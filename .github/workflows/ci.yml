@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows too: that is where the plugin and server actually run, and socket
+        # behaviour (e.g. the shared-bridge takeover) differs between the two.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4 # version from "packageManager" in package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm build
+
+      # Server: strict tsc. Plugin: ratchet against the known blockbench-types errors.
+      - run: pnpm typecheck
+
+      # Real server + simulated Blockbench on a random port (no Blockbench needed).
+      - run: pnpm test
+
+      - name: Upload the built plugin and server
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blockbench-mcp-build
+          path: |
+            apps/mcp-plugin/dist/mcp_socketio_plugin.js
+            apps/mcp-server/dist/index.js
+          if-no-files-found: error

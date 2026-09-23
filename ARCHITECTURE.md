@@ -29,7 +29,9 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
   first becomes the **owner**; a later one finds the port taken, pings `GET /mcp-bridge/ping` and joins
   as a **relay**: its tool calls go to the owner as `POST /mcp-bridge/call` on the same port, and the
   owner forwards them to the plugin. Relays ping the owner every 3 s; when it is gone, one takes the port
-  over and the plugin (which reconnects by itself) connects to it — measured ~1.3 s in the e2e test.
+  over and the plugin (which reconnects by itself) connects to it — 0.6–1.5 s in the e2e test.
+  Relay traffic uses plain `node:http` with `agent: false`, not `fetch()`: pooled keep-alive sockets
+  made Node abort on exit on Windows (libuv `UV_HANDLE_CLOSING` assertion).
   A relayed call carries a `call_id`; if the owner dies mid-call it is resent once and the plugin
   answers the resend with the first result instead of applying the edit twice. The HTTP endpoint is
   locked down like the socket: no `Origin` allowed, a custom `x-blockbench-mcp-relay` header required,
@@ -71,6 +73,10 @@ blockbench-mcp/
 │  └─ types.ts                    # ToolType + SceneTree shared types
 ├─ skills/                        # 8 Markdown guides (use / mcp-overview / modeling / texturing /
 │                                 #   pbr-materials / pixel-shading / animation / development)
+├─ tools/
+│  ├─ usage-report.mjs            # `pnpm report`: calls/latency/errors/bridge events from Claude's logs
+│  └─ check-plugin-types.mjs      # plugin tsc ratchet (baseline = known blockbench-types errors)
+├─ .github/workflows/ci.yml       # build + typecheck + tests, Ubuntu and Windows
 ├─ ARCHITECTURE.md  MODELING_CONSTRAINTS.md  AGENTS.md  README.md
 └─ package.json  pnpm-workspace.yaml  tsconfig.base.json
 ```
@@ -91,7 +97,10 @@ registration (schema + forward) in `index.ts`, and a handler (Blockbench API) in
    and runs the **pure** `validateScene` from `packages/shared` server-side.
 
 `get_project_info` returns `plugin_build` + `tool_count` — the canonical check that the **plugin**
-(not just the server) was reloaded after a rebuild.
+(not just the server) was reloaded after a rebuild. `plugin_build` is stamped by `vite.config.ts`
+(`<version>+<UTC yyyymmdd.hhmm>.<git sha>[-dirty]`); the version comes from
+`apps/mcp-plugin/package.json`. The server's version (`SERVER_VERSION` in `index.ts`) is in
+`mcp_bridge.server_version`, and a relay logs a note when the owner runs a different version.
 
 ## 5. Build & run
 
@@ -99,8 +108,9 @@ registration (schema + forward) in `index.ts`, and a handler (Blockbench API) in
 # from blockbench-mcp/ (use the PowerShell tool for pnpm/node in this sandbox)
 pnpm -C . --filter mcp-plugin build     # vite  → apps/mcp-plugin/dist/mcp_socketio_plugin.js
 pnpm -C . --filter mcp-server build     # esbuild → apps/mcp-server/dist/index.js
-pnpm -C . --filter mcp-server test:model   # local mock test (free, no Blockbench)
-pnpm -C . --filter mcp-server test:e2e     # local mock test
+pnpm -C . test          # test:model + test:e2e — local mock tests (free, no Blockbench)
+pnpm -C . typecheck     # server tsc + plugin ratchet
+pnpm -C . report        # usage report from the Claude app + Claude Code logs
 ```
 
 Reload rules after a rebuild (the #1 source of "my fix didn't work"):
