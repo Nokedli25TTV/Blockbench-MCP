@@ -238,11 +238,14 @@ const options: PluginOptions = {
     const nonZeroAxes = (v: number[]): number => v.filter((n) => Math.abs(n) > 1e-6).length;
     const MIN_TEXTURED_CUBE_SIZE = 1;
 
-    const texturedCubeSizeError = (from: number[], to: number[], context: string): string | null => {
+    // Thin/flat cubes are legitimate (wings, ears, capes, 0.5-unit trims), so this
+    // WARNS instead of rejecting: faces under 1 texel get zero-size or fractional
+    // box-UV rects, which pack_uv cannot fix and GeckoLib may render oddly.
+    const thinCubeWarning = (from: number[], to: number[], context: string): string | null => {
       const dims = [Math.abs(to[0] - from[0]), Math.abs(to[1] - from[1]), Math.abs(to[2] - from[2])];
       const tooSmall = dims.findIndex((n) => n < MIN_TEXTURED_CUBE_SIZE);
       return tooSmall >= 0
-        ? `${context}: cube dimensions must be at least ${MIN_TEXTURED_CUBE_SIZE} model unit on every axis for reliable Blockbench/GeckoLib UV export. Got [${dims.join(', ')}].`
+        ? `${context} is thinner than ${MIN_TEXTURED_CUBE_SIZE} unit on an axis [${dims.join(', ')}]: fine for flat/detail parts, but its thin faces get zero-size or fractional UVs — check the texture there.`
         : null;
     };
 
@@ -268,7 +271,7 @@ const options: PluginOptions = {
       parent?: string;
       uv_offset?: [number, number];
       autouv?: 0 | 1 | 2 | "0" | "1" | "2";
-    }): { ok: boolean; name?: string; from?: number[]; to?: number[]; error?: string } => {
+    }): { ok: boolean; name?: string; from?: number[]; to?: number[]; error?: string; warning?: string } => {
       try {
         console.log('[MCP Plugin] createCube called with', input);
 
@@ -304,8 +307,7 @@ const options: PluginOptions = {
         // Normalize corners to min/max so the box is never inverted/degenerate (rule #5).
         const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
         const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
-        const sizeError = texturedCubeSizeError(from, to, `Cube "${input.name || 'new cube'}"`);
-        if (sizeError) return { ok: false, error: sizeError };
+        const sizeWarning = thinCubeWarning(from, to, `Cube "${input.name || 'new cube'}"`);
 
         // Unique, stable name across all cubes and groups (rule #4).
         let name: string;
@@ -381,7 +383,7 @@ const options: PluginOptions = {
         console.log('[MCP Plugin] Cube created:', cube);
         Blockbench.showStatusMessage(`[MCP] Created cube "${name}".`, 4000);
         logToHistory(`created cube "${name}"`);
-        return { ok: true, name, from, to };
+        return { ok: true, name, from, to, ...(sizeWarning ? { warning: sizeWarning } : {}) };
       } catch (err: any) {
         console.error('[MCP Plugin] createCube failed:', err);
         Blockbench.showStatusMessage(`[MCP] Cube failed: ${err?.message || err}`, 6000);
@@ -493,6 +495,7 @@ const options: PluginOptions = {
         const createdGroupsByName = new Map<string, any>();
         const createdGroups: any[] = [];
         const createdCubes: any[] = [];
+        const warnings: string[] = [];
         // A parent resolves to a group made in THIS batch first, else an existing one.
         // Note: unlike create_cube, the batch never falls back to Group.selected —
         // parents are always explicit, so the result is deterministic.
@@ -518,8 +521,8 @@ const options: PluginOptions = {
             const rawTo: [number, number, number] = c.to || [rawFrom[0] + size, rawFrom[1] + size, rawFrom[2] + size];
             const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
             const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
-            const sizeError = texturedCubeSizeError(from, to, `cubes[] entry "${name}"`);
-            if (sizeError) throw new Error(sizeError);
+            const sizeWarning = thinCubeWarning(from, to, `Cube "${name}"`);
+            if (sizeWarning) warnings.push(sizeWarning);
             const cube = new Cube({ name, from, to, origin: c.origin || from, ...resolveCubeUv(c) }).init();
             const parent = resolveParent(c.parent);
             if (parent) cube.addTo(parent);
@@ -548,7 +551,7 @@ const options: PluginOptions = {
         const cubeNames = createdCubes.map((c) => c.name);
         Blockbench.showStatusMessage(`[MCP] Created ${groupNames.length} group(s) + ${cubeNames.length} cube(s).`, 4000);
         logToHistory(`batch created ${groupNames.length} group(s) + ${cubeNames.length} cube(s)`);
-        return { ok: true, groups: groupNames, cubes: cubeNames };
+        return { ok: true, groups: groupNames, cubes: cubeNames, ...(warnings.length ? { warnings } : {}) };
       } catch (err: any) {
         console.error('[MCP Plugin] createCubes failed:', err);
         logToHistory('error: ' + (err?.message || String(err)));
@@ -1510,8 +1513,10 @@ const options: PluginOptions = {
         let to = input.to !== undefined ? input.to : [...cube.to];
         const nFrom = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
         const nTo = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
-        const sizeError = texturedCubeSizeError(nFrom, nTo, `Cube "${cube.name}"`);
-        if (sizeError) return { ok: false, error: sizeError };
+        // Only warn when the geometry is being changed — not on every UV/name edit
+        // of an existing flat cube.
+        const sizeWarning = (input.from !== undefined || input.to !== undefined)
+          ? thinCubeWarning(nFrom, nTo, `Cube "${cube.name}"`) : null;
 
         Undo.initEdit({ elements: [cube], outliner: true });
 
@@ -1535,7 +1540,7 @@ const options: PluginOptions = {
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`modified cube "${cube.name}"`);
-        return { ok: true, name: cube.name, from: [...cube.from], to: [...cube.to] };
+        return { ok: true, name: cube.name, from: [...cube.from], to: [...cube.to], ...(sizeWarning ? { warning: sizeWarning } : {}) };
       } catch (err: any) {
         console.error('[MCP Plugin] modifyCube failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -3881,9 +3886,11 @@ const options: PluginOptions = {
           const a = rects[i], b = rects[j];
           if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) { overlaps++; if (overlapPairs.length < 20) overlapPairs.push(`${a.cube}~${b.cube}`); }
         }
-        // GeckoLib export is sensitive to every bad face. Treat null/zero-size UVs
-        // as invalid too so validation matches the export-safety rule.
-        const valid = overlaps === 0 && outOfBounds === 0 && nullUv === 0 && zeroSize === 0;
+        // VALID hinges on what pack_uv can fix and what corrupts a texture: overlaps
+        // (paint bleed) and out-of-bounds UVs. null / zero-size faces come from flat
+        // or sub-1-unit cubes — pack_uv cannot fix those, so marking them invalid
+        // would send the AI into a pack/validate loop. They stay WARNINGS.
+        const valid = overlaps === 0 && outOfBounds === 0;
         const warnings = nullUv > 0 || zeroSize > 0;
         const uvMode = cubes.length === 0 ? 'none' : boxUvCount === cubes.length ? 'box_uv' : boxUvCount === 0 ? 'per_face' : 'mixed';
         logToHistory(`validate_uv: ${cubes.length} cubes/${faceCount} faces, overlaps=${overlaps} oob=${outOfBounds} null=${nullUv} zero=${zeroSize}, mode=${uvMode}, tex=${texW}x${texH}`);
@@ -3891,8 +3898,10 @@ const options: PluginOptions = {
           ok: true, valid, warnings, cubes: cubes.length, faces: faceCount, uv_mode: uvMode, box_uv_cubes: boxUvCount,
           texture: [texW, texH], overlaps, overlapping_pairs: overlapPairs, out_of_bounds: outOfBounds, null_uv: nullUv, zero_size_uv: zeroSize,
           recommendation: !valid
-            ? 'Fix overlaps, out-of-bounds, null, and zero-size UVs. Prefer pack_uv or per-cube uv_offset, then re-validate before painting/exporting.'
-            : 'UV layout is valid — safe to paint / shade_cube.',
+            ? 'Run pack_uv (or set per-cube uv_offset) to fix overlapping/out-of-bounds UVs, then re-validate before painting/exporting.'
+            : warnings
+              ? 'Safe to paint — no overlaps. Null/zero-size faces come from flat or sub-1-unit cubes; pack_uv cannot fix them. If those faces look wrong in-game, thicken the cube to at least 1 unit.'
+              : 'UV layout is valid — safe to paint / shade_cube.',
         };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
@@ -3983,10 +3992,6 @@ const options: PluginOptions = {
       });
 
       const handlers: Record<string, (input: any) => any> = {
-        hello_world: (input) => {
-          Blockbench.showStatusMessage(`[MCP] Hello, ${input?.name || "World"}!`, 5000);
-          return { ok: true, tool: 'hello_world' };
-        },
         create_cube: createCube,
         create_cubes: createCubes,
         create_group: createGroup,

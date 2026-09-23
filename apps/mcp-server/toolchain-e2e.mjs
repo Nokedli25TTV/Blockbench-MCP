@@ -93,6 +93,17 @@ try {
   check("get_bone_pose returns world_position [x,y,z]", Array.isArray(pose.world_position) && pose.world_position.length === 3);
   check("get_bone_pose returns world_bbox.lowest_y (ground-clipping)", !!pose.world_bbox && typeof pose.world_bbox.lowest_y === "number");
 
+  console.log("\n--- Thin cubes warn (not reject) + keyframe read-back is shown ---");
+  const thin = await h.call("create_cube", { name: "wing_membrane", parent: "handle_bone", from: [0, 0, 0], to: [6, 4, 0] });
+  check("thin create_cube succeeds (warning, not rejection)", !thin.isError, thin.text);
+  check("thin create_cube reply carries the warning", /⚠.*thinner than 1 unit/.test(thin.text || ""), thin.text);
+  const thinBatch = await h.call("create_cubes", { cubes: [{ name: "ear_l", parent: "handle_bone", from: [0, 0, 0], to: [2, 3, 0.5] }] });
+  check("create_cubes keeps a thin cube (no rollback) and warns", !thinBatch.isError && /⚠/.test(thinBatch.text || "") && !!h.mock.findCube("ear_l"), thinBatch.text);
+  const kc = await h.call("manage_keyframes", { action: "create", bone_name: "crystal_x", channel: "rotation", keyframes: [{ time: 0, values: [0, 0, 0] }, { time: 1, values: [4, 0, 0] }] });
+  check("manage_keyframes reply shows the stored keyframes", !kc.isError && /Stored now: t=0 \[0, 0, 0\] · t=1 \[4, 0, 0\]/.test(kc.text || ""), kc.text);
+  const km = await h.call("manage_keyframes", { action: "edit", bone_name: "crystal_x", channel: "rotation", keyframes: [{ time: 0.5, values: [9, 9, 9] }] });
+  check("edit at a time with no keyframe is flagged, not silent", !km.isError && /No keyframe matched/.test(km.text || ""), km.text);
+
   console.log("\n--- Validation (expected PASS) ---");
   const v1 = await h.call("validate_model");
   console.log(v1.text);

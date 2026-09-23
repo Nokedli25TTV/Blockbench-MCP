@@ -6,7 +6,7 @@ How this project is built and where everything lives. Companion to `MODELING_CON
 ## 1. What it is
 
 A custom integration that lets **Claude (Claude Desktop)** do 3D modeling in **Blockbench**
-over the **Model Context Protocol (MCP)**. ~105 MCP tools cover modeling, animation, export,
+over the **Model Context Protocol (MCP)**. 112 MCP tools cover modeling, animation, export,
 texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 
 ## 2. The three processes + data flow
@@ -23,8 +23,15 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 - The **server** owns the MCP protocol (stdout = JSON-RPC; **all logging goes to stderr**) and
   bridges each tool call to the plugin over Socket.IO, awaiting the plugin's ack.
 - The **plugin** runs in Blockbench, executes the real Blockbench API calls, and acks `{ ok, ... }`.
-- Only **one** process may own port 9999 at a time. Two MCP clients (e.g. Claude Desktop **and**
-  a Claude Code session) both spawning a server collide → calls hang ~4 min. Keep one on the bridge.
+- Only **one** process may own port 9999 at a time (the plugin connects to `localhost:9999` only).
+  Both the Claude app (`%APPDATA%\Claude\claude_desktop_config.json` — its server starts with the app)
+  and Claude Code (`~/.claude.json`) are configured to spawn this server; whichever starts first owns
+  the bridge, and the other exits at once with `FATAL: bridge port 9999 is already in use` (visible
+  in `%APPDATA%\Claude\logs\mcp-server-blockbench.log`). Until a shared bridge exists, use Blockbench
+  from ONE client at a time — e.g. quit the Claude app before driving Blockbench from Claude Code.
+- Every tool call carries its own Socket.IO ack and a per-tool timeout (`TOOL_TIMEOUTS` in
+  `index.ts`: 10 s default, 20 s reads/animation, 30 s render/pack, 60 s export). A connected
+  plugin is usable immediately — there is no separate "ready" gate.
 
 ## 3. Repository layout (what's where)
 
@@ -33,7 +40,7 @@ blockbench-mcp/
 ├─ apps/
 │  ├─ mcp-server/                 # the external MCP server (Node, stdio + Socket.IO bridge)
 │  │  ├─ src/
-│  │  │  ├─ index.ts              # ★ registers ALL ~105 MCP tools; the :9999 bridge; forward() helpers
+│  │  │  ├─ index.ts              # ★ registers ALL 112 MCP tools; the :9999 bridge; forward() helpers
 │  │  │  └─ skills.ts             # loads skills/*, builds the MCP `instructions` index, get_skill content
 │  │  ├─ test/
 │  │  │  ├─ harness.mjs           # spawns real server + a MOCK Blockbench scene + an MCP stdio client
@@ -119,5 +126,5 @@ Recommended order: `set_project` (texture size) → `create_texture` (atlas) →
 - Plugin element creation: `new Cube(...).init()` BEFORE `addTo`; always attach to a parent;
   guarantee `Undo.finishEdit()` runs (else an orphan with no undo entry).
 - Plugin imports `packages/shared` by **relative path** for runtime (vite can't resolve the
-  `@shared/*` alias at runtime; only type-only `@shared` imports are erased).
+  `@blockbench-mcp/shared/*` alias at runtime; only type-only imports of it are erased).
 - Animations only select/play in Animation mode — `ensureAnimationMode()` calls `Animator.join()`.

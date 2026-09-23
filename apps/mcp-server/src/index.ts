@@ -25,35 +25,18 @@ const httpServer = createServer();
 const io = new IOServer(httpServer, { cors: { origin: "*" } });
 
 let blockbench: Socket | null = null;
-let blockbenchReady = false;
 
+// A connected socket is usable immediately: the plugin registers its
+// tool_command handler synchronously on load, before the (async) connection
+// completes, and every call is confirmed by its own ack under a per-tool
+// timeout — so no separate "ready" gate is needed. client_ready is only logged.
 io.on("connection", (socket) => {
   log("Blockbench plugin connected:", socket.id);
   blockbench = socket;
-  blockbenchReady = false;
-  // The plugin normally emits client_ready from its connect handler. During
-  // rapid local server restarts Socket.IO can reconnect before that handler
-  // re-emits, leaving a healthy socket permanently gated as "not ready".
-  // Give the already-loaded desktop plugin a short grace period, then accept
-  // the live connection; actual tool calls still require acknowledgements.
-  const readyFallback = setTimeout(() => {
-    if (blockbench === socket && socket.connected && !blockbenchReady) {
-      blockbenchReady = true;
-      log("Blockbench plugin ready fallback activated after reconnect");
-    }
-  }, 30_000);
-  socket.on("client_ready", () => {
-    clearTimeout(readyFallback);
-    if (blockbench === socket) blockbenchReady = true;
-    log("Blockbench plugin is ready");
-  });
+  socket.on("client_ready", () => log("Blockbench plugin is ready"));
   socket.on("disconnect", () => {
-    clearTimeout(readyFallback);
     log("Blockbench plugin disconnected:", socket.id);
-    if (blockbench === socket) {
-      blockbench = null;
-      blockbenchReady = false;
-    }
+    if (blockbench === socket) blockbench = null;
   });
 });
 
@@ -79,15 +62,12 @@ httpServer.listen(PORT, () => {
   log(`Socket.IO bridge listening on http://localhost:${PORT}`);
 });
 
-// Per-tool timeout tiers. A single global 8s timeout makes genuinely-slow but
-// CORRECT operations (codec export, UV packing, rendering, whole-scene reads)
-// fail spuriously — and a spurious failure is worse than slow: the plugin may
-// STILL apply the edit after the server gave up, leaving the model and the AI's
-// view out of sync (a retry then duplicates it). Give heavy tools real headroom;
-// everything else keeps a tight default so a genuinely hung call surfaces fast.
-// Typed as Record<string, number> (not Record<ToolType,…>) so tools that exist at
-// runtime but aren't in the shared ToolType union (pack_uv/validate_uv/shade_cube)
-// can be tuned here too.
+// Per-tool timeout tiers. A timeout never slows a normal call — it only decides
+// how long a FAILURE takes to surface — so keep it as short as each tool safely
+// allows. Measured over 1659 real calls (2026-06/07): p99 320 ms, slowest ~1 s.
+// Too short is worse than slow, though: the plugin may STILL apply an edit after
+// the server gave up (a retry then duplicates it), so heavy tools get headroom.
+// Keyed by string so any runtime tool name can be tuned here.
 const DEFAULT_TIMEOUT_MS = 10_000;
 const TOOL_TIMEOUTS: Record<string, number> = {
   // Render + PNG encode, or drive the UI then screenshot.
@@ -96,25 +76,22 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   set_camera_angle: 30_000,
   trigger_action: 30_000,
   emulate_clicks: 30_000,
-  // Animation mode can take several seconds to settle after a development
-  // plugin reload. A 10s timeout can expire while Blockbench is still applying
-  // the requested timeline/pose operation, which makes safe retries ambiguous.
-  get_bone_pose: 60_000,
-  get_keyframes: 60_000,
-  create_animation: 60_000,
-  manage_keyframes: 60_000,
-  animation_timeline: 60_000,
-  animation_graph_editor: 60_000,
-  list_animations: 60_000,
-  get_project_info: 60_000,
-  save_checkpoint: 60_000,
+  // Entering Animation mode (ensureAnimationMode) can take a few seconds on a big
+  // rig or right after a plugin reload — 20 s is ~20x the slowest measured call.
+  get_bone_pose: 20_000,
+  get_keyframes: 20_000,
+  create_animation: 20_000,
+  manage_keyframes: 20_000,
+  animation_timeline: 20_000,
+  animation_graph_editor: 20_000,
+  list_animations: 20_000,
   // Codec compile of the whole project / all animations.
   export_model: 60_000,
   export_animations: 60_000,
   // Whole-scene reads / validation that pull the full tree.
-  get_scene_tree: 60_000,
-  validate_model: 60_000,
-  validate_uv: 60_000,
+  get_scene_tree: 20_000,
+  validate_model: 20_000,
+  validate_uv: 20_000,
   find_elements_by_criteria: 20_000,
   // Batch geometry creation can build a whole model in one call.
   create_cubes: 30_000,
@@ -139,14 +116,6 @@ function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?
       reject(
         new Error(
           "Blockbench is not connected. Open Blockbench, enable the MCP plugin, and make sure a model is open."
-        )
-      );
-      return;
-    }
-    if (!blockbenchReady) {
-      reject(
-        new Error(
-          'Blockbench plugin is connected but not ready yet. Wait until stderr shows "Blockbench plugin is ready", then retry.'
         )
       );
       return;
@@ -187,6 +156,9 @@ function errorCode(text: string): string {
   return "ERROR";
 }
 const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text: `[${errorCode(text)}] ${text}` }] });
+// Non-fatal plugin warnings (`warning` or `warnings[]` on the ack) as trailing lines.
+const warningLines = (r: any): string =>
+  [r?.warning, ...(r?.warnings || [])].filter(Boolean).map((w: string) => `\n⚠️  ${w}`).join("");
 // Turn a data: URL into MCP image content (falls back to text if not a data URL).
 const image = (dataUrl: string) => {
   const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
@@ -287,7 +259,7 @@ server.registerTool(
       autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off (manual box-UV), 1 on (default), 2 relative."),
     },
   },
-  async (args) => forward("create_cube", args, (r) => `Created cube "${r.name ?? args.name ?? "cube"}".`)
+  async (args) => forward("create_cube", args, (r) => `Created cube "${r.name ?? args.name ?? "cube"}".${warningLines(r)}`)
 );
 
 server.registerTool(
@@ -333,7 +305,8 @@ server.registerTool(
     forward("create_cubes", args, (r) =>
       `Created ${(r.groups || []).length} group(s) + ${(r.cubes || []).length} cube(s).` +
       ((r.groups || []).length ? ` Groups: ${(r.groups || []).join(", ")}.` : "") +
-      ((r.cubes || []).length ? ` Cubes: ${(r.cubes || []).join(", ")}.` : "")
+      ((r.cubes || []).length ? ` Cubes: ${(r.cubes || []).join(", ")}.` : "") +
+      warningLines(r)
     )
 );
 
@@ -626,7 +599,19 @@ server.registerTool(
     },
   },
   async (args) =>
-    forward("manage_keyframes", args, (r) => `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.`)
+    forward("manage_keyframes", args, (r) => {
+      // The plugin reads the channel back after every write; show it, so a no-op
+      // or wrong value is visible now instead of several rounds later.
+      const stored: any[] = r.stored || [];
+      const shown = stored.slice(0, 12).map((k) => `t=${k.time} [${(k.values || []).join(", ")}]`).join(" · ");
+      const more = stored.length > 12 ? ` … (+${stored.length - 12} more)` : "";
+      const miss = r.affected === 0
+        ? (r.action === "create"
+          ? `\n⚠️  No keyframe was created on ${r.bone}.${r.channel}.`
+          : `\n⚠️  No keyframe matched the given time(s) on ${r.bone}.${r.channel} (±0.001 s) — nothing changed.`)
+        : "";
+      return `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.${miss}\nStored now: ${shown ? shown + more : "(no keyframes on this channel)"}`;
+    })
 );
 
 server.registerTool(
@@ -805,9 +790,10 @@ server.registerTool(
       "bounding box of the bone + all its descendant cubes, with `lowest_y`. Pass `time` to evaluate the " +
       "selected animation at that moment FIRST, so all values are for that animated frame. Two key uses: " +
       "(1) CALIBRATE rotation direction once (set a known +X, read world_rotation, note which way it tilts); " +
-      "(2) GROUND-CLIPPING — read `world_bbox.lowest_y` at the relevant times to check numerically whether the " +
-      "model dips below the floor, instead of eyeballing a screenshot. Coordinates are Blockbench scene/world " +
-      "space; if you need an absolute ground plane, calibrate once against a bone you know sits on the floor.",
+      "(2) GROUND-CLIPPING — `world_bbox.lowest_y` is reliable for the rest pose (no `time`). KNOWN ISSUE: " +
+      "with `time`, world_rotation/world_position are correct but world_bbox can be wrong — confirm animated " +
+      "floor contact with capture_screenshot {time}. Coordinates are Blockbench scene/world space; for an " +
+      "absolute ground plane, calibrate once against a bone you know sits on the floor.",
     inputSchema: {
       bone_name: z.string().describe("Bone/group name."),
       time: z.number().optional().describe("Seconds — evaluate the selected animation at this time before measuring."),
@@ -836,7 +822,7 @@ server.registerTool(
     inputSchema: modifyCubeInputSchema,
   },
   async (args) =>
-    forward("modify_cube", { ...args, id: args.id ?? args.cube_name }, (r) => `Modified cube "${r.name}" (from [${r.from}] to [${r.to}]).`)
+    forward("modify_cube", { ...args, id: args.id ?? args.cube_name }, (r) => `Modified cube "${r.name}" (from [${r.from}] to [${r.to}]).${warningLines(r)}`)
 );
 
 server.registerTool(
@@ -1746,7 +1732,6 @@ server.registerTool(
       `UV ${r.valid ? "VALID ✅" : "INVALID ❌"} — ${r.cubes} cube(s) / ${r.faces} face(s), mode: ${r.uv_mode}, atlas ${r.texture?.[0]}x${r.texture?.[1]}. ` +
       `overlaps:${r.overlaps} out_of_bounds:${r.out_of_bounds} null:${r.null_uv} zero_size:${r.zero_size_uv}.` +
       (r.overlaps ? `\nOverlapping cubes: ${(r.overlapping_pairs || []).join(", ")}` : "") +
-      ((r.null_uv || r.zero_size_uv) ? "\nNull or zero-size UV faces are invalid for GeckoLib export; fix with uv_offset/pack_uv before painting/exporting." : "") +
       `\n${r.recommendation}`
     )
 );
@@ -2182,30 +2167,9 @@ for (const s of skills.skills) {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(
-    "MCP server ready (stdio). Tools: create_cube, create_group, set_origin, set_rotation, " +
-      "get_scene_tree, register_texture, apply_texture, validate_model, create_animation, " +
-      "manage_keyframes, animation_graph_editor, animation_timeline, batch_keyframe_operations, " +
-      "animation_copy_paste, list_animations, modify_cube, delete_element, reparent_element, " +
-      "list_export_formats, export_model, export_animations, get_project_info, set_project, " +
-      "create_texture, list_textures, get_texture, activate_texture, add_texture_group, " +
-      "set_mesh_uv, auto_uv_mesh, rotate_mesh_uv, capture_screenshot, capture_app_screenshot, " +
-      "set_camera_angle, undo, redo, get_undo_stack, save_checkpoint, duplicate_element, " +
-      "rename_element, find_elements_by_criteria, select_all_of_type, filter_by_material, " +
-      "get_selection, create_pbr_material, configure_material, list_materials, get_material_info, " +
-      "import_texture_set, assign_texture_channel, save_material_config, get_face_material_instances, " +
-      "set_face_material_instance, list_material_instances, bulk_set_material_instances, " +
-      "clear_material_instances, paint_fill_tool, draw_shape_tool, gradient_tool, color_picker_tool, " +
-      "place_mesh, create_sphere, create_cylinder, extrude_mesh, subdivide_mesh, select_mesh_elements, " +
-      "move_mesh_vertices, delete_mesh_elements, merge_mesh_vertices, create_mesh_face, knife_tool, " +
-      "trigger_action, risky_eval, emulate_clicks, fill_dialog, from_geo_json, list_armatures, " +
-      "get_armature, add_armature, remove_armature, update_armature, list_armature_bones, " +
-      "get_armature_bone, add_armature_bone, remove_armature_bone, update_armature_bone, " +
-      "update_armature_bones_batch, select_armature_bones, get_vertex_weights, set_vertex_weight, " +
-      "set_vertex_weights_batch, clear_vertex_weights, copy_brush_tool, eraser_tool, paint_settings, " +
-      "paint_with_brush, create_brush_preset, load_brush_preset, texture_selection, " +
-      "texture_layer_management, paint_pixel_matrix, list_palettes, get_palette, list_skills, get_skill"
-  );
+  // The full tool list is what the client receives via tools/list; don't keep a
+  // hand-maintained copy here (it went stale as tools were added).
+  log("MCP server ready (stdio).");
   if (skills.dir) log(`Loaded ${skills.skills.length} skill guide(s) from ${skills.dir}: ${skills.skills.map((s) => s.name).join(", ")}`);
   else log("No skills directory found — skill guides are not available.");
 }

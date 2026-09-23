@@ -28,6 +28,12 @@ export function createMockScene() {
   const findCube = (name) => { let r = null; walk(scene.roots, (n) => { if (n.type === "cube" && n.name === name) r = n; }); return r; };
   const taken = (name) => !!(findGroup(name) || findCube(name));
   const nonZero = (v) => v.filter((n) => Math.abs(n) > 1e-6).length;
+  // Mirrors the plugin: sub-1-unit cubes are allowed but reported as a warning.
+  const thinWarning = (from, to, label) => {
+    const d = [0, 1, 2].map((i) => Math.abs(to[i] - from[i]));
+    return d.some((n) => n < 1) ? `${label} is thinner than 1 unit on an axis [${d.join(", ")}]` : null;
+  };
+  const keyframes = {}; // "bone.channel" -> [{ time, values, interpolation }]
 
   const handlers = {
     create_group(input) {
@@ -49,7 +55,23 @@ export function createMockScene() {
       const to = input.to || [from[0] + (input.size || 8), from[1] + (input.size || 8), from[2] + (input.size || 8)];
       const c = { type: "cube", uuid: randomUUID(), name: input.name || "element_1", from, to, origin: input.origin || from, rotation: [0, 0, 0], faces: {}, uv_offset: input.uv_offset };
       (parent ? parent.children : scene.roots).push(c);
-      return { ok: true, name: c.name, from, to };
+      const warning = thinWarning(from, to, `Cube "${c.name}"`);
+      return { ok: true, name: c.name, from, to, ...(warning ? { warning } : {}) };
+    },
+    manage_keyframes(input) {
+      if (!findGroup(input.bone_name)) return { ok: false, error: `Bone "${input.bone_name}" not found` };
+      const ch = (keyframes[`${input.bone_name}.${input.channel}`] ??= []);
+      const at = (t) => ch.find((k) => Math.abs(k.time - t) < 0.001);
+      let affected = 0;
+      for (const kf of input.keyframes || []) {
+        const k = at(kf.time);
+        if (input.action === "create") { ch.push({ time: kf.time, values: kf.values ?? [0, 0, 0], interpolation: kf.interpolation || "linear" }); affected++; }
+        else if (input.action === "edit" && k) { if (kf.values !== undefined) k.values = kf.values; affected++; }
+        else if (input.action === "delete" && k) { ch.splice(ch.indexOf(k), 1); affected++; }
+        else if (input.action === "select" && k) affected++;
+      }
+      ch.sort((a, b) => a.time - b.time);
+      return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel, stored: ch.map((k) => ({ ...k })) };
     },
     create_cubes(input) {
       const groups = Array.isArray(input.groups) ? input.groups : [];
@@ -72,7 +94,7 @@ export function createMockScene() {
       // Apply.
       const made = {};
       const resolve = (name) => (name ? (made[name] || findGroup(name)) : null);
-      const createdGroups = [], createdCubes = [];
+      const createdGroups = [], createdCubes = [], warnings = [];
       for (const g of groups) {
         const node = { type: "group", uuid: randomUUID(), name: g.name, origin: g.origin || [0, 0, 0], rotation: [0, 0, 0], children: [] };
         const parent = resolve(g.parent);
@@ -89,8 +111,10 @@ export function createMockScene() {
         const parent = resolve(c.parent);
         (parent ? parent.children : scene.roots).push(node);
         createdCubes.push(name);
+        const w = thinWarning(from, to, `Cube "${name}"`);
+        if (w) warnings.push(w);
       }
-      return { ok: true, groups: createdGroups, cubes: createdCubes };
+      return { ok: true, groups: createdGroups, cubes: createdCubes, ...(warnings.length ? { warnings } : {}) };
     },
     set_origin(input) {
       if (findCube(input.target)) return { ok: false, error: "target is a cube" };

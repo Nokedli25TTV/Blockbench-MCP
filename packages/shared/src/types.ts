@@ -1,5 +1,4 @@
 export type ToolType =
-  | "hello_world"
   | "create_cube"
   | "create_cubes"
   | "create_group"
@@ -113,10 +112,6 @@ export type ToolType =
 export type Vec3 = [number, number, number];
 
 // --- Tool input shapes ------------------------------------------------------
-
-export type HelloWorldInput = {
-  name?: string;
-};
 
 export type CreateCubeInput = {
   name?: string;
