@@ -1,3 +1,5 @@
+import type { FormatInfo } from "./formatRules";
+
 export type ToolType =
   | "create_cube"
   | "create_cubes"
@@ -196,4 +198,7 @@ export interface SceneTexture {
 export interface SceneTree {
   roots: SceneNode[];
   textures: SceneTexture[];
+  /** The project's format flags; decide the rotation/coordinate rules (formatRules.ts). */
+  format?: (FormatInfo & { meshes?: boolean }) | null;
+  mesh_count?: number;
 }

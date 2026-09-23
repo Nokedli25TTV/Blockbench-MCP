@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+// The same rotation/coordinate rules the plugin enforces (Node strips the TS types).
+import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor } from "../../../packages/shared/src/formatRules.ts";
 
 const require = createRequire(import.meta.url);
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -20,14 +22,19 @@ const { io } = require(require.resolve("socket.io-client", { paths: [path.join(d
 // In-memory mock Blockbench scene + faithful tool handlers.
 // --------------------------------------------------------------------------
 export function createMockScene() {
-  const scene = { roots: [], textures: [] };
+  // format null = the legacy strict rules (groups one axis, cubes never); tests switch
+  // formats with setFormat({ id, bone_rig, rotate_cubes, java_block_version, coordinate_limits }).
+  const scene = { roots: [], textures: [], format: null };
   let selected = null;
+  const rules = () => rulesFor(scene.format);
+  const setFormat = (f) => { scene.format = f; };
+  const rotationError = (kind, rot, label) => (rot ? checkRotation(kind === "cube" ? rules().cube : rules().bone, rot, label) : null);
+  const boundsError = (from, to, label) => checkBounds(rules(), from, to, label);
 
   const walk = (nodes, fn) => nodes.forEach((n) => { fn(n); if (n.type === "group") walk(n.children, fn); });
   const findGroup = (name) => { let r = null; walk(scene.roots, (n) => { if (n.type === "group" && n.name === name) r = n; }); return r; };
   const findCube = (name) => { let r = null; walk(scene.roots, (n) => { if (n.type === "cube" && n.name === name) r = n; }); return r; };
   const taken = (name) => !!(findGroup(name) || findCube(name));
-  const nonZero = (v) => v.filter((n) => Math.abs(n) > 1e-6).length;
   // Mirrors the plugin: sub-1-unit cubes are allowed but reported as a warning.
   const thinWarning = (from, to, label) => {
     const d = [0, 1, 2].map((i) => Math.abs(to[i] - from[i]));
@@ -45,7 +52,9 @@ export function createMockScene() {
       if (taken(input.name)) return { ok: false, error: `Name "${input.name}" already exists` };
       let parent = null;
       if (input.parent) { parent = findGroup(input.parent); if (!parent) return { ok: false, error: "parent not found" }; }
-      const g = { type: "group", uuid: randomUUID(), name: input.name, origin: input.origin || [0, 0, 0], rotation: [0, 0, 0], children: [] };
+      const rotErr = rotationError("bone", input.rotation, `Group "${input.name}"`);
+      if (rotErr) return { ok: false, error: rotErr };
+      const g = { type: "group", uuid: randomUUID(), name: input.name, origin: input.origin || [0, 0, 0], rotation: input.rotation || [0, 0, 0], children: [] };
       (parent ? parent.children : scene.roots).push(g);
       selected = g;
       return { ok: true, name: g.name, uuid: g.uuid, parent: parent ? parent.name : null };
@@ -57,7 +66,9 @@ export function createMockScene() {
       else parent = selected;
       const from = input.from || [0, 0, 0];
       const to = input.to || [from[0] + (input.size || 8), from[1] + (input.size || 8), from[2] + (input.size || 8)];
-      const c = { type: "cube", uuid: randomUUID(), name: input.name || "element_1", from, to, origin: input.origin || from, rotation: [0, 0, 0], faces: {}, uv_offset: input.uv_offset };
+      const problem = boundsError(from, to, `Cube "${input.name || "new cube"}"`) || rotationError("cube", input.rotation, `Cube "${input.name || "new cube"}"`);
+      if (problem) return { ok: false, error: problem };
+      const c = { type: "cube", uuid: randomUUID(), name: input.name || "element_1", from, to, origin: input.origin || from, rotation: input.rotation || [0, 0, 0], faces: {}, uv_offset: input.uv_offset };
       (parent ? parent.children : scene.roots).push(c);
       const warning = thinWarning(from, to, `Cube "${c.name}"`);
       return { ok: true, name: c.name, from, to, ...(warning ? { warning } : {}) };
@@ -90,7 +101,13 @@ export function createMockScene() {
       const id = aliases[String(input.format || "").toLowerCase()] || input.format;
       if (!known.includes(id)) return { ok: false, error: `Format "${input.format}" not found. Available: ${known.join(", ")}.` };
       if (input.model_identifier) scene.model_identifier = input.model_identifier;
-      return { ok: true, format: id, name: input.name || null, model_identifier: scene.model_identifier || null, animation_mode: id !== "java_block", texture: [input.texture_width || 16, input.texture_height || 16] };
+      // Report the new project's rules like the plugin does — without switching the mock's
+      // own format, which the other checks rely on (tests use setFormat for that).
+      const javaVersion = id === "java_block" ? javaBlockVersionFor(String(input.minecraft_version || input.default_minecraft_version || "26.3")) : null;
+      const newRules = rulesFor(id === "java_block"
+        ? { id, bone_rig: false, rotate_cubes: true, java_block_version: javaVersion, coordinate_limits: [-16, 32] }
+        : { id, bone_rig: true, rotate_cubes: true });
+      return { ok: true, format: id, name: input.name || null, model_identifier: scene.model_identifier || null, animation_mode: id !== "java_block", texture: [input.texture_width || 16, input.texture_height || 16], rules: newRules.summary, java_block_version: javaVersion };
     },
     replace_texture(input) {
       const t = scene.textures.find((x) => x.uuid === input.texture || x.name === input.texture);
@@ -175,11 +192,17 @@ export function createMockScene() {
         if (!g.name) return { ok: false, error: "group name required" };
         if (taken(g.name) || pending.has(g.name)) return { ok: false, error: `Name "${g.name}" already exists` };
         if (g.parent && !batchGroups.has(g.parent) && !findGroup(g.parent)) return { ok: false, error: `parent "${g.parent}" not found` };
+        const rotErr = rotationError("bone", g.rotation, `groups ("${g.name}")`);
+        if (rotErr) return { ok: false, error: rotErr };
         pending.add(g.name); batchGroups.add(g.name);
       }
       for (const c of cubes) {
         if (c.name && (taken(c.name) || pending.has(c.name))) return { ok: false, error: `Name "${c.name}" already exists` };
         if (c.parent && !batchGroups.has(c.parent) && !findGroup(c.parent)) return { ok: false, error: `parent "${c.parent}" not found` };
+        const f0 = c.from || [0, 0, 0];
+        const t0 = c.to || [f0[0] + (c.size || 8), f0[1] + (c.size || 8), f0[2] + (c.size || 8)];
+        const problem = boundsError(f0, t0, `cubes ("${c.name}")`) || rotationError("cube", c.rotation, `cubes ("${c.name}")`);
+        if (problem) return { ok: false, error: problem };
         if (c.name) pending.add(c.name);
       }
       // Apply.
@@ -187,7 +210,7 @@ export function createMockScene() {
       const resolve = (name) => (name ? (made[name] || findGroup(name)) : null);
       const createdGroups = [], createdCubes = [], warnings = [];
       for (const g of groups) {
-        const node = { type: "group", uuid: randomUUID(), name: g.name, origin: g.origin || [0, 0, 0], rotation: [0, 0, 0], children: [] };
+        const node = { type: "group", uuid: randomUUID(), name: g.name, origin: g.origin || [0, 0, 0], rotation: g.rotation || [0, 0, 0], children: [] };
         const parent = resolve(g.parent);
         (parent ? parent.children : scene.roots).push(node);
         made[g.name] = node; createdGroups.push(g.name);
@@ -198,7 +221,7 @@ export function createMockScene() {
         if (!name) { while (taken(`element_${idx}`) || pending.has(`element_${idx}`)) idx++; name = `element_${idx}`; pending.add(name); }
         const from = c.from || [0, 0, 0];
         const to = c.to || [from[0] + (c.size || 8), from[1] + (c.size || 8), from[2] + (c.size || 8)];
-        const node = { type: "cube", uuid: randomUUID(), name, from, to, origin: c.origin || from, rotation: [0, 0, 0], faces: {}, uv_offset: c.uv_offset };
+        const node = { type: "cube", uuid: randomUUID(), name, from, to, origin: c.origin || from, rotation: c.rotation || [0, 0, 0], faces: {}, uv_offset: c.uv_offset };
         const parent = resolve(c.parent);
         (parent ? parent.children : scene.roots).push(node);
         createdCubes.push(name);
@@ -208,14 +231,24 @@ export function createMockScene() {
       return { ok: true, groups: createdGroups, cubes: createdCubes, ...(warnings.length ? { warnings } : {}) };
     },
     set_origin(input) {
-      if (findCube(input.target)) return { ok: false, error: "target is a cube" };
+      const cube = findCube(input.target);
+      if (cube) {
+        if (!rules().cube.allowed) return { ok: false, error: "target is a cube, and cubes don't rotate in this format" };
+        cube.origin = input.origin; return { ok: true, name: cube.name, origin: cube.origin, type: "cube" };
+      }
       const g = findGroup(input.target); if (!g) return { ok: false, error: "group not found" };
       g.origin = input.origin; return { ok: true, name: g.name, origin: g.origin };
     },
     set_rotation(input) {
-      if (findCube(input.target)) return { ok: false, error: "cube cannot be rotated (rule #1)" };
+      const cube = findCube(input.target);
+      if (cube) {
+        const err = rotationError("cube", input.rotation, `Cube "${cube.name}"`);
+        if (err) return { ok: false, error: err };
+        cube.rotation = input.rotation; return { ok: true, name: cube.name, rotation: cube.rotation, type: "cube" };
+      }
       const g = findGroup(input.target); if (!g) return { ok: false, error: "group not found" };
-      if (nonZero(input.rotation) > 1) return { ok: false, error: "multi-axis rotation rejected (rule #1)" };
+      const err = rotationError("bone", input.rotation, `Group "${g.name}"`);
+      if (err) return { ok: false, error: err };
       g.rotation = input.rotation; return { ok: true, name: g.name, rotation: g.rotation };
     },
     register_texture(input) {
@@ -247,6 +280,9 @@ export function createMockScene() {
       if (input.name && input.name !== c.name && taken(input.name)) return { ok: false, error: "name taken (rule #4)" };
       const from = input.from ?? c.from;
       const to = input.to ?? c.to;
+      const problem = (input.from || input.to ? boundsError(from, to, `Cube "${c.name}"`) : null) || rotationError("cube", input.rotation, `Cube "${c.name}"`);
+      if (problem) return { ok: false, error: problem };
+      if (input.rotation) c.rotation = input.rotation;
       c.from = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
       c.to = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
       if (input.name) c.name = input.name;
@@ -262,6 +298,9 @@ export function createMockScene() {
         if (!c) return { ok: false, error: `cubes[${i}]: Cube "${entries[i].id}" not found` };
         if (seen.has(c.uuid)) return { ok: false, error: `cubes[${i}]: cube "${c.name}" appears twice in the batch` };
         seen.add(c.uuid);
+        const e = entries[i];
+        const problem = (e.from || e.to ? boundsError(e.from ?? c.from, e.to ?? c.to, `Cube "${c.name}"`) : null) || rotationError("cube", e.rotation, `Cube "${c.name}"`);
+        if (problem) return { ok: false, error: `cubes[${i}]: ${problem}` };
       }
       const out = entries.map((e) => {
         const c = findCube(e.id);
@@ -269,6 +308,7 @@ export function createMockScene() {
         c.from = [0, 1, 2].map((i) => Math.min(from[i], to[i]));
         c.to = [0, 1, 2].map((i) => Math.max(from[i], to[i]));
         if (e.uv_offset) c.uv_offset = e.uv_offset;
+        if (e.rotation) c.rotation = e.rotation;
         if (e.name) c.name = e.name;
         return { name: c.name, from: c.from, to: c.to, uv_offset: c.uv_offset };
       });
@@ -315,14 +355,22 @@ export function createMockScene() {
       return { ok: true, codec: { id, name: id, extension: "geo.json" }, file_name: "mock.geo.json", byte_length: content.length, encoding: "utf-8", wrote_to_path: input.path || null, truncated: false, content: input.max_content_length === 0 ? null : content };
     },
     get_project_info() {
-      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null }, format: { id: "bedrock", animation_mode: true }, counts: { animations: scene.animations?.length || 0 } } };
+      const r = rules();
+      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null }, format: { id: scene.format?.id || "bedrock", animation_mode: true }, rules: { summary: r.summary, coordinate_limits: r.coordinateLimits }, counts: { animations: scene.animations?.length || 0 } } };
     },
     set_project(input) {
       const changed = [];
       if (input.model_identifier !== undefined) { scene.model_identifier = input.model_identifier; changed.push("model_identifier"); }
       if (input.name !== undefined) changed.push("name");
+      if (input.minecraft_version !== undefined) {
+        if (scene.format?.id !== "java_block") return { ok: false, error: "minecraft_version only applies to Java block/item projects." };
+        const key = javaBlockVersionFor(String(input.minecraft_version));
+        if (!key) return { ok: false, error: `"${input.minecraft_version}" is not a Minecraft version like 1.20.1 or 26.3.` };
+        scene.format = { ...scene.format, java_block_version: key };
+        changed.push("minecraft_version");
+      }
       if (!changed.length) return { ok: false, error: "nothing to set" };
-      return { ok: true, changed, model_identifier: scene.model_identifier || null, name: input.name || "mock" };
+      return { ok: true, changed, model_identifier: scene.model_identifier || null, name: input.name || "mock", rules: rules().summary };
     },
     export_animations(input) {
       const content = JSON.stringify({ format_version: "1.8.0", animations: { "animation.idle": { loop: true } } });
@@ -661,7 +709,7 @@ export function createMockScene() {
     },
   };
 
-  return { scene, handlers, findGroup, findCube };
+  return { scene, handlers, findGroup, findCube, setFormat };
 }
 
 // --------------------------------------------------------------------------

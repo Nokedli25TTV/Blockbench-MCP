@@ -17,7 +17,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Domain | Tools |
 |--------|-------|
 | Project | `get_project_info`, `create_project` (new tab in a format: `geckolib`/`bedrock`/`java`), `set_project` |
-| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation` (groups only, one axis), `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
+| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation` (bones or cubes, as the format allows — `get_project_info` → `rules`), `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
 | Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch: many parts, own colours, one call), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
@@ -51,7 +51,7 @@ reading results. So:
 create_project: format="geckolib", name="dagger", model_identifier="dagger"
 create_cubes: groups=[{name:"root", origin:[0,0,0]}, {name:"blade_bone", parent:"root", origin:[0,0,0]}],
               cubes=[{name:"blade", parent:"blade_bone", from:[-1,0,-0.5], to:[1,14,0.5]}, …]
-set_rotation: target="blade_bone", rotation=[18,0,0]      # one axis per group; nest groups for more
+set_rotation: target="blade_bone", rotation=[18,0,0]      # GeckoLib: any axes; Java 1.20.1: cubes, 22.5° steps
 pack_uv                                                  # every cube gets its own atlas region
 validate_uv                                              # must be VALID before painting
 create_texture: name="atlas"                             # no size → uses the packed size

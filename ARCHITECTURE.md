@@ -154,8 +154,16 @@ its own region, texture sized to fit) → `validate_uv` → `create_texture` (no
 
 ## 7. Conventions & guardrails
 
-- **Single-axis rule:** a cube is never multi-axis rotated; `create_cube` accepts no rotation,
-  `set_rotation` is group-only and rejects >1 non-zero axis. Multi-axis = nested bones.
+- **Format-aware rotation rules** (`packages/shared/src/formatRules.ts`, MODELING_CONSTRAINTS rule 1):
+  derived from Blockbench's own format flags (`bone_rig`, `rotate_cubes`) plus the Java block-model
+  target version (`Project.java_block_version`). GeckoLib/Bedrock: bones and cubes on any axes. Java
+  block/item: groups export no rotation, so it goes on cubes — for Minecraft 1.9–1.21.5 one axis at
+  -45/-22.5/0/22.5/45°, for 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes — and
+  coordinates stay inside -16..32. Measured on Blockbench 5.2.1: its Java exporter snaps angles to
+  22.5° steps but lets 67.5° through and silently drops extra axes, so the checks run before export.
+  Unknown formats keep the original strict rule (groups one axis, cubes never). The plugin, the
+  server's `validateScene` and the test mock all use the same module (the mock imports the `.ts`
+  directly; Node strips the types).
 - **Pivot-first, unique names, validate before export** — enforced in code + `validateScene`.
 - Plugin element creation: `new Cube(...).init()` BEFORE `addTo`; always attach to a parent;
   guarantee `Undo.finishEdit()` runs (else an orphan with no undo entry).

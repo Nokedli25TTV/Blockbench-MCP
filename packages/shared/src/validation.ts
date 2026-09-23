@@ -1,8 +1,10 @@
 import type { SceneNode, SceneTree, Vec3 } from "./types";
+import { rulesFor, checkRotation, checkBounds } from "./formatRules";
 
 // Pure, Blockbench-independent model validation so it can be unit-tested and run
 // on the MCP server (over a scene tree fetched from the plugin). See
-// MODELING_CONSTRAINTS.md for the rule numbers referenced below.
+// MODELING_CONSTRAINTS.md for the rule numbers referenced below. Rotation and
+// coordinate rules follow the project's format (tree.format → formatRules.ts).
 
 export interface ValidationIssue {
   severity: "error" | "warning";
@@ -12,7 +14,8 @@ export interface ValidationIssue {
     | "invalid-origin"
     | "invalid-geometry"
     | "illegal-cube-rotation"
-    | "cube-rotation"
+    | "illegal-group-rotation"
+    | "out-of-bounds"
     | "missing-texture"
     | "orphaned-group";
   node?: string;
@@ -50,11 +53,13 @@ export function validateScene(tree: SceneTree): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const textureIds = new Set((tree.textures || []).map((t) => t.uuid));
   const nameCounts = new Map<string, number>();
+  const rules = rulesFor(tree.format);
 
   const visit = (node: SceneNode) => {
     nameCounts.set(node.name, (nameCounts.get(node.name) || 0) + 1);
 
     if (node.type === "group") {
+      const rotationError = isFiniteVec3(node.rotation) ? checkRotation(rules.bone, node.rotation, `Group "${node.name}"`) : null;
       if (!isFiniteVec3(node.origin)) {
         issues.push({
           severity: "error",
@@ -62,6 +67,8 @@ export function validateScene(tree: SceneTree): ValidationIssue[] {
           node: node.name,
           message: `Group "${node.name}" has a non-finite origin/pivot.`,
         });
+      } else if (rotationError) {
+        issues.push({ severity: "error", rule: "illegal-group-rotation", node: node.name, message: `${rotationError} (rule #1)` });
       } else if (nonZeroAxes(node.rotation) > 0 && nonZeroAxes(node.origin) === 0 && !originInsideCubes(node)) {
         // Rotating around the world origin, away from the bone's own cubes, almost
         // always indicates a forgotten pivot.
@@ -104,23 +111,13 @@ export function validateScene(tree: SceneTree): ValidationIssue[] {
             break;
           }
         }
+        const boundsError = checkBounds(rules, node.from, node.to, `Cube "${node.name}"`);
+        if (boundsError) issues.push({ severity: "error", rule: "out-of-bounds", node: node.name, message: `${boundsError} (rule #5)` });
       }
 
-      const axes = isFiniteVec3(node.rotation) ? nonZeroAxes(node.rotation) : 0;
-      if (axes > 1) {
-        issues.push({
-          severity: "error",
-          rule: "illegal-cube-rotation",
-          node: node.name,
-          message: `Cube "${node.name}" is rotated on ${axes} axes. A single cube cannot be multi-axis rotated — use nested groups (rule #1).`,
-        });
-      } else if (axes === 1) {
-        issues.push({
-          severity: "warning",
-          rule: "cube-rotation",
-          node: node.name,
-          message: `Cube "${node.name}" has a single-axis rotation. Prefer rotating a parent group/bone for animation safety (rule #1/#6).`,
-        });
+      const rotationError = isFiniteVec3(node.rotation) ? checkRotation(rules.cube, node.rotation, `Cube "${node.name}"`) : null;
+      if (rotationError) {
+        issues.push({ severity: "error", rule: "illegal-cube-rotation", node: node.name, message: `${rotationError} (rule #1)` });
       }
 
       const faces = node.faces || {};

@@ -232,6 +232,39 @@ try {
   const dgTaken = await h.call("duplicate_element", { id: "grip", newName: "pommel" });
   check("duplicate_element refuses a newName that is already used", dgTaken.isError && /^\[DUPLICATE_NAME\]/.test(dgTaken.text), dgTaken.text);
 
+  console.log("\n--- Format-aware rotation rules (GeckoLib vs Java block/item) ---");
+  h.mock.setFormat({ id: "geckolib_model", bone_rig: true, rotate_cubes: true });
+  const glMake = await h.call("create_cubes", {
+    groups: [{ name: "horn_bone", origin: [0, 24, 0], rotation: [20, 0, -15] }],
+    cubes: [{ name: "horn", parent: "horn_bone", from: [-1, 24, -1], to: [1, 30, 1], rotation: [0, 10, 5] }],
+  });
+  check("GeckoLib: bones and cubes may rotate on several axes", !glMake.isError, glMake.text);
+  const glRot = await h.call("set_rotation", { target: "horn_bone", rotation: [10, 20, 30] });
+  check("GeckoLib: set_rotation accepts a multi-axis bone rotation", !glRot.isError, glRot.text);
+  const glVal = await h.call("validate_model");
+  check("GeckoLib: validate_model accepts multi-axis bones and cubes", !/rotation\) (Group|Cube) "horn/.test(glVal.text), glVal.text.slice(0, 200));
+
+  h.mock.setFormat({ id: "java_block", bone_rig: false, rotate_cubes: true, java_block_version: "1.9.0", coordinate_limits: [-16, 32] });
+  const jGroup = await h.call("set_rotation", { target: "horn_bone", rotation: [0, 0, 22.5] });
+  check("Java 1.20.1: rotating a group is refused (it is not exported)", jGroup.isError && /^\[ILLEGAL_ROTATION\]/.test(jGroup.text) && /rotate the cube/.test(jGroup.text), jGroup.text);
+  const j30 = await h.call("set_rotation", { target: "horn", rotation: [30, 0, 0] });
+  check("Java 1.20.1: 30° is refused (22.5° steps only)", j30.isError && /30° is not accepted/.test(j30.text), j30.text);
+  const j22 = await h.call("set_rotation", { target: "horn", rotation: [22.5, 0, 0] });
+  check("Java 1.20.1: one axis at 22.5° is accepted", !j22.isError, j22.text);
+  const jTwo = await h.call("set_rotation", { target: "horn", rotation: [22.5, 45, 0] });
+  check("Java 1.20.1: two axes are refused", jTwo.isError && /2 axes/.test(jTwo.text), jTwo.text);
+  const jBig = await h.call("create_cube", { name: "too_big", from: [0, 0, 0], to: [40, 8, 8] });
+  check("Java: a cube outside -16..32 is refused", jBig.isError && /^\[OUT_OF_RANGE\]/.test(jBig.text), jBig.text);
+  const jVal = await h.call("validate_model");
+  check("Java: validate_model flags a group rotation left over from GeckoLib", /illegal-group-rotation\) Group "horn_bone"/.test(jVal.text), jVal.text.slice(0, 200));
+  const jVer = await h.call("set_project", { minecraft_version: "1.21.11" });
+  check("set_project switches the Java target version and reports the rules", !jVer.isError && /Minecraft 1\.21\.11–26\.2/.test(jVer.text), jVer.text);
+  const jMulti = await h.call("set_rotation", { target: "horn", rotation: [30, 60, 0] });
+  check("Java 1.21.11+: multi-axis cube rotation is accepted", !jMulti.isError, jMulti.text);
+  const jNew = await h.call("create_project", { format: "java", name: "block_test" });
+  check("create_project java targets Minecraft 1.20.1 by default", !jNew.isError && /Minecraft 1\.9–1\.21\.5/.test(jNew.text), jNew.text);
+  h.mock.setFormat(null);
+
   // Last, because it kills the main server.
   console.log("\n--- Shared bridge (4.2): a second server relays, then takes over ---");
   const relay = startServer({ port: h.port });

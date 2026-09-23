@@ -25,17 +25,34 @@ section into the new version (see README → Releasing).
   the texture size (Blockbench 5 has no `setProjectResolution`).
 - `create_animation` describes the shape of `bones` in its description, because some clients flatten
   that part of the schema.
+- Java block/item models could be exported with rotations Minecraft 1.20.1 refuses to load (e.g. 30°,
+  or 67.5° from Blockbench's snapping), or silently lose a second axis and every group rotation. These
+  are now caught before export (see Changed).
 
 ### Changed
+- **Rotation rules follow the project's format** (MODELING_CONSTRAINTS rule 1):
+  - GeckoLib/Bedrock: bones and cubes may rotate on several axes. The old single-axis rule came from
+    Java block models; Blockbench's GeckoLib format does not restrict it.
+  - **BREAKING (Java block/item):** rotating a group is refused — it was accepted before but never
+    reached the game. Cube rotation is checked against the target Minecraft version (1.20.1: one axis,
+    -45/-22.5/0/22.5/45°) and coordinates must stay inside -16..32.
+  - `validate_model` applies the same rules; unknown formats keep the old strict rule.
 - The plugin is typechecked against `blockbench-types` 5.1 (Blockbench 5) with no errors;
   `pnpm typecheck` is strict for the server and the plugin.
 - The server takes its version from `apps/mcp-server/package.json`.
+- CI and the release workflow run on Node 24 (the tests import the shared rules module directly).
 
 ### Removed
 - Dead `auto_shade` code in the plugin (the tool was removed on 2026-06-16).
 - The obsolete `@types/socket.io-client` dev dependency.
 
 ### Added
+- `rotation` on `create_cube`, `create_cubes` (groups and cubes), `create_group` and `modify_cube(s)`;
+  `set_rotation` takes a group or a cube, `set_origin` also a cube where cubes rotate.
+- `get_project_info` → `rules`: where rotation may go and the coordinate range, for the open project.
+- `minecraft_version` on `create_project` / `set_project` for Java block/item projects; new Java
+  projects target Minecraft 1.20.1 (`BLOCKBENCH_MCP_MC_VERSION` changes the default).
+- `[OUT_OF_RANGE]` error code for coordinates outside the format's range.
 - `pnpm bump patch|minor|major`, this changelog, and a release workflow that builds the zip and
   drafts a GitHub Release when a `v*` tag is pushed.
 - README: installing from a release zip without building.

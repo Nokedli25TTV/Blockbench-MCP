@@ -1,5 +1,6 @@
 {
   "name": "@blockbench-mcp/shared",
   "version": "0.3.0",
-  "main": "src/types.ts"
+  "main": "src/types.ts",
+  "type": "module"
 }

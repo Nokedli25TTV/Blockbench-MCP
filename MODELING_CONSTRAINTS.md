@@ -10,19 +10,31 @@ error (`{ ok: false, error }`) instead of fabricating success.
 
 ---
 
-## 1. Geometry & rotation — the single-axis rule
-- A single cube/element **cannot** be freely rotated on multiple axes the way a generic 3D
-  engine can. Multi-axis orientation **must** use nested groups/bones.
-- Required approach for multi-axis rotation:
-  1. Parent group A → apply axis 1 rotation.
-  2. Child group B inside A → apply axis 2 rotation.
-  3. (If a 3rd axis is needed) a further child group → axis 3.
-  4. Place the cube in the **deepest** child group.
-- **Never** apply a direct rotation like `[45, 15, 0]` to a single cube.
+## 1. Geometry & rotation — follow the format
+Where rotation may go depends on the project's format. The tools read it from the open project
+(`get_project_info` → `rules`) and refuse a rotation the format can't export, with the reason.
+
+| Format | Group / bone rotation | Cube rotation | Coordinates |
+|---|---|---|---|
+| **GeckoLib / Bedrock** (entities, animated items and weapons, armor) | any axes | any axes — static only; anything that **animates** needs its own bone (rule 6) | no hard limit |
+| **Java block/item** (blocks, static items, vanilla-style weapons), Minecraft **1.9–1.21.5** — incl. **1.20.1** | **not exported** — rotate the cube instead | **one axis**, only **-45 / -22.5 / 0 / 22.5 / 45°** | **-16..32** |
+| Java block/item, Minecraft 1.21.6–1.21.10 | not exported | one axis, any angle | -16..32 |
+| Java block/item, Minecraft 1.21.11 and newer | not exported | any axes | -16..32 |
+| Unknown formats | one axis per group; nest groups for more | not allowed | — |
+
+Measured on Blockbench 5.2.1 (2026-09-23) by exporting a cube rotated `[10, 30, 0]`: for 1.9–1.21.5
+the exporter kept only `angle: 0, axis: x` (snapped, Y dropped), for 1.21.6 `angle: 10, axis: x`, for
+1.21.11+ `{x: 10, y: 30}`. A group's rotation never reaches the vanilla file, and 60° became 67.5° —
+which Minecraft 1.20.1 refuses to load. A new Java project targets Minecraft 1.20.1 unless
+`create_project` gets another `minecraft_version` (`set_project` can change it).
+
 - **Pivot/origin must be defined explicitly BEFORE applying any rotation.** Wrong pivots
-  cause animation drift, orbiting, or large visual offsets.
-- Tool contract: `create_cube` does **not** accept a rotation. Rotation is a group-only
-  operation (`create_group` / `set_rotation` on a group). Single-cube rotation is rejected.
+  cause animation drift, orbiting, or large visual offsets. A cube's default pivot is its `from`
+  corner — for a centred tilt set its origin to the centre (`set_origin` / `modify_cube origin`).
+- Nesting single-axis groups is still a valid way to build up a rotation (and the only one in
+  unknown formats), but GeckoLib does not require it.
+- Tool contract: `set_rotation` takes a group or a cube; `create_cube(s)`, `create_group` and
+  `modify_cube(s)` accept `rotation`; all of them check it against the table above.
 
 ## 2. Texture & UV
 - A texture cannot be applied unless the texture asset **already exists, is registered,
@@ -56,7 +68,9 @@ error (`{ ok: false, error }`) instead of fabricating success.
 - Extend outside normal bounds only intentionally, when the design needs it.
 - Avoid accidental offsets that make the model impossible to animate or export cleanly.
 - Tool contract: `from`/`to` must be 3 finite numbers; corners are normalized to min/max so
-  the box is never inverted/degenerate.
+  the box is never inverted/degenerate. In Java block/item projects every coordinate must stay
+  inside -16..32 (the game refuses the model otherwise) — checked on create/modify and by
+  `validate_model`.
 
 ## 6. Animation compatibility
 - Build the hierarchy with the final animation plan in mind.
@@ -74,7 +88,7 @@ Verify:
 - [ ] The target part exists.
 - [ ] The required texture exists and is registered.
 - [ ] The pivot is defined.
-- [ ] The rotation strategy is engine-compatible (groups, not single-cube multi-axis).
+- [ ] The rotation fits the format (`get_project_info` → `rules`): bones in GeckoLib, cubes in Java block/item.
 - [ ] The hierarchy supports the intended animation.
 
 ---
@@ -82,10 +96,10 @@ Verify:
 ## Tool roadmap (how each rule maps to MCP tools)
 | Need | Tool | Enforces |
 |---|---|---|
-| Create cube | `create_cube` (done) | rules 4, 5 (unique name, valid geometry, no rotation) |
+| Create cube | `create_cube` (done) | rules 1, 4, 5 (unique name, valid geometry, format-checked rotation and coordinates) |
 | Bone/group + pivot + rotation | `create_group`, `set_origin`, `set_rotation` | rules 1, 6 |
 | Inspect state before acting | `get_project_info`, `list_outliner` | rules 3, 8 |
 | Textures | `register_texture`, `apply_texture`/`set_uv` | rule 2 |
 
-Pivot-first, state-safe, unique-named, single-axis-via-groups — every new tool must follow
+Pivot-first, state-safe, unique-named, format-aware rotation — every new tool must follow
 this file.

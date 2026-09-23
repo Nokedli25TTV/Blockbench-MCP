@@ -55,7 +55,9 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
 ## ✨ What it can do
 
 - **Build a model in one call** — a whole bone hierarchy plus its cubes with `create_cubes`, with
-  guardrails: unique names, pivots first, one rotation axis per bone (multi-axis = nested bones).
+  guardrails: unique names, pivots first, and rotation rules that follow the format — GeckoLib bones
+  on any axes, Java block/item models (blocks, vanilla-style items) on cubes at the angles their
+  Minecraft version accepts (1.20.1: one axis, 22.5° steps).
 - **Texture precisely** — `pack_uv` gives every cube its own atlas region, `validate_uv` catches
   overlaps before painting, `shade_cubes` paints every part in its exact colour in one call, and there
   are pixel-art palettes and paint tools for hand work.
@@ -166,6 +168,7 @@ see [Troubleshooting](#-troubleshooting).
 | Environment variable | Default | Meaning |
 |---|---|---|
 | `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 69 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 119. |
+| `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | Minecraft version a new Java block/item project targets (`create_project` can override it). It decides the rotation rules: up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
 To set the profile, add `"env": { "BLOCKBENCH_MCP_PROFILE": "full" }` next to `"args"` in the Claude

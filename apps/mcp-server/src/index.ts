@@ -14,6 +14,9 @@ import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 // MCP_BRIDGE_PORT so they run on an isolated port and never hijack (or get
 // hijacked by) a real Blockbench instance listening on 9999.
 const PORT = Number(process.env.MCP_BRIDGE_PORT) || 9999;
+// Minecraft version a new Java block/item project targets unless the caller names one:
+// it decides the rotation rules (1.20.1 → one axis at 22.5° steps). This fork's mods are 1.20.1.
+const DEFAULT_MC_VERSION = process.env.BLOCKBENCH_MCP_MC_VERSION || "1.20.1";
 // Single source of truth: apps/mcp-server/package.json (bundled by esbuild; the
 // plugin takes its version from its own package.json; `pnpm bump` moves all in step).
 import { version as SERVER_VERSION } from "../package.json";
@@ -410,7 +413,9 @@ function errorCode(text: string): string {
   if (m.includes("timed out") || m.includes("timeout")) return "TIMEOUT";
   if (m.includes("no project")) return "NO_PROJECT";
   if (m.includes("already exists") || /used \d+ times/.test(m)) return "DUPLICATE_NAME";
-  if (m.includes("multi-axis") || m.includes("cannot be rotated") || m.includes("rotated on")) return "ILLEGAL_ROTATION";
+  if (m.includes("multi-axis") || m.includes("cannot be rotated") || m.includes("rotated on") || m.includes("rotation not allowed") ||
+      m.includes("rotation uses") || m.includes("° is not accepted")) return "ILLEGAL_ROTATION";
+  if (m.includes("range this format allows")) return "OUT_OF_RANGE";
   if (m.includes("not registered") || m.includes("missing texture")) return "MISSING_TEXTURE";
   if (m.includes("not found") || m.includes("could not find")) return "NOT_FOUND";
   if (m.includes("does not support") || m.includes("not compatible") || m.includes("renders only cubes") || m.includes("unsupported")) return "FORMAT_UNSUPPORTED";
@@ -498,6 +503,7 @@ const modifyCubeInputSchema = {
   from: vec3.optional().describe("New lower corner [x,y,z]."),
   to: vec3.optional().describe("New upper corner [x,y,z]."),
   origin: vec3.optional().describe("New pivot [x,y,z]."),
+  rotation: vec3.optional().describe("New rotation [x,y,z] degrees, where the format rotates cubes."),
   inflate: z.number().optional().describe("Inflation amount."),
   visibility: z.boolean().optional().describe("Show/hide the cube."),
   shade: z.boolean().optional().describe("Apply shading."),
@@ -585,20 +591,28 @@ const registerToolUnfiltered = server.registerTool.bind(server);
   return registerToolUnfiltered(name, { ...config, annotations: { ...toolAnnotations(name), ...config.annotations } }, cb);
 };
 
+// Where rotation may go — repeated in every tool that sets it (MODELING_CONSTRAINTS.md rule 1,
+// packages/shared/src/formatRules.ts).
+const ROTATION_RULES =
+  "Rotation follows the open project's format (get_project_info → rules): GeckoLib/Bedrock — bones and cubes on " +
+  "any axes (static cube rotation is fine; anything that animates needs its own bone); Java block/item — cubes " +
+  "only (groups don't export rotation), and for Minecraft 1.9–1.21.5 one axis at -45/-22.5/0/22.5/45°, " +
+  "coordinates -16..32.";
+
 server.registerTool(
   "create_cube",
   {
     title: "Create Cube",
     description:
       "Create a cuboid in the open Blockbench model. Units are model units (16 = 1 block). " +
-      "CONSTRAINTS (MODELING_CONSTRAINTS.md): a cube CANNOT be rotated here — multi-axis " +
-      "rotation must use nested groups/bones. Names must be UNIQUE and descriptive.",
+      ROTATION_RULES + " Names must be UNIQUE and descriptive.",
     inputSchema: {
       name: z.string().optional().describe("Unique, descriptive outliner name, e.g. 'staff_handle'."),
       from: vec3.optional().describe("Lower corner [x,y,z]. Default [0,0,0]."),
       to: vec3.optional().describe("Upper corner [x,y,z]. If omitted, derived from 'from' + 'size'."),
       size: z.number().optional().describe("Edge length when 'to' is omitted. Default 8."),
-      origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from'."),
+      origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from' (a corner) — set the centre for a centred tilt."),
+      rotation: vec3.optional().describe("Cube rotation [x,y,z] degrees, where the format allows it (see description)."),
       parent: z.string().optional().describe("Name of a group/bone to nest this cube under (rule #6)."),
       uv_offset: z
         .array(z.number())
@@ -620,8 +634,8 @@ server.registerTool(
       "This is the efficient way to build geometry: a 25-cube model goes from ~50 tool calls to 1. " +
       "Groups are created first (in array order), then cubes; a parent may reference a group declared " +
       "EARLIER in groups[] or one that already exists. Same per-element rules as create_cube/create_group " +
-      "(unique names, single-axis via nesting, optional box-UV offset). The batch is validated up front and " +
-      "is ALL-OR-NOTHING: if anything is invalid, nothing is created.",
+      "(unique names, optional box-UV offset, rotation where the format allows it). The batch is validated up " +
+      "front and is ALL-OR-NOTHING: if anything is invalid, nothing is created. " + ROTATION_RULES,
     inputSchema: {
       groups: z
         .array(
@@ -629,6 +643,7 @@ server.registerTool(
             name: z.string().describe("Unique, descriptive bone name."),
             parent: z.string().optional().describe("Parent group: a name from earlier in groups[] or an existing group."),
             origin: vec3.optional().describe("Pivot/origin [x,y,z] (define before rotating)."),
+            rotation: vec3.optional().describe("Bone rotation [x,y,z] degrees (GeckoLib/Bedrock; not exported in Java block/item)."),
           })
         )
         .optional()
@@ -640,7 +655,8 @@ server.registerTool(
             from: vec3.optional().describe("Lower corner [x,y,z]. Default [0,0,0]."),
             to: vec3.optional().describe("Upper corner [x,y,z]. If omitted, derived from 'from' + 'size'."),
             size: z.number().optional().describe("Edge length when 'to' is omitted. Default 8."),
-            origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from'."),
+            origin: vec3.optional().describe("Pivot [x,y,z]. Default 'from' (a corner)."),
+            rotation: vec3.optional().describe("Cube rotation [x,y,z] degrees, where the format allows it."),
             parent: z.string().optional().describe("Group to nest under: a name from groups[] or an existing group."),
             uv_offset: z.array(z.number()).length(2).optional().describe("Box-UV offset [u,v] (locks autouv:0 so it sticks)."),
             autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off, 1 on (default), 2 relative."),
@@ -665,12 +681,12 @@ server.registerTool(
     title: "Create Group / Bone",
     description:
       "Create a named group (GeckoLib bone). Optionally nest under an existing parent group by name. " +
-      "Use one group per independently-rotating part; for multi-axis rotation, nest groups (rule #1/#6). " +
-      "Names must be unique.",
+      "Use one group per independently-animating part (rule #6). Names must be unique. " + ROTATION_RULES,
     inputSchema: {
       name: z.string().describe("Unique, descriptive bone name, e.g. 'crystal_x'."),
       parent: z.string().optional().describe("Name of an existing parent group to nest under."),
       origin: vec3.optional().describe("Pivot/origin [x,y,z] for this bone (define before rotating)."),
+      rotation: vec3.optional().describe("Bone rotation [x,y,z] degrees, where the format allows it."),
     },
   },
   async (args) =>
@@ -682,12 +698,12 @@ server.registerTool(
 server.registerTool(
   "set_origin",
   {
-    title: "Set Group Origin (Pivot)",
+    title: "Set Origin (Pivot)",
     description:
-      "Set the pivot/origin of a GROUP (bone). Define the pivot BEFORE applying rotation (rule #1). " +
-      "Targets groups only.",
+      "Set the pivot/origin of a group (bone) — or of a cube, in formats where cubes rotate (e.g. Java " +
+      "block/item, where the rotation lives on the cube). Define the pivot BEFORE rotating (rule #1).",
     inputSchema: {
-      target: z.string().describe("Name of the group whose pivot to set."),
+      target: z.string().describe("Name of the group (or cube) whose pivot to set."),
       origin: vec3.describe("Pivot point [x,y,z]."),
     },
   },
@@ -698,13 +714,13 @@ server.registerTool(
 server.registerTool(
   "set_rotation",
   {
-    title: "Set Group Rotation",
+    title: "Set Rotation",
     description:
-      "Rotate a GROUP (bone). Rejects cube targets — a single cube cannot be rotated (rule #1). " +
-      "Enforces ONE axis per group: nest groups for multi-axis rotation. Set the pivot first.",
+      "Rotate a group (bone) or a cube. Set the pivot first (set_origin). " + ROTATION_RULES +
+      " A rotation the format can't export is refused with the reason.",
     inputSchema: {
-      target: z.string().describe("Name of the group to rotate."),
-      rotation: vec3.describe("Euler degrees [x,y,z] with at most ONE non-zero axis."),
+      target: z.string().describe("Name of the group or cube to rotate."),
+      rotation: vec3.describe("Euler degrees [x,y,z]."),
     },
   },
   async (args) =>
@@ -805,9 +821,10 @@ server.registerTool(
   {
     title: "Validate Model",
     description:
-      "Validate the current model against the GeckoLib-safety rules: duplicate names, missing pivots, " +
-      "invalid geometry, illegal (multi-axis) cube rotations, missing textures, and orphaned groups. " +
-      "Returns a pass/fail report. Run before exporting or animating (rule #8).",
+      "Validate the current model against its format's rules: duplicate names, missing pivots, invalid " +
+      "geometry, rotations the format can't export (e.g. group rotation or non-22.5° steps in Java block/item " +
+      "for Minecraft 1.9–1.21.5), coordinates outside the format's range, missing textures, and orphaned " +
+      "groups. Returns a pass/fail report. Run before exporting or animating (rule #8).",
     inputSchema: {},
   },
   async () => {
@@ -891,8 +908,7 @@ server.registerTool(
     description:
       "Create a new named animation with keyframes for bones (GeckoLib/Bedrock style). " +
       "Each bone key must be an EXISTING group name (verify with get_scene_tree first — rule #3/#8). " +
-      "Keyframe times are in seconds; rotation in degrees; multi-axis keyframe values are fine for " +
-      "animations (the single-axis rule applies to static model rotation, not keyframes). " +
+      "Keyframe times are in seconds; rotation in degrees; keyframes may use any axes. " +
       "Values are stored exactly as given — the same convention as set_keyframes / manage_keyframes / " +
       "get_keyframes and the Blockbench UI; the exporter converts to the GeckoLib/Bedrock file convention. " +
       "Rotations ADD to each bone's rest rotation.",
@@ -1269,10 +1285,9 @@ server.registerTool(
   {
     title: "Modify Cube",
     description:
-      "Modify an existing cube (resize/move/rename/visibility/inflate/UV settings). " +
-      "Rotation is NOT accepted here — rotation is group-only (rule #1); put the cube in a bone and " +
-      "rotate that. Corners are normalized so the box is never inverted. `cube_name` is accepted as a " +
-      "deprecated alias for `id` for older callers.",
+      "Modify an existing cube (resize/move/rename/rotate/visibility/inflate/UV settings). " +
+      "Corners are normalized so the box is never inverted. `cube_name` is accepted as a deprecated alias " +
+      "for `id` for older callers. " + ROTATION_RULES,
     inputSchema: modifyCubeInputSchema,
   },
   async (args) =>
@@ -1286,8 +1301,8 @@ server.registerTool(
     description:
       "Edit MANY cubes in ONE call and ONE undo step — e.g. give every cube its own uv_offset, or resize a set " +
       "of parts. Each entry takes the same fields as modify_cube (`id` plus what to change). All entries are " +
-      "validated first (existing cubes, unique names, valid vectors); if one is invalid nothing changes. " +
-      "Rotation is not accepted (group-only).",
+      "validated first (existing cubes, unique names, valid vectors, format rules); if one is invalid nothing " +
+      "changes. Rotation only where the format allows it on cubes (see create_cube).",
     inputSchema: {
       cubes: z
         .array(z.object(modifyCubeInputSchema))
@@ -1451,16 +1466,19 @@ server.registerTool(
     description:
       "Set project metadata. model_identifier drives the exported \"geometry.<id>\" name — set it (e.g. " +
       "'staff') BEFORE export_model so GeckoLib gets a real identifier instead of 'geometry.unknown'. " +
-      "Can also set the project name and texture resolution.",
+      "Can also set the project name, texture resolution and — for Java block/item — the target Minecraft version.",
     inputSchema: {
       model_identifier: z.string().optional().describe("Geometry identifier, e.g. 'staff' → geometry.staff."),
       name: z.string().optional().describe("Project name."),
       texture_width: z.number().int().min(1).optional().describe("Texture atlas width."),
       texture_height: z.number().int().min(1).optional().describe("Texture atlas height."),
+      minecraft_version: z.string().optional().describe("Java block/item only: target Minecraft version, e.g. '1.20.1'."),
     },
   },
   async (args) =>
-    forward("set_project", args, (r) => `Updated ${r.changed.join(", ")}. geometry identifier: ${r.model_identifier ?? "(none)"}.`)
+    forward("set_project", args, (r) =>
+      `Updated ${r.changed.join(", ")}. geometry identifier: ${r.model_identifier ?? "(none)"}.` + (r.rules ? `\nRules: ${r.rules}` : "")
+    )
 );
 
 server.registerTool(
@@ -1471,19 +1489,22 @@ server.registerTool(
       "Create a NEW Blockbench project in a given format (opens a new tab; the current project stays open). " +
       "Use it when the open project has the wrong format — e.g. 'free' or Java instead of GeckoLib/Bedrock — " +
       "instead of risky_eval. Aliases: 'geckolib', 'bedrock', 'java'; an unknown id returns the available list. " +
-      "Optionally set name, model_identifier (geometry.<id>) and texture size in the same call.",
+      "Optionally set name, model_identifier (geometry.<id>) and texture size in the same call. A Java " +
+      `block/item project targets minecraft_version (default ${DEFAULT_MC_VERSION}), which decides its rotation rules.`,
     inputSchema: {
       format: z.string().describe("Format id or alias: 'geckolib', 'bedrock', 'java', 'free', or any Blockbench format id."),
       name: z.string().optional().describe("Project name."),
       model_identifier: z.string().optional().describe("Geometry identifier, e.g. 'dagger' → geometry.dagger."),
       texture_width: z.number().int().min(1).optional().describe("Texture atlas width."),
       texture_height: z.number().int().min(1).optional().describe("Texture atlas height."),
+      minecraft_version: z.string().optional().describe(`Java block/item only: target Minecraft version, e.g. '1.20.1' (default ${DEFAULT_MC_VERSION}).`),
     },
   },
   async (args) =>
-    forward("create_project", args, (r) =>
+    forward("create_project", { ...args, default_minecraft_version: DEFAULT_MC_VERSION }, (r) =>
       `Created ${r.format} project "${r.name ?? ""}" (animations: ${r.animation_mode ? "yes" : "no"}, ` +
-      `geometry identifier: ${r.model_identifier ?? "(none)"}, texture ${r.texture?.[0] ?? "?"}x${r.texture?.[1] ?? "?"}).`
+      `geometry identifier: ${r.model_identifier ?? "(none)"}, texture ${r.texture?.[0] ?? "?"}x${r.texture?.[1] ?? "?"}).` +
+      (r.rules ? `\nRules: ${r.rules}` : "") + warningLines(r)
     )
 );
 

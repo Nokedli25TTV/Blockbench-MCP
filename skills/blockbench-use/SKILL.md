@@ -21,8 +21,12 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
 ## Pre-flight (before the first edit)
 
 1. **`get_project_info`** — is a project open, in the right format? GeckoLib / Minecraft entities need an
-   animated cube format (`geckolib_model` or `bedrock`). Wrong or no project → `create_project` with
-   `format="geckolib"` (or `bedrock` / `java`); it opens a new tab and leaves the current one alone.
+   animated cube format (`geckolib_model` or `bedrock`); plain blocks and static items (e.g. a
+   vanilla-style sword) use `java`. Wrong or no project → `create_project` with `format="geckolib"`
+   (or `bedrock` / `java`; a Java project targets Minecraft 1.20.1 unless you pass `minecraft_version`);
+   it opens a new tab and leaves the current one alone. Its **`rules`** say where rotation may go:
+   GeckoLib/Bedrock bones and cubes on any axes; Java block/item only cubes — groups don't export
+   rotation — at one axis and -45/-22.5/0/22.5/45° for 1.9–1.21.5, inside -16..32.
 2. **What's already there?** `get_scene_tree` — on big models narrow it with `bone_names`,
    `include_faces:false` or `max_depth`; `find_elements_by_criteria` for targeted lookups.
 3. **Tool missing?** The default `geckolib` profile does not load mesh, armature, PBR and brush tools.
