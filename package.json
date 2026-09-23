@@ -8,7 +8,8 @@
     "build": "pnpm run --recursive build",
     "test": "pnpm --filter mcp-server test:model && pnpm --filter mcp-server test:e2e",
     "typecheck": "pnpm --filter mcp-server exec tsc --noEmit -p . && pnpm --filter mcp-plugin exec tsc --noEmit -p .",
-    "report": "node tools/usage-report.mjs"
+    "report": "node tools/usage-report.mjs",
+    "bump": "node tools/bump-version.mjs"
   },
   "keywords": [],
   "author": "",

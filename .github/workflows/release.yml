@@ -1,0 +1,99 @@
+name: Release
+
+# Pushing a vX.Y.Z tag (made by `pnpm bump`) builds, tests and packages the release and
+# creates a DRAFT GitHub Release from CHANGELOG.md — review it on GitHub, then publish.
+# Running it by hand (Actions → Release → Run workflow) only builds the package and
+# uploads it as an artifact, to preview what a release would contain.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4 # version from "packageManager" in package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      - name: Package
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION"
+            exit 1
+          fi
+          NAME="blockbench-mcp-$VERSION"
+          # Same layout as the repository, so the README's paths work in the unzipped folder.
+          mkdir -p "out/$NAME/apps/mcp-server/dist" "out/$NAME/apps/mcp-plugin/dist"
+          cp apps/mcp-server/dist/index.js "out/$NAME/apps/mcp-server/dist/"
+          cp apps/mcp-plugin/dist/mcp_socketio_plugin.js "out/$NAME/apps/mcp-plugin/dist/"
+          cp -r skills README.md CHANGELOG.md LICENSE MODELING_CONSTRAINTS.md "out/$NAME/"
+          (cd out && zip -qr "$NAME.zip" "$NAME")
+          cp apps/mcp-plugin/dist/mcp_socketio_plugin.js out/
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      # The unzipped package must start on its own (no node_modules anywhere above it),
+      # report this version and find its skill guides.
+      - name: Smoke-test the package
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          SMOKE=$(mktemp -d)
+          unzip -q "out/$NAME.zip" -d "$SMOKE"
+          cd "$SMOKE/$NAME"
+          ( printf '%s\n' \
+              '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+            sleep 3 ) | MCP_BRIDGE_PORT=23999 node apps/mcp-server/dist/index.js > stdout.txt 2> stderr.txt || true
+          cat stderr.txt
+          grep -q "\"version\":\"$VERSION\"" stdout.txt || { echo "::error::serverInfo.version is not $VERSION"; exit 1; }
+          grep -q '"name":"create_cubes"' stdout.txt || { echo "::error::tools/list is missing create_cubes"; exit 1; }
+          grep -q "Loaded [1-9][0-9]* skill guide" stderr.txt || { echo "::error::the packaged server found no skill guides"; exit 1; }
+          grep -q "$VERSION+" "apps/mcp-plugin/dist/mcp_socketio_plugin.js" || { echo "::error::the plugin build id does not start with $VERSION+"; exit 1; }
+
+      - name: Release notes
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then SECTION="${{ steps.pkg.outputs.version }}"; else SECTION="Unreleased"; fi
+          node tools/release-notes.mjs "$SECTION" > out/notes.md
+          cat out/notes.md
+
+      - name: Upload the package (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-preview
+          path: |
+            out/*.zip
+            out/mcp_socketio_plugin.js
+            out/notes.md
+          if-no-files-found: error
+
+      - name: Draft the GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file out/notes.md \
+            "out/$NAME.zip" out/mcp_socketio_plugin.js

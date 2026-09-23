@@ -1,0 +1,71 @@
+# Changelog
+
+All notable changes to this fork. The format follows [Keep a Changelog](https://keepachangelog.com/),
+and versions follow [Semantic Versioning](https://semver.org/):
+
+- **patch** (0.3.0 → 0.3.1) — bug fixes, description/skill fixes, internal changes; no new tools.
+- **minor** (0.3.1 → 0.4.0) — new tools, new optional parameters, new capabilities; everything that
+  worked before still works.
+- **major** (0.4.0 → 1.0.0) — breaking changes: a tool removed or renamed, a parameter renamed or
+  made required, a reply format changed, or a server/plugin pair that must be updated together.
+  Before 1.0.0, breaking changes bump the minor version and are marked **BREAKING** below.
+
+Write every change under **Unreleased** as you make it; `pnpm bump patch|minor|major` turns that
+section into the new version (see README → Releasing).
+
+## [Unreleased]
+
+### Fixed
+- `duplicate_element` now uses Blockbench's own duplicate: it keeps per-face UV and textures,
+  copies every child type, moves meshes once (their vertices are relative to the origin), names
+  only the top copy `newName` and everything inside a unique `<name>_copy`, refuses a `newName`
+  that is taken, and is a single undo step that also removes duplicated groups. Before, duplicating
+  a group reported an error although the copy had been made.
+- `set_project`, `create_project` and `pack_uv` refresh the UV editor and UV density after changing
+  the texture size (Blockbench 5 has no `setProjectResolution`).
+- `create_animation` describes the shape of `bones` in its description, because some clients flatten
+  that part of the schema.
+
+### Changed
+- The plugin is typechecked against `blockbench-types` 5.1 (Blockbench 5) with no errors;
+  `pnpm typecheck` is strict for the server and the plugin.
+- The server takes its version from `apps/mcp-server/package.json`.
+
+### Removed
+- Dead `auto_shade` code in the plugin (the tool was removed on 2026-06-16).
+- The obsolete `@types/socket.io-client` dev dependency.
+
+### Added
+- `pnpm bump patch|minor|major`, this changelog, and a release workflow that builds the zip and
+  drafts a GitHub Release when a `v*` tag is pushed.
+- README: installing from a release zip without building.
+
+## [0.3.0] - 2026-09-23
+
+First release of this fork.
+
+### Added
+- Shared bridge: several AI clients can use Blockbench at once. The first server owns port 9999,
+  later ones relay through it, and a relay takes over when the owner quits. A call resent after an
+  owner crash is applied once. `get_project_info` → `mcp_bridge` shows the role.
+- Batch tools: `create_cubes`, `modify_cubes`, `shade_cubes`, `set_keyframes`; `get_keyframes` for
+  many bones. Also `create_project`, `manage_animation`, `replace_texture`, `check_animation`
+  (keyframes past the end, rotation jumps, loop seams, floor clipping), `list_actions`.
+- `BLOCKBENCH_MCP_PROFILE` (default `geckolib`: 69 of 119 tools), MCP read-only/destructive
+  annotations, `[CODE]` error prefixes.
+- Screenshots downscaled to 800 px (`max_size`); `set_camera_angle` and `capture_screenshot` can
+  pose an animation frame (`time`).
+- Build id stamped automatically (`plugin_build`), CI on Ubuntu and Windows, `pnpm report`
+  (usage report from Claude's local logs).
+
+### Changed
+- One animation convention: every tool stores and reports the values Blockbench shows; the exporter
+  handles the GeckoLib file convention.
+- World bounding boxes measure element geometry only; keyframe writes report when they extend the
+  animation length; the [0,0,0]-pivot warning ignores pivots inside the bone's own cubes.
+
+### Security
+- The bridge listens on 127.0.0.1 only and refuses connections from web pages (`http(s)` and `null`
+  origins); the relay endpoint requires no Origin, a custom header and a loopback Host.
+
+Earlier history (before this fork's first release): see the git log.

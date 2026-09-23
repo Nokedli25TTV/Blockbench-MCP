@@ -14,8 +14,9 @@ import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 // MCP_BRIDGE_PORT so they run on an isolated port and never hijack (or get
 // hijacked by) a real Blockbench instance listening on 9999.
 const PORT = Number(process.env.MCP_BRIDGE_PORT) || 9999;
-// Keep in step with apps/*/package.json (the plugin takes its version from there).
-const SERVER_VERSION = "0.3.0";
+// Single source of truth: apps/mcp-server/package.json (bundled by esbuild; the
+// plugin takes its version from its own package.json; `pnpm bump` moves all in step).
+import { version as SERVER_VERSION } from "../package.json";
 
 // IMPORTANT: when running as an MCP server over stdio, stdout is reserved for
 // the JSON-RPC protocol. ALL logging must go to stderr or it corrupts the stream.

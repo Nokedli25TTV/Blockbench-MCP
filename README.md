@@ -247,8 +247,9 @@ Blockbench-MCP/
 │   └── mcp-plugin/        # Blockbench plugin: one handler per tool (src/mcp_socketio_plugin.ts)
 ├── packages/shared/       # tool-name types, model validation, pixel-art palettes
 ├── skills/                # the 8 skill guides served to the AI
-├── tools/                 # usage report (pnpm report)
-├── .github/workflows/     # CI: build, typecheck, tests on Ubuntu + Windows
+├── tools/                 # usage report, version bump, release notes
+├── .github/workflows/     # CI (Ubuntu + Windows) and the release workflow
+├── CHANGELOG.md           # what changed in each version
 ├── ARCHITECTURE.md        # how it all fits together
 ├── MODELING_CONSTRAINTS.md
 └── AGENTS.md
@@ -278,6 +279,29 @@ numbers, and bridge events (port conflicts, relay joins, takeovers). Nothing is 
 **Adding a tool** touches three places: the `registerTool` call in `apps/mcp-server/src/index.ts`, a
 handler plus its dispatch entry in `apps/mcp-plugin/src/mcp_socketio_plugin.ts`, and the `ToolType`
 union in `packages/shared/src/types.ts` — plus a mock handler and a check in the tests.
+
+### Versions and releases
+
+Versions follow [Semantic Versioning](https://semver.org/) — **patch** for fixes, **minor** for new
+tools or options, **major** for breaking changes (a higher part resets the lower ones: 0.3.2 → minor
+→ 0.4.0). The rules with examples are at the top of [CHANGELOG.md](CHANGELOG.md). The version lives
+in the four `package.json` files; the server and the plugin read it from there at build time.
+
+1. As you change things, add a line under **Unreleased** in `CHANGELOG.md`.
+2. When it's time to release, with a clean working tree:
+
+   ```bash
+   pnpm bump patch            # or minor / major / an exact x.y.z; add --dry-run to preview
+   ```
+
+   This moves the Unreleased notes under the new version, updates every `package.json`, commits
+   `Release vX.Y.Z` and tags `vX.Y.Z`. Nothing is pushed.
+3. Push the commit and the tag (`git push <remote> HEAD:main --follow-tags`). The **Release** workflow
+   builds, tests and packages it, checks that the unzipped package starts on its own, and creates a
+   **draft** GitHub Release with the zip and the plugin. Review it on GitHub and press *Publish*.
+
+To preview a release package without releasing, run the Release workflow by hand (Actions → Release
+→ Run workflow); it uploads the zip as an artifact instead.
 
 ## ⚠️ Limitations & security
 

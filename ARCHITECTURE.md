@@ -74,8 +74,14 @@ blockbench-mcp/
 ├─ skills/                        # 8 Markdown guides (use / mcp-overview / modeling / texturing /
 │                                 #   pbr-materials / pixel-shading / animation / development)
 ├─ tools/
-│  └─ usage-report.mjs            # `pnpm report`: calls/latency/errors/bridge events from Claude's logs
-├─ .github/workflows/ci.yml       # build + typecheck + tests, Ubuntu and Windows
+│  ├─ usage-report.mjs            # `pnpm report`: calls/latency/errors/bridge events from Claude's logs
+│  ├─ bump-version.mjs            # `pnpm bump patch|minor|major`: versions + CHANGELOG + commit + tag
+│  ├─ release-notes.mjs           # release notes for a version, from CHANGELOG.md
+│  └─ changelog.mjs               # CHANGELOG.md section helpers shared by the two above
+├─ .github/workflows/
+│  ├─ ci.yml                      # build + typecheck + tests, Ubuntu and Windows
+│  └─ release.yml                 # on a vX.Y.Z tag: build, test, package, smoke-test, DRAFT release
+├─ CHANGELOG.md                   # Unreleased + one section per version (source of the release notes)
 ├─ ARCHITECTURE.md  MODELING_CONSTRAINTS.md  AGENTS.md  README.md
 └─ package.json  pnpm-workspace.yaml  tsconfig.base.json
 ```
@@ -98,7 +104,7 @@ registration (schema + forward) in `index.ts`, and a handler (Blockbench API) in
 `get_project_info` returns `plugin_build` + `tool_count` — the canonical check that the **plugin**
 (not just the server) was reloaded after a rebuild. `plugin_build` is stamped by `vite.config.ts`
 (`<version>+<UTC yyyymmdd.hhmm>.<git sha>[-dirty]`); the version comes from
-`apps/mcp-plugin/package.json`. The server's version (`SERVER_VERSION` in `index.ts`) is in
+`apps/mcp-plugin/package.json`. The server takes its version from `apps/mcp-server/package.json` (bundled by esbuild); it is in
 `mcp_bridge.server_version`, and a relay logs a note when the owner runs a different version.
 
 ## 5. Build & run
