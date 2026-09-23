@@ -15,6 +15,8 @@ export type ToolType =
   | "batch_keyframe_operations"
   | "animation_copy_paste"
   | "list_animations"
+  | "get_keyframes"
+  | "get_bone_pose"
   | "modify_cube"
   | "delete_element"
   | "reparent_element"
@@ -102,6 +104,9 @@ export type ToolType =
   | "texture_selection"
   | "texture_layer_management"
   | "paint_pixel_matrix"
+  | "pack_uv"
+  | "validate_uv"
+  | "shade_cube"
   | "list_palettes"
   | "get_palette";
 

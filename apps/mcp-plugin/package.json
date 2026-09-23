@@ -13,7 +13,7 @@
   "packageManager": "pnpm@10.11.0",
   "dependencies": {
     "socket.io-client": "^4.8.1",
-    "@shared": "workspace:*"
+    "@blockbench-mcp/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/socket.io-client": "^3.0.0",

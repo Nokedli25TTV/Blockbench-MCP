@@ -1,7 +1,7 @@
 // Register the plugin and define what it adds
 
 import { io } from "socket.io-client";
-import { ToolType } from "@shared/types";
+import { ToolType } from "@blockbench-mcp/shared/types";
 import { getPalette } from "../../../packages/shared/src/palettes";
 
 // Global variable declarations
@@ -236,6 +236,15 @@ const options: PluginOptions = {
     };
 
     const nonZeroAxes = (v: number[]): number => v.filter((n) => Math.abs(n) > 1e-6).length;
+    const MIN_TEXTURED_CUBE_SIZE = 1;
+
+    const texturedCubeSizeError = (from: number[], to: number[], context: string): string | null => {
+      const dims = [Math.abs(to[0] - from[0]), Math.abs(to[1] - from[1]), Math.abs(to[2] - from[2])];
+      const tooSmall = dims.findIndex((n) => n < MIN_TEXTURED_CUBE_SIZE);
+      return tooSmall >= 0
+        ? `${context}: cube dimensions must be at least ${MIN_TEXTURED_CUBE_SIZE} model unit on every axis for reliable Blockbench/GeckoLib UV export. Got [${dims.join(', ')}].`
+        : null;
+    };
 
     const allCubes = (): any[] => (typeof Cube !== 'undefined' && (Cube as any).all) ? (Cube as any).all : [];
     const allGroups = (): any[] => (typeof Group !== 'undefined' && (Group as any).all) ? (Group as any).all : [];
@@ -295,6 +304,8 @@ const options: PluginOptions = {
         // Normalize corners to min/max so the box is never inverted/degenerate (rule #5).
         const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
         const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
+        const sizeError = texturedCubeSizeError(from, to, `Cube "${input.name || 'new cube'}"`);
+        if (sizeError) return { ok: false, error: sizeError };
 
         // Unique, stable name across all cubes and groups (rule #4).
         let name: string;
@@ -507,6 +518,8 @@ const options: PluginOptions = {
             const rawTo: [number, number, number] = c.to || [rawFrom[0] + size, rawFrom[1] + size, rawFrom[2] + size];
             const from: [number, number, number] = [Math.min(rawFrom[0], rawTo[0]), Math.min(rawFrom[1], rawTo[1]), Math.min(rawFrom[2], rawTo[2])];
             const to: [number, number, number] = [Math.max(rawFrom[0], rawTo[0]), Math.max(rawFrom[1], rawTo[1]), Math.max(rawFrom[2], rawTo[2])];
+            const sizeError = texturedCubeSizeError(from, to, `cubes[] entry "${name}"`);
+            if (sizeError) throw new Error(sizeError);
             const cube = new Cube({ name, from, to, origin: c.origin || from, ...resolveCubeUv(c) }).init();
             const parent = resolveParent(c.parent);
             if (parent) cube.addTo(parent);
@@ -1478,9 +1491,10 @@ const options: PluginOptions = {
     const modifyCube = (input: any): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
-        if (!input.id) return { ok: false, error: 'id (cube name or uuid) is required.' };
-        const cube = findCubeByNameOrUuid(input.id);
-        if (!cube) return { ok: false, error: `Cube "${input.id}" not found. Use get_scene_tree to inspect.` };
+        const id = input.id || input.cube_name;
+        if (!id) return { ok: false, error: 'id (cube name or uuid) is required. Deprecated alias cube_name is also accepted.' };
+        const cube = findCubeByNameOrUuid(id);
+        if (!cube) return { ok: false, error: `Cube "${id}" not found. Use get_scene_tree to inspect.` };
 
         for (const key of ['from', 'to', 'origin'] as const) {
           if (input[key] !== undefined && !isVec3(input[key])) {
@@ -1496,6 +1510,8 @@ const options: PluginOptions = {
         let to = input.to !== undefined ? input.to : [...cube.to];
         const nFrom = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
         const nTo = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
+        const sizeError = texturedCubeSizeError(nFrom, nTo, `Cube "${cube.name}"`);
+        if (sizeError) return { ok: false, error: sizeError };
 
         Undo.initEdit({ elements: [cube], outliner: true });
 
@@ -3865,10 +3881,9 @@ const options: PluginOptions = {
           const a = rects[i], b = rects[j];
           if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) { overlaps++; if (overlapPairs.length < 20) overlapPairs.push(`${a.cube}~${b.cube}`); }
         }
-        // VALID hinges on the things that actually corrupt a texture: overlapping
-        // cubes (paint bleed) and out-of-bounds UVs. null / zero-size faces are just
-        // WARNINGS (e.g. billboard/collapsed faces) — they don't block texturing.
-        const valid = overlaps === 0 && outOfBounds === 0;
+        // GeckoLib export is sensitive to every bad face. Treat null/zero-size UVs
+        // as invalid too so validation matches the export-safety rule.
+        const valid = overlaps === 0 && outOfBounds === 0 && nullUv === 0 && zeroSize === 0;
         const warnings = nullUv > 0 || zeroSize > 0;
         const uvMode = cubes.length === 0 ? 'none' : boxUvCount === cubes.length ? 'box_uv' : boxUvCount === 0 ? 'per_face' : 'mixed';
         logToHistory(`validate_uv: ${cubes.length} cubes/${faceCount} faces, overlaps=${overlaps} oob=${outOfBounds} null=${nullUv} zero=${zeroSize}, mode=${uvMode}, tex=${texW}x${texH}`);
@@ -3876,10 +3891,8 @@ const options: PluginOptions = {
           ok: true, valid, warnings, cubes: cubes.length, faces: faceCount, uv_mode: uvMode, box_uv_cubes: boxUvCount,
           texture: [texW, texH], overlaps, overlapping_pairs: overlapPairs, out_of_bounds: outOfBounds, null_uv: nullUv, zero_size_uv: zeroSize,
           recommendation: !valid
-            ? 'Run pack_uv to fix overlapping/out-of-bounds UVs, then re-validate before painting.'
-            : warnings
-              ? 'Safe to paint — no overlaps. (Some zero-size/null faces exist, e.g. billboard/collapsed faces; harmless.)'
-              : 'UV layout is valid — safe to paint / shade_cube.',
+            ? 'Fix overlaps, out-of-bounds, null, and zero-size UVs. Prefer pack_uv or per-cube uv_offset, then re-validate before painting/exporting.'
+            : 'UV layout is valid — safe to paint / shade_cube.',
         };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };

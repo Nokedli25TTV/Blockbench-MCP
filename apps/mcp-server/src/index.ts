@@ -25,14 +25,35 @@ const httpServer = createServer();
 const io = new IOServer(httpServer, { cors: { origin: "*" } });
 
 let blockbench: Socket | null = null;
+let blockbenchReady = false;
 
 io.on("connection", (socket) => {
   log("Blockbench plugin connected:", socket.id);
   blockbench = socket;
-  socket.on("client_ready", () => log("Blockbench plugin is ready"));
+  blockbenchReady = false;
+  // The plugin normally emits client_ready from its connect handler. During
+  // rapid local server restarts Socket.IO can reconnect before that handler
+  // re-emits, leaving a healthy socket permanently gated as "not ready".
+  // Give the already-loaded desktop plugin a short grace period, then accept
+  // the live connection; actual tool calls still require acknowledgements.
+  const readyFallback = setTimeout(() => {
+    if (blockbench === socket && socket.connected && !blockbenchReady) {
+      blockbenchReady = true;
+      log("Blockbench plugin ready fallback activated after reconnect");
+    }
+  }, 30_000);
+  socket.on("client_ready", () => {
+    clearTimeout(readyFallback);
+    if (blockbench === socket) blockbenchReady = true;
+    log("Blockbench plugin is ready");
+  });
   socket.on("disconnect", () => {
+    clearTimeout(readyFallback);
     log("Blockbench plugin disconnected:", socket.id);
-    if (blockbench === socket) blockbench = null;
+    if (blockbench === socket) {
+      blockbench = null;
+      blockbenchReady = false;
+    }
   });
 });
 
@@ -75,13 +96,25 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   set_camera_angle: 30_000,
   trigger_action: 30_000,
   emulate_clicks: 30_000,
+  // Animation mode can take several seconds to settle after a development
+  // plugin reload. A 10s timeout can expire while Blockbench is still applying
+  // the requested timeline/pose operation, which makes safe retries ambiguous.
+  get_bone_pose: 60_000,
+  get_keyframes: 60_000,
+  create_animation: 60_000,
+  manage_keyframes: 60_000,
+  animation_timeline: 60_000,
+  animation_graph_editor: 60_000,
+  list_animations: 60_000,
+  get_project_info: 60_000,
+  save_checkpoint: 60_000,
   // Codec compile of the whole project / all animations.
   export_model: 60_000,
   export_animations: 60_000,
   // Whole-scene reads / validation that pull the full tree.
-  get_scene_tree: 20_000,
-  validate_model: 20_000,
-  validate_uv: 20_000,
+  get_scene_tree: 60_000,
+  validate_model: 60_000,
+  validate_uv: 60_000,
   find_elements_by_criteria: 20_000,
   // Batch geometry creation can build a whole model in one call.
   create_cubes: 30_000,
@@ -106,6 +139,14 @@ function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?
       reject(
         new Error(
           "Blockbench is not connected. Open Blockbench, enable the MCP plugin, and make sure a model is open."
+        )
+      );
+      return;
+    }
+    if (!blockbenchReady) {
+      reject(
+        new Error(
+          'Blockbench plugin is connected but not ready yet. Wait until stderr shows "Blockbench plugin is ready", then retry.'
         )
       );
       return;
@@ -195,6 +236,20 @@ async function forwardImageOrText(tool: ToolType, args: Record<string, any>, onT
 }
 
 const vec3 = z.array(z.number()).length(3);
+const modifyCubeInputSchema = {
+  id: z.string().optional().describe("Cube name or UUID to modify."),
+  cube_name: z.string().optional().describe("Deprecated alias for id; accepted for compatibility."),
+  name: z.string().optional().describe("New unique name."),
+  from: vec3.optional().describe("New lower corner [x,y,z]."),
+  to: vec3.optional().describe("New upper corner [x,y,z]."),
+  origin: vec3.optional().describe("New pivot [x,y,z]."),
+  inflate: z.number().optional().describe("Inflation amount."),
+  visibility: z.boolean().optional().describe("Show/hide the cube."),
+  shade: z.boolean().optional().describe("Apply shading."),
+  autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off, 1 on, 2 relative."),
+  mirror_uv: z.boolean().optional().describe("Mirror UVs."),
+  uv_offset: z.array(z.number()).length(2).optional().describe("UV offset [u,v]."),
+};
 
 // ---------------------------------------------------------------------------
 // MCP server (stdio) toward Claude
@@ -776,23 +831,12 @@ server.registerTool(
     description:
       "Modify an existing cube (resize/move/rename/visibility/inflate/UV settings). " +
       "Rotation is NOT accepted here — rotation is group-only (rule #1); put the cube in a bone and " +
-      "rotate that. Corners are normalized so the box is never inverted.",
-    inputSchema: {
-      id: z.string().describe("Cube name or UUID to modify."),
-      name: z.string().optional().describe("New unique name."),
-      from: vec3.optional().describe("New lower corner [x,y,z]."),
-      to: vec3.optional().describe("New upper corner [x,y,z]."),
-      origin: vec3.optional().describe("New pivot [x,y,z]."),
-      inflate: z.number().optional().describe("Inflation amount."),
-      visibility: z.boolean().optional().describe("Show/hide the cube."),
-      shade: z.boolean().optional().describe("Apply shading."),
-      autouv: z.enum(["0", "1", "2"]).optional().describe("Auto UV: 0 off, 1 on, 2 relative."),
-      mirror_uv: z.boolean().optional().describe("Mirror UVs."),
-      uv_offset: z.array(z.number()).length(2).optional().describe("UV offset [u,v]."),
-    },
+      "rotate that. Corners are normalized so the box is never inverted. `cube_name` is accepted as a " +
+      "deprecated alias for `id` for older callers.",
+    inputSchema: modifyCubeInputSchema,
   },
   async (args) =>
-    forward("modify_cube", args, (r) => `Modified cube "${r.name}" (from [${r.from}] to [${r.to}]).`)
+    forward("modify_cube", { ...args, id: args.id ?? args.cube_name }, (r) => `Modified cube "${r.name}" (from [${r.from}] to [${r.to}]).`)
 );
 
 server.registerTool(
@@ -1702,6 +1746,7 @@ server.registerTool(
       `UV ${r.valid ? "VALID ✅" : "INVALID ❌"} — ${r.cubes} cube(s) / ${r.faces} face(s), mode: ${r.uv_mode}, atlas ${r.texture?.[0]}x${r.texture?.[1]}. ` +
       `overlaps:${r.overlaps} out_of_bounds:${r.out_of_bounds} null:${r.null_uv} zero_size:${r.zero_size_uv}.` +
       (r.overlaps ? `\nOverlapping cubes: ${(r.overlapping_pairs || []).join(", ")}` : "") +
+      ((r.null_uv || r.zero_size_uv) ? "\nNull or zero-size UV faces are invalid for GeckoLib export; fix with uv_offset/pack_uv before painting/exporting." : "") +
       `\n${r.recommendation}`
     )
 );

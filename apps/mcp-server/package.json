@@ -17,7 +17,7 @@
   "packageManager": "pnpm@10.11.0",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@shared": "workspace:*",
+    "@blockbench-mcp/shared": "workspace:*",
     "socket.io": "^4.8.1",
     "zod": "^4.4.3"
   },
