@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Server as IOServer, Socket } from "socket.io";
-import { createServer } from "http";
+import { createServer, IncomingMessage, ServerResponse } from "http";
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ToolType, SceneTree } from "../../../packages/shared/src/types";
 import { validateScene, buildReport } from "../../../packages/shared/src/validation";
@@ -31,7 +32,65 @@ const BRIDGE_HOST = "127.0.0.1";
 const isWebOrigin = (origin: string | undefined): boolean =>
   !!origin && (/^https?:\/\//i.test(origin) || origin.trim().toLowerCase() === "null");
 
-const httpServer = createServer();
+// ---------------------------------------------------------------------------
+// Shared bridge. Only one process can own the port, but several MCP clients (the
+// Claude app, Claude Code sessions, …) may each start this server. The first one
+// becomes the OWNER — the plugin connects to it. Later ones become RELAYS: they send
+// their tool calls through the owner over a small local HTTP endpoint instead of
+// exiting. If the owner goes away, a relay takes the port over and the plugin
+// (which reconnects on its own) connects to it. The endpoint is as locked down as
+// the socket: loopback only, no Origin allowed (browsers always send one), a custom
+// header (forces a CORS preflight that is never granted) and a Host check
+// (defeats DNS rebinding).
+// ---------------------------------------------------------------------------
+const RELAY_PATH = "/mcp-bridge/call";
+const PING_PATH = "/mcp-bridge/ping";
+const RELAY_HEADER = "x-blockbench-mcp-relay";
+let role: "owner" | "relay" = "owner";
+let ownerSince = Date.now();
+const pluginWaiters: Array<() => void> = []; // calls waiting for the plugin to (re)connect
+const relaysSeen = new Map<string, number>(); // owner side: relay id -> last seen (ms)
+
+const isTrustedLocalRequest = (req: IncomingMessage): boolean =>
+  !req.headers.origin &&
+  req.headers[RELAY_HEADER] === "1" &&
+  /^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(String(req.headers.host || ""));
+
+// Handles the relay endpoint; Socket.IO serves its own path on the same server.
+function bridgeHttpHandler(req: IncomingMessage, res: ServerResponse) {
+  const send = (status: number, body: any) => {
+    // No keep-alive: every relay call opens a fresh connection, so a dead owner shows
+    // up as "connection refused" (never delivered, safe to resend after taking over)
+    // rather than a reused socket dying at an ambiguous moment.
+    res.writeHead(status, { "content-type": "application/json", connection: "close" });
+    res.end(JSON.stringify(body));
+  };
+  if (req.url !== RELAY_PATH && req.url !== PING_PATH) return send(404, { error: "not found" });
+  if (!isTrustedLocalRequest(req)) {
+    log(`Refused a bridge HTTP request (origin: ${req.headers.origin ?? "none"}, host: ${req.headers.host ?? "none"}).`);
+    return send(403, { error: "forbidden" });
+  }
+  relaysSeen.set(String(req.headers["x-blockbench-mcp-client"] || "relay"), Date.now());
+  if (req.url === PING_PATH) return send(200, { bridge: "blockbench-mcp", plugin_connected: !!(blockbench && blockbench.connected) });
+  if (req.method !== "POST") return send(405, { error: "POST only" });
+  const chunks: Buffer[] = [];
+  let size = 0;
+  req.on("data", (c: Buffer) => {
+    size += c.length;
+    if (size > 64 * 1024 * 1024) req.destroy(); // a data URL can be big, but not this big
+    else chunks.push(c);
+  });
+  req.on("end", async () => {
+    let cmd: any;
+    try { cmd = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return send(400, { error: "bad json" }); }
+    if (!cmd || typeof cmd.tool !== "string") return send(400, { error: "tool required" });
+    const callId = typeof cmd.callId === "string" ? cmd.callId.slice(0, 64) : undefined;
+    try { send(200, { response: await sendLocal(cmd.tool, cmd.input || {}, cmd.timeoutMs, callId) }); }
+    catch (e: any) { send(200, { transportError: e?.message || String(e) }); }
+  });
+}
+
+const httpServer = createServer(bridgeHttpHandler);
 const io = new IOServer(httpServer, {
   cors: { origin: "*" },
   allowRequest: (req, callback) => {
@@ -54,6 +113,7 @@ let blockbench: Socket | null = null;
 io.on("connection", (socket) => {
   log("Blockbench plugin connected:", socket.id, `(origin: ${socket.handshake.headers.origin ?? "none"})`);
   blockbench = socket;
+  pluginWaiters.splice(0).forEach((wake) => wake());
   socket.on("client_ready", () => log("Blockbench plugin is ready"));
   socket.on("disconnect", () => {
     log("Blockbench plugin disconnected:", socket.id);
@@ -67,27 +127,90 @@ io.on("connection", (socket) => {
   });
 });
 
-// Fail fast (and loudly) if the port is already taken. The #1 real-world failure
-// is two MCP clients (Claude Desktop AND a Claude Code session) each spawning a
-// server on 9999: the loser otherwise hangs silently until the client's ~4-minute
-// timeout, and every call appears to "time out". Surface the real cause instead.
-httpServer.on("error", (err: any) => {
-  if (err && err.code === "EADDRINUSE") {
-    log(
-      `FATAL: bridge port ${PORT} is already in use. Another MCP server already owns the ` +
-        `Blockbench bridge (e.g. Claude Desktop AND a Claude Code session both started one). ` +
-        `Only one server may own port ${PORT} at a time — close the other client/server and ` +
-        `restart, or set MCP_BRIDGE_PORT to use a different port.`
-    );
-  } else {
-    log("FATAL: bridge HTTP server error:", err);
-  }
-  process.exit(1);
+const relayHeaders = () => ({
+  [RELAY_HEADER]: "1",
+  "x-blockbench-mcp-client": String(process.pid),
+  "content-type": "application/json",
 });
 
-httpServer.listen(PORT, BRIDGE_HOST, () => {
-  log(`Socket.IO bridge listening on http://${BRIDGE_HOST}:${PORT} (local only)`);
+// Try to own the port once; "in-use" means another process has it.
+let listenAttempt: ((err: any) => void) | null = null;
+httpServer.on("error", (err: any) => {
+  if (listenAttempt) return listenAttempt(err);
+  log("FATAL: bridge HTTP server error:", err);
+  process.exit(1);
 });
+const listenOnce = (): Promise<"listening" | "in-use"> =>
+  new Promise((resolve) => {
+    listenAttempt = (err: any) => {
+      listenAttempt = null;
+      httpServer.off("listening", onListening);
+      if (err && err.code === "EADDRINUSE") return resolve("in-use");
+      log("FATAL: bridge HTTP server error:", err);
+      process.exit(1);
+    };
+    const onListening = () => {
+      listenAttempt = null;
+      resolve("listening");
+    };
+    httpServer.once("listening", onListening);
+    httpServer.listen(PORT, BRIDGE_HOST);
+  });
+
+// Is the port owned by a blockbench-mcp bridge (as opposed to another program)?
+const pingOwner = async (): Promise<boolean> => {
+  try {
+    const r = await fetch(`http://${BRIDGE_HOST}:${PORT}${PING_PATH}`, { headers: relayHeaders(), signal: AbortSignal.timeout(2000) });
+    const j: any = await r.json();
+    return r.ok && j?.bridge === "blockbench-mcp";
+  } catch {
+    return false;
+  }
+};
+
+// Become the owner if the port is free, otherwise a relay of the bridge that owns it.
+async function establishBridge(): Promise<void> {
+  if ((await listenOnce()) === "listening") {
+    const tookOver = role === "relay";
+    role = "owner";
+    ownerSince = Date.now();
+    log(`Socket.IO bridge listening on http://${BRIDGE_HOST}:${PORT} (local only)${tookOver ? " — took over from the previous owner" : ""}.`);
+    return;
+  }
+  if (await pingOwner()) {
+    if (role !== "relay") log(`Port ${PORT} is owned by another blockbench-mcp server — joined it as a relay (shared bridge).`);
+    role = "relay";
+    return;
+  }
+  log(`FATAL: bridge port ${PORT} is in use by a program that is not a blockbench-mcp bridge. Free the port or set MCP_BRIDGE_PORT.`);
+  process.exit(1);
+}
+
+let takingOver: Promise<void> | null = null;
+const takeOverIfOwnerGone = (): Promise<void> => {
+  if (!takingOver) {
+    takingOver = (async () => {
+      await new Promise((r) => setTimeout(r, 100 + Math.random() * 400)); // stagger competing relays
+      if (!(await pingOwner())) await establishBridge();
+    })().finally(() => { takingOver = null; });
+  }
+  return takingOver;
+};
+
+// For get_project_info: which role this server has and who else shares the bridge.
+const bridgeInfo = () => {
+  const recent = [...relaysSeen.values()].filter((t) => Date.now() - t < 10_000).length;
+  return role === "owner"
+    ? { role, port: PORT, relays_connected: recent }
+    : { role, port: PORT, note: "calls go through the server that owns the port" };
+};
+
+const bridgeReady = establishBridge();
+// Relays watch the owner, so one takes over (and the plugin reconnects to it)
+// before the next tool call needs it.
+setInterval(() => {
+  if (role === "relay") void pingOwner().then((alive) => { if (!alive) void takeOverIfOwnerGone(); });
+}, 3000).unref();
 
 // Per-tool timeout tiers. A timeout never slows a normal call — it only decides
 // how long a FAILURE takes to surface — so keep it as short as each tool safely
@@ -146,8 +269,63 @@ const TOOL_TIMEOUTS: Record<string, number> = {
 const timeoutFor = (tool: ToolType): number => TOOL_TIMEOUTS[tool] ?? DEFAULT_TIMEOUT_MS;
 
 /** Send a command to the Blockbench plugin and await its ack (result object). */
-function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?: number): Promise<any> {
+async function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?: number): Promise<any> {
   const ms = timeoutMs ?? timeoutFor(tool);
+  await bridgeReady;
+  if (role === "owner") return sendLocal(tool, input, ms);
+  // The id lets the plugin recognise a resend: if the owner dies mid-call we cannot
+  // know whether the call got through, so it is sent once more and the plugin returns
+  // the first result instead of applying the edit twice.
+  const callId = randomUUID();
+  try {
+    return await sendViaOwner(tool, input, ms, callId);
+  } catch (e: any) {
+    if (!(e instanceof OwnerUnreachable)) throw e;
+    await takeOverIfOwnerGone();
+    if ((role as string) === "owner") return sendLocal(tool, input, ms, callId);
+    try {
+      return await sendViaOwner(tool, input, ms, callId); // another relay took over
+    } catch (e2: any) {
+      throw e2 instanceof OwnerUnreachable ? new Error(`The shared bridge is unavailable (tool: ${tool}): ${e2.message}`) : e2;
+    }
+  }
+}
+
+class OwnerUnreachable extends Error {}
+
+async function sendViaOwner(tool: string, input: Record<string, any>, ms: number, callId: string): Promise<any> {
+  let r: Response;
+  try {
+    r = await fetch(`http://${BRIDGE_HOST}:${PORT}${RELAY_PATH}`, {
+      method: "POST",
+      headers: relayHeaders(),
+      body: JSON.stringify({ tool, input, timeoutMs: ms, callId }),
+      signal: AbortSignal.timeout(ms + 12_000), // owner answers within its own grace + ms
+    });
+  } catch (e: any) {
+    if (e?.name === "TimeoutError") throw new Error(`Timed out waiting for a response from Blockbench after ${ms}ms (tool: ${tool}, via the shared bridge).`);
+    // Refused, reset or closed before an answer: the owner is (probably) gone.
+    throw new OwnerUnreachable(e?.cause?.code || e?.message || String(e));
+  }
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`The shared bridge refused the call (HTTP ${r.status}: ${j?.error ?? "unknown"}).`);
+  if (j.transportError) throw new Error(j.transportError);
+  return j.response;
+}
+
+// Right after this process became the owner the plugin is still in its reconnect
+// back-off (up to ~7.5 s), so a call made then waits for it instead of failing.
+const waitForPlugin = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const done = () => { clearTimeout(t); resolve(); };
+    const t = setTimeout(() => { const i = pluginWaiters.indexOf(done); if (i >= 0) pluginWaiters.splice(i, 1); resolve(); }, ms);
+    pluginWaiters.push(done);
+  });
+
+async function sendLocal(tool: string, input: Record<string, any>, timeoutMs?: number, callId?: string): Promise<any> {
+  const ms = Math.min(Math.max(Number(timeoutMs) || DEFAULT_TIMEOUT_MS, 1000), 120_000);
+  const graceLeft = ownerSince + 10_000 - Date.now();
+  if ((!blockbench || blockbench.disconnected) && graceLeft > 0) await waitForPlugin(graceLeft);
   return new Promise((resolve, reject) => {
     if (!blockbench || blockbench.disconnected) {
       reject(
@@ -157,13 +335,14 @@ function sendToBlockbench(tool: ToolType, input: Record<string, any>, timeoutMs?
       );
       return;
     }
+    const socket = blockbench;
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       reject(new Error(`Timed out waiting for a response from Blockbench after ${ms}ms (tool: ${tool}).`));
     }, ms);
-    blockbench.emit("tool_command", { tool, input }, (response: any) => {
+    socket.emit("tool_command", callId ? { tool, input, call_id: callId } : { tool, input }, (response: any) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -196,6 +375,11 @@ const fail = (text: string) => ({ isError: true, content: [{ type: "text" as con
 // Non-fatal plugin warnings (`warning` or `warnings[]` on the ack) as trailing lines.
 const warningLines = (r: any): string =>
   [r?.warning, ...(r?.warnings || [])].filter(Boolean).map((w: string) => `\n⚠️  ${w}`).join("");
+// Blockbench grows an animation when a keyframe lands past its end; say so.
+const lengthNote = (r: any): string =>
+  r?.length_changed
+    ? `\n⚠️  The animation grew from ${r.length_changed.from}s to ${r.length_changed.to}s because a keyframe is past the old end — use animation_timeline set_length to change it back if that wasn't intended.`
+    : "";
 // One channel's stored keyframes as "t=0 [0, 0, 0] · t=1 [4, 0, 0]", capped.
 const formatKeyframes = (kfs: any[], max = 12): string => {
   const list = kfs || [];
@@ -727,7 +911,7 @@ server.registerTool(
           ? `\n⚠️  No keyframe was created on ${r.bone}.${r.channel}.`
           : `\n⚠️  No keyframe matched the given time(s) on ${r.bone}.${r.channel} (±0.001 s) — nothing changed.`)
         : "";
-      return `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.${miss}\nStored now: ${formatKeyframes(r.stored)}`;
+      return `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.${miss}\nStored now: ${formatKeyframes(r.stored)}${lengthNote(r)}`;
     })
 );
 
@@ -766,7 +950,7 @@ server.registerTool(
       if (channels.length > 40) lines.push(`  … (+${channels.length - 40} more channels)`);
       return (
         `Set ${r.created + r.updated} keyframe(s) on ${r.animation}: ${r.created} created, ${r.updated} updated` +
-        `${r.cleared ? `, ${r.cleared} cleared first` : ""}.\nStored now:\n${lines.join("\n")}`
+        `${r.cleared ? `, ${r.cleared} cleared first` : ""}.\nStored now:\n${lines.join("\n")}${lengthNote(r)}`
       );
     })
 );
@@ -1203,7 +1387,7 @@ server.registerTool(
       return fail(e?.message || String(e));
     }
     if (r && r.ok === false) return fail(`get_project_info failed: ${r.error}`);
-    return ok(JSON.stringify(r.info, null, 2));
+    return ok(JSON.stringify({ ...r.info, mcp_bridge: bridgeInfo() }, null, 2));
   }
 );
 
@@ -2489,6 +2673,12 @@ for (const s of skills.skills) {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // The listening bridge would keep the process alive after its client quits, holding
+  // the port as an orphan. Exit instead, so a relay can take over right away.
+  process.stdin.once("end", () => {
+    log("Client closed the connection — shutting down.");
+    process.exit(0);
+  });
   // The full tool list is what the client receives via tools/list; don't keep a
   // hand-maintained copy here (it went stale as tools were added).
   log(

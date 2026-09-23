@@ -87,8 +87,9 @@ mcp-server  (Node — apps/mcp-server)      ── Socket.IO bridge on port 9999
 - The **plugin** is a Socket.IO *client*: when Blockbench loads it, it connects to `127.0.0.1:9999`
   by itself and reconnects automatically when the server restarts. There is no "Connect" button.
 - The bridge is **local-only**: it listens on `127.0.0.1` and refuses connections from web pages.
-- **Only one server can own port 9999.** If two AI clients each start this server, the second one
-  exits with `FATAL: bridge port 9999 is already in use` — use Blockbench from one client at a time.
+- **Several AI clients can share Blockbench.** The first server to start owns port 9999; any later one
+  (e.g. Claude Code while the Claude app is open) joins it as a *relay* and sends its calls through
+  it. If the owner quits, a relay takes over within a few seconds and the plugin reconnects to it.
 
 More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -141,9 +142,10 @@ This produces the server (`apps/mcp-server/dist/index.js`) and the plugin
 claude mcp add blockbench -- node C:/path/to/Blockbench-MCP/apps/mcp-server/dist/index.js
 ```
 
-> [!WARNING]
-> Don't run both at once. The Claude Desktop app starts its server as soon as the app opens, so a
-> Claude Code session started afterwards can't get port 9999 (and vice versa).
+> [!NOTE]
+> Both can run at once: whichever server starts first owns port 9999 and the other relays through
+> it (`get_project_info` shows `mcp_bridge.role`). Calls from both reach the same Blockbench, so
+> avoid editing the same model from two chats at the same time.
 
 ### 4. Check that it works
 
@@ -218,7 +220,7 @@ you change it.
 
 | Symptom | Cause / fix |
 |---|---|
-| Server exits with `FATAL: bridge port 9999 is already in use` | Another MCP client already runs this server (e.g. the Claude Desktop app **and** Claude Code). Close one and restart the other. Log (Windows): `%APPDATA%\Claude\logs\mcp-server-blockbench.log`. |
+| Server exits with `FATAL: bridge port 9999 is in use by a program that is not a blockbench-mcp bridge` | Some other program holds port 9999. Close it. (Another copy of *this* server is fine — the new one relays through it.) Log (Windows): `%LOCALAPPDATA%\Claude\logs\mcp-server-blockbench.log` (older app versions: `%APPDATA%\Claude\logs`). |
 | `[NOT_CONNECTED] Blockbench is not connected` | Blockbench isn't running, the plugin isn't loaded, or no model is open. The plugin reconnects on its own once the server is up. |
 | A tool is missing (e.g. `create_sphere`) | It's hidden by the `geckolib` profile — set `BLOCKBENCH_MCP_PROFILE=full`. |
 | A code change had no effect | See [After changing the code](#-after-changing-the-code); check `plugin_build`. |
@@ -263,7 +265,9 @@ union in `packages/shared/src/types.ts` — plus a mock handler and a check in t
   it when you understand the code being run.
 - **The bridge is local-only:** it listens on `127.0.0.1:9999` (not reachable from the network) and
   refuses Socket.IO connections that come from a web page (an `http`/`https` or sandboxed `null`
-  Origin), so a site open in your browser can't pose as Blockbench. Other programs running on your own machine can still connect.
+  Origin), so a site open in your browser can't pose as Blockbench. The relay endpoint that lets a
+  second server share the bridge accepts only requests with no Origin, a custom header and a
+  `127.0.0.1`/`localhost` Host. Other programs running on your own machine can still connect.
 - `export_model` / `export_animations` can write files to the path you give (Blockbench asks for file
   system permission).
 - GeckoLib renders cubes only — mesh elements are dropped on export (`validate_model` warns about it).

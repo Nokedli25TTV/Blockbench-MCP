@@ -620,13 +620,30 @@ const options: PluginOptions = {
         Undo.finishEdit('Set rotation via MCP', { outliner: true });
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
-        const pivotSet = (group.origin || [0, 0, 0]).some((n: number) => Math.abs(n) > 1e-6);
+        // A [0,0,0] pivot is only suspicious when it lies outside the bone's own cubes
+        // (a forgotten set_origin). Inside them it is usually deliberate — e.g. a
+        // blade rotating around its tip at the origin — so don't nag then.
+        const origin = group.origin || [0, 0, 0];
+        const pivotSet = origin.some((n: number) => Math.abs(n) > 1e-6);
+        let pivotInsideCubes = false;
+        if (!pivotSet) {
+          const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+          const visit = (children: any[]) => {
+            for (const ch of children || []) {
+              if (typeof Group !== 'undefined' && ch instanceof Group) { visit(ch.children); continue; }
+              if (!isVec3(ch.from) || !isVec3(ch.to)) continue;
+              for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], ch.from[i], ch.to[i]); hi[i] = Math.max(hi[i], ch.from[i], ch.to[i]); }
+            }
+          };
+          visit(group.children);
+          pivotInsideCubes = [0, 1, 2].every((i) => lo[i] <= 1e-6 && hi[i] >= -1e-6);
+        }
         logToHistory(`rotated "${group.name}"`);
         return {
           ok: true,
           name: group.name,
           rotation: group.rotation,
-          warning: pivotSet ? undefined : 'pivot/origin is [0,0,0]; call set_origin first for predictable rotation (rule #1).',
+          warning: pivotSet || pivotInsideCubes ? undefined : "pivot/origin is [0,0,0], outside this bone's cubes — call set_origin first unless that is intended (rule #1).",
         };
       } catch (err: any) {
         console.error('[MCP Plugin] setRotation failed:', err);
@@ -1028,6 +1045,14 @@ const options: PluginOptions = {
     const readChannel = (animator: any, channel: string): any[] =>
       ((animator && animator[channel]) || []).map(readKeyframe).sort((p: any, q: any) => p.time - q.time);
 
+    // Blockbench silently grows an animation when a keyframe lands past its end
+    // (seen live 2026-09-23: 2 s → 3 s, leaving a loop with a dead second).
+    // Report it in the write reply so the change isn't discovered much later.
+    const lengthChange = (before: number, animation: any): { length_changed?: { from: number; to: number } } => {
+      const after = Number(animation && animation.length) || 0;
+      return Math.abs(after - before) > 1e-6 ? { length_changed: { from: before, to: after } } : {};
+    };
+
     // Create / delete / edit / select keyframes on one bone+channel.
     const manageKeyframes = (input: any): any => {
       try {
@@ -1047,6 +1072,7 @@ const options: PluginOptions = {
           animation.animators[group.uuid] = animator;
         }
 
+        const lengthBefore = Number(animation.length) || 0;
         Undo.initEdit({ animations: [animation], keyframes: [] } as any);
 
         const applyBezier = (keyframe: any, kf: any) => {
@@ -1101,7 +1127,7 @@ const options: PluginOptions = {
         // write failure is visible in the ack instead of after 5 rounds.
         const stored = readChannel(animator, input.channel);
         logToHistory(`${input.action} ${affected} keyframe(s) on ${input.bone_name}.${input.channel}`);
-        return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel, stored };
+        return { ok: true, action: input.action, affected, bone: input.bone_name, channel: input.channel, stored, ...lengthChange(lengthBefore, animation) };
       } catch (err: any) {
         console.error('[MCP Plugin] manageKeyframes failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -1150,6 +1176,7 @@ const options: PluginOptions = {
         let created = 0, updated = 0, cleared = 0;
         const touched = new Map<string, { animator: any; channel: string }>();
         let failure: string | null = null;
+        const lengthBefore = Number(animation.length) || 0;
         Undo.initEdit({ animations: [animation], keyframes: [] } as any);
         try {
           if (input.clear_first) {
@@ -1188,7 +1215,7 @@ const options: PluginOptions = {
         const stored: Record<string, any[]> = {};
         for (const [key, t] of touched) stored[key] = readChannel(t.animator, t.channel);
         logToHistory(`set_keyframes: ${created} created, ${updated} updated, ${cleared} cleared on "${animation.name}"`);
-        return { ok: true, animation: animation.name, created, updated, cleared, stored };
+        return { ok: true, animation: animation.name, created, updated, cleared, stored, ...lengthChange(lengthBefore, animation) };
       } catch (err: any) {
         console.error('[MCP Plugin] setKeyframes failed:', err);
         return { ok: false, error: err?.message || String(err) };
@@ -4533,7 +4560,8 @@ const options: PluginOptions = {
       updateCommandHistory();
     });
 
-    socket.on("tool_command", async (cmd: { tool: ToolType; input: any }, ack?: (response: any) => void) => {
+    const recentCalls = new Map<string, Promise<any>>();
+    socket.on("tool_command", async (cmd: { tool: ToolType; input: any; call_id?: string }, ack?: (response: any) => void) => {
       commandHistory.push({
         timestamp: new Date(),
         type: 'received',
@@ -4659,17 +4687,27 @@ const options: PluginOptions = {
       };
       pluginToolCount = Object.keys(handlers).length;
 
-      let response: any;
-      const handler = handlers[cmd.tool];
-      if (handler) {
+      const run = async () => {
+        const handler = handlers[cmd.tool];
+        if (!handler) return { ok: false, error: `Unknown tool: ${cmd.tool}` };
         try {
-          response = await handler(cmd.input || {});
+          return await handler(cmd.input || {});
         } catch (err: any) {
-          response = { ok: false, error: err?.message || String(err) };
+          return { ok: false, error: err?.message || String(err) };
         }
-      } else {
-        response = { ok: false, error: `Unknown tool: ${cmd.tool}` };
+      };
+      // A call relayed through a shared bridge carries an id and may arrive twice
+      // (resent after the bridge owner died mid-call): answer the resend with the
+      // first result instead of applying the edit again.
+      let pending = cmd.call_id ? recentCalls.get(cmd.call_id) : undefined;
+      if (!pending) {
+        pending = run();
+        if (cmd.call_id) {
+          recentCalls.set(cmd.call_id, pending);
+          if (recentCalls.size > 100) recentCalls.delete(recentCalls.keys().next().value as string);
+        }
       }
+      const response = await pending;
 
       updateCommandHistory();
 

@@ -35,6 +35,7 @@ export function createMockScene() {
   };
   const keyframes = {}; // "bone.channel" -> [{ time, values, interpolation }]
   const animations = []; // [{ uuid, name }]
+  let mockAnimLength = 2; // seconds, for set_keyframes / check_animation
   const animName = (n) => (n.startsWith("animation.") ? n : `animation.${n}`);
   const findAnim = (id) => animations.find((a) => a.uuid === id || a.name === id || a.name === animName(id));
 
@@ -114,7 +115,10 @@ export function createMockScene() {
       }
       const stored = {};
       for (const key of touched) stored[key] = keyframes[key].map((k) => ({ ...k }));
-      return { ok: true, animation: "animation.mock", created, updated, cleared, stored };
+      // Like Blockbench: a keyframe past the end grows the animation.
+      const before = mockAnimLength;
+      for (const e of entries) mockAnimLength = Math.max(mockAnimLength, e.time);
+      return { ok: true, animation: "animation.mock", created, updated, cleared, stored, ...(mockAnimLength !== before ? { length_changed: { from: before, to: mockAnimLength } } : {}) };
     },
     check_animation(input) {
       const maxJump = input.max_jump || 90;
@@ -131,7 +135,7 @@ export function createMockScene() {
           if (d > maxJump) issues.push({ severity: "warning", rule: "rotation-jump", message: `${bone}.rotation turns ${d}° between ${kfs[i - 1].time}s and ${kfs[i].time}s.` });
         }
       }
-      return { ok: true, animation: "animation.mock", length: 2, loop: "loop", bones: bones.size, keyframes: count, issues, ...(typeof input.floor_y === "number" ? { lowest: { y: -0.5, time: 1 } } : {}) };
+      return { ok: true, animation: "animation.mock", length: mockAnimLength, loop: "loop", bones: bones.size, keyframes: count, issues, ...(typeof input.floor_y === "number" ? { lowest: { y: -0.5, time: 1 } } : {}) };
     },
     get_keyframes(input) {
       const chans = input.channel ? [input.channel] : ["rotation", "position", "scale"];
@@ -651,15 +655,12 @@ export function createMockScene() {
 // --------------------------------------------------------------------------
 // Start server + mock + MCP client, return helpers.
 // --------------------------------------------------------------------------
-// `profile` defaults to "full" so the suites exercise every tool; pass
-// "geckolib" to test the lean default profile.
-export async function startHarness({ profile = "full" } = {}) {
-  const mock = createMockScene();
-  // Run on an isolated random port so an open Blockbench (on 9999) can't interfere.
-  const port = process.env.MCP_BRIDGE_PORT || String(20000 + Math.floor(Math.random() * 2000));
+// Spawn one MCP server process on `port` and speak MCP to it over stdio. Several
+// can share a port: the first owns the bridge, later ones join it as relays.
+export function startServer({ port, profile = "full" }) {
   const child = spawn("node", [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
-    env: { ...process.env, MCP_BRIDGE_PORT: port, BLOCKBENCH_MCP_PROFILE: profile },
+    env: { ...process.env, MCP_BRIDGE_PORT: String(port), BLOCKBENCH_MCP_PROFILE: profile },
   });
 
   let buf = "";
@@ -690,24 +691,44 @@ export async function startHarness({ profile = "full" } = {}) {
   };
   const listToolDefs = async () => (await rpc("tools/list", {})).result.tools;
   const listTools = async () => (await listToolDefs()).map((t) => t.name);
+  const initialize = async () => {
+    await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "harness", version: "0" } });
+    notify("notifications/initialized");
+  };
+  const kill = () => { try { child.kill(); } catch {} };
+  return { child, rpc, notify, call, listToolDefs, listTools, initialize, kill };
+}
+
+// `profile` defaults to "full" so the suites exercise every tool; pass
+// "geckolib" to test the lean default profile.
+export async function startHarness({ profile = "full" } = {}) {
+  const mock = createMockScene();
+  // Run on an isolated random port so an open Blockbench (on 9999) can't interfere.
+  const port = process.env.MCP_BRIDGE_PORT || String(20000 + Math.floor(Math.random() * 2000));
+  const server = startServer({ port, profile });
+  const { rpc, notify, call, listTools, listToolDefs } = server;
 
   const socket = io(`http://127.0.0.1:${port}`, { transports: ["websocket", "polling"] });
+  // Mirrors the plugin: a resent relay call (same call_id) gets the first result.
+  const recentCalls = new Map();
   socket.on("tool_command", (cmd, ack) => {
+    if (cmd.call_id && recentCalls.has(cmd.call_id)) return ack(recentCalls.get(cmd.call_id));
     const fn = mock.handlers[cmd.tool];
-    ack(fn ? fn(cmd.input || {}) : { ok: false, error: `unknown tool ${cmd.tool}` });
+    const r = fn ? fn(cmd.input || {}) : { ok: false, error: `unknown tool ${cmd.tool}` };
+    if (cmd.call_id) recentCalls.set(cmd.call_id, r);
+    ack(r);
   });
 
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("harness: mock socket failed to connect")), 10000);
-    socket.on("connect", async () => {
+    socket.once("connect", async () => {
       clearTimeout(t);
-      await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "harness", version: "0" } });
-      notify("notifications/initialized");
+      await server.initialize();
       resolve();
     });
   });
 
-  const stop = () => { try { socket.disconnect(); } catch {} try { child.kill(); } catch {} };
+  const stop = () => { try { socket.disconnect(); } catch {} server.kill(); };
   // Try one extra Socket.IO connection (e.g. with a browser Origin header) and
   // disconnect it again; resolves "connected" or "rejected".
   const probeConnect = (extraHeaders = {}) => new Promise((resolve) => {
@@ -717,5 +738,5 @@ export async function startHarness({ profile = "full" } = {}) {
     s.on("connect_error", () => done("rejected"));
   });
 
-  return { call, rpc, notify, listTools, listToolDefs, probeConnect, scene: mock.scene, mock, stop };
+  return { call, rpc, notify, listTools, listToolDefs, probeConnect, scene: mock.scene, mock, stop, port, server };
 }

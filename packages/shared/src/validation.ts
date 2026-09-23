@@ -33,6 +33,19 @@ const isFiniteVec3 = (v: any): v is Vec3 =>
 
 const nonZeroAxes = (v: Vec3): number => v.filter((n) => Math.abs(n) > EPS).length;
 
+// True when [0,0,0] lies inside (or on) the bounds of a group's descendant cubes —
+// then a zero pivot is usually deliberate (e.g. a blade rotating around its tip).
+const originInsideCubes = (group: SceneNode): boolean => {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const visit = (n: SceneNode) => {
+    if (n.type === "group") { (n.children || []).forEach(visit); return; }
+    if (!isFiniteVec3(n.from) || !isFiniteVec3(n.to)) return;
+    for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], n.from[i], n.to[i]); hi[i] = Math.max(hi[i], n.from[i], n.to[i]); }
+  };
+  if (group.type === "group") (group.children || []).forEach(visit);
+  return [0, 1, 2].every((i) => lo[i] <= EPS && hi[i] >= -EPS);
+};
+
 export function validateScene(tree: SceneTree): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const textureIds = new Set((tree.textures || []).map((t) => t.uuid));
@@ -49,8 +62,9 @@ export function validateScene(tree: SceneTree): ValidationIssue[] {
           node: node.name,
           message: `Group "${node.name}" has a non-finite origin/pivot.`,
         });
-      } else if (nonZeroAxes(node.rotation) > 0 && nonZeroAxes(node.origin) === 0) {
-        // Rotating around the world origin almost always indicates a forgotten pivot.
+      } else if (nonZeroAxes(node.rotation) > 0 && nonZeroAxes(node.origin) === 0 && !originInsideCubes(node)) {
+        // Rotating around the world origin, away from the bone's own cubes, almost
+        // always indicates a forgotten pivot.
         issues.push({
           severity: "warning",
           rule: "missing-pivot",

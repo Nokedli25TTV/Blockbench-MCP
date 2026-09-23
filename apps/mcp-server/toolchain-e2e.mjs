@@ -3,8 +3,9 @@
 // Uses the shared harness (real MCP server + mock Blockbench). Needs port 9999 free.
 //
 //   root → crystal_x (rotate X) → crystal_y (rotate Y) → crystal_cube
-import { startHarness } from "./test/harness.mjs";
+import { startHarness, startServer } from "./test/harness.mjs";
 import { randomUUID } from "node:crypto";
+import { request as httpRequest, createServer as createHttpServer } from "node:http";
 
 const nonZero = (v) => v.filter((n) => Math.abs(n) > 1e-6).length;
 const h = await startHarness();
@@ -158,6 +159,22 @@ try {
   const ca = await h.call("check_animation", { floor_y: 0 });
   check("check_animation flags a >90° rotation jump", !ca.isError && /\(rotation-jump\) crystal_x\.rotation turns 140/.test(ca.text), ca.text);
   check("check_animation reports the lowest point when floor_y is given", /Lowest point: y=-0\.5 at 1s/.test(ca.text), ca.text);
+  const grow = await h.call("set_keyframes", { keyframes: [{ bone: "crystal_y", channel: "position", time: 3, values: [0, 0, 0] }] });
+  check("set_keyframes reports when a keyframe grows the animation", /grew from 2s to 3s/.test(grow.text), grow.text);
+
+  console.log("\n--- Pivot rule: [0,0,0] only suspicious outside the bone's cubes ---");
+  await h.call("create_cubes", {
+    groups: [{ name: "tip_bone", origin: [0, 0, 0] }, { name: "far_bone", origin: [0, 0, 0] }],
+    cubes: [
+      { name: "tip_cube", parent: "tip_bone", from: [-1, 0, -1], to: [1, 4, 1] },
+      { name: "far_cube", parent: "far_bone", from: [6, 0, 0], to: [8, 2, 2] },
+    ],
+  });
+  await h.call("set_rotation", { target: "tip_bone", rotation: [0, 0, 20] });
+  await h.call("set_rotation", { target: "far_bone", rotation: [0, 0, 20] });
+  const vp = await h.call("validate_model");
+  check("validate_model: pivot inside the bone's cubes is not flagged", !/missing-pivot\) Group "tip_bone"/.test(vp.text), vp.text);
+  check("validate_model: pivot away from the bone's cubes is flagged", /missing-pivot\) Group "far_bone"/.test(vp.text), vp.text);
 
   console.log("\n--- Validation (expected PASS) ---");
   const v1 = await h.call("validate_model");
@@ -207,6 +224,58 @@ try {
   } finally {
     g.stop();
   }
+
+  // Last, because it kills the main server.
+  console.log("\n--- Shared bridge (4.2): a second server relays, then takes over ---");
+  const relay = startServer({ port: h.port });
+  try {
+    await relay.initialize();
+    const info = async (srv) => { const r = await srv.call("get_project_info"); return r.isError ? { error: r.text } : JSON.parse(r.text).mcp_bridge; };
+    const rInfo = await info(relay);
+    check("a second server on the same port joins as a relay", rInfo?.role === "relay", JSON.stringify(rInfo));
+    const viaRelay = await relay.call("create_group", { name: "via_relay", origin: [0, 0, 0] });
+    check("a relay's tool call reaches Blockbench through the owner", !viaRelay.isError && !!h.mock.findGroup("via_relay"), viaRelay.text);
+    const oInfo = await info(h);
+    check("the owner reports the connected relay", oInfo?.role === "owner" && oInfo.relays_connected >= 1, JSON.stringify(oInfo));
+
+    const raw = (headers, body = { tool: "get_scene_tree", input: {} }) => new Promise((resolve) => {
+      const req = httpRequest({ host: "127.0.0.1", port: h.port, path: "/mcp-bridge/call", method: "POST", headers: { "content-type": "application/json", ...headers } }, (res) => {
+        let text = "";
+        res.on("data", (c) => (text += c));
+        res.on("end", () => resolve(headers.full ? { status: res.statusCode, body: JSON.parse(text || "{}") } : res.statusCode));
+      });
+      req.on("error", () => resolve(-1));
+      req.end(JSON.stringify(body));
+    });
+    const relayHdr = { "x-blockbench-mcp-relay": "1" };
+    check("relay endpoint refuses a browser (Origin present)", (await raw({ ...relayHdr, Origin: "https://evil.example" })) === 403);
+    check("relay endpoint refuses a request without the relay header", (await raw({})) === 403);
+    check("relay endpoint refuses a foreign Host (DNS rebinding)", (await raw({ ...relayHdr, Host: `evil.example:${h.port}` })) === 403);
+    const resend = { tool: "create_group", input: { name: "sent_twice", origin: [0, 0, 0] }, callId: "e2e-resend-1" };
+    const first = await raw({ ...relayHdr, full: "1" }, resend);
+    const second = await raw({ ...relayHdr, full: "1" }, resend);
+    check("a resent relay call (same call id) is applied once and answered with the first result",
+      first.body?.response?.ok === true && second.body?.response?.ok === true, JSON.stringify(second.body));
+
+    h.server.kill();
+    const t0 = Date.now();
+    const afterOwner = await relay.call("get_scene_tree", { max_depth: 0 });
+    check("after the owner exits, the relay takes over and the plugin reconnects to it", !afterOwner.isError, `${Date.now() - t0} ms · ${afterOwner.text.slice(0, 220)}`);
+    const tInfo = await info(relay);
+    check("the former relay now owns the bridge", tInfo?.role === "owner", JSON.stringify(tInfo));
+  } finally {
+    relay.kill();
+  }
+
+  // A port held by some other program is still a hard, clearly logged error.
+  const squatter = createHttpServer((_q, s) => { s.statusCode = 404; s.end(); });
+  const squatPort = 22500 + Math.floor(Math.random() * 400);
+  await new Promise((r) => squatter.listen(squatPort, "127.0.0.1", r));
+  const loser = startServer({ port: squatPort });
+  const code = await new Promise((r) => { loser.child.on("exit", r); setTimeout(() => r("still running"), 8000); });
+  loser.kill();
+  squatter.close();
+  check("a port held by a non-bridge program exits with an error", code === 1, `exit: ${code}`);
 
   console.log(`\n${failures === 0 ? "🎉 ALL CHECKS PASSED" : "💥 " + failures + " CHECK(S) FAILED"}`);
   h.stop();

@@ -24,12 +24,18 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
   bridges each tool call to the plugin over Socket.IO, awaiting the plugin's ack.
 - The **plugin** runs in Blockbench, executes the real Blockbench API calls, and acks `{ ok, ... }`.
 - The bridge is **local-only**: it binds to `127.0.0.1` and refuses Socket.IO handshakes whose Origin is a web page (`http`/`https`, or `null` from a sandboxed iframe) — the plugin sends no Origin — so a browser tab can't pose as Blockbench. If the active client disconnects, the bridge falls back to another still-connected one.
-- Only **one** process may own port 9999 at a time (the plugin connects to `127.0.0.1:9999` only).
-  Both the Claude app (`%APPDATA%\Claude\claude_desktop_config.json` — its server starts with the app)
-  and Claude Code (`~/.claude.json`) are configured to spawn this server; whichever starts first owns
-  the bridge, and the other exits at once with `FATAL: bridge port 9999 is already in use` (visible
-  in `%APPDATA%\Claude\logs\mcp-server-blockbench.log`). Until a shared bridge exists, use Blockbench
-  from ONE client at a time — e.g. quit the Claude app before driving Blockbench from Claude Code.
+- **Shared bridge.** Only one process can own port 9999 (the plugin connects to `127.0.0.1:9999`
+  only), but several clients may each start this server (the Claude app, Claude Code sessions). The
+  first becomes the **owner**; a later one finds the port taken, pings `GET /mcp-bridge/ping` and joins
+  as a **relay**: its tool calls go to the owner as `POST /mcp-bridge/call` on the same port, and the
+  owner forwards them to the plugin. Relays ping the owner every 3 s; when it is gone, one takes the port
+  over and the plugin (which reconnects by itself) connects to it — measured ~1.3 s in the e2e test.
+  A relayed call carries a `call_id`; if the owner dies mid-call it is resent once and the plugin
+  answers the resend with the first result instead of applying the edit twice. The HTTP endpoint is
+  locked down like the socket: no `Origin` allowed, a custom `x-blockbench-mcp-relay` header required,
+  `Host` must be `127.0.0.1`/`localhost` (DNS rebinding). A port held by some *other* program is still
+  fatal. The server exits when its client closes stdin, so an orphan never holds the port.
+  `get_project_info` reports `mcp_bridge: { role, relays_connected }`.
 - Every tool call carries its own Socket.IO ack and a per-tool timeout (`TOOL_TIMEOUTS` in
   `index.ts`: 10 s default, 20 s reads/animation, 30 s render/pack, 60 s export). A connected
   plugin is usable immediately — there is no separate "ready" gate.
