@@ -12,12 +12,11 @@
   "license": "MIT",
   "packageManager": "pnpm@10.11.0",
   "dependencies": {
-    "socket.io-client": "^4.8.1",
-    "@blockbench-mcp/shared": "workspace:*"
+    "@blockbench-mcp/shared": "workspace:*",
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
-    "@types/socket.io-client": "^3.0.0",
-    "blockbench-types": "^4.12.2",
+    "blockbench-types": "^5.1.0",
     "typescript": "^5.8.3",
     "vite": "^7.0.2"
   },

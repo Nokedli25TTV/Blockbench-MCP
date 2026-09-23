@@ -34,7 +34,7 @@ jobs:
 
       - run: pnpm build
 
-      # Server: strict tsc. Plugin: ratchet against the known blockbench-types errors.
+      # Strict tsc for the server and the plugin.
       - run: pnpm typecheck
 
       # Real server + simulated Blockbench on a random port (no Blockbench needed).

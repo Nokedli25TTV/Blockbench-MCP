@@ -74,8 +74,7 @@ blockbench-mcp/
 ├─ skills/                        # 8 Markdown guides (use / mcp-overview / modeling / texturing /
 │                                 #   pbr-materials / pixel-shading / animation / development)
 ├─ tools/
-│  ├─ usage-report.mjs            # `pnpm report`: calls/latency/errors/bridge events from Claude's logs
-│  └─ check-plugin-types.mjs      # plugin tsc ratchet (baseline = known blockbench-types errors)
+│  └─ usage-report.mjs            # `pnpm report`: calls/latency/errors/bridge events from Claude's logs
 ├─ .github/workflows/ci.yml       # build + typecheck + tests, Ubuntu and Windows
 ├─ ARCHITECTURE.md  MODELING_CONSTRAINTS.md  AGENTS.md  README.md
 └─ package.json  pnpm-workspace.yaml  tsconfig.base.json
@@ -109,7 +108,7 @@ registration (schema + forward) in `index.ts`, and a handler (Blockbench API) in
 pnpm -C . --filter mcp-plugin build     # vite  → apps/mcp-plugin/dist/mcp_socketio_plugin.js
 pnpm -C . --filter mcp-server build     # esbuild → apps/mcp-server/dist/index.js
 pnpm -C . test          # test:model + test:e2e — local mock tests (free, no Blockbench)
-pnpm -C . typecheck     # server tsc + plugin ratchet
+pnpm -C . typecheck     # strict tsc, server + plugin (blockbench-types 5.x)
 pnpm -C . report        # usage report from the Claude app + Claude Code logs
 ```
 

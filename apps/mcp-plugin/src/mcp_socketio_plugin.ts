@@ -18,7 +18,8 @@ const PLUGIN_VERSION = typeof __PLUGIN_VERSION__ !== 'undefined' ? __PLUGIN_VERS
 const PLUGIN_BUILD = typeof __PLUGIN_BUILD__ !== 'undefined' ? __PLUGIN_BUILD__ : 'dev';
 let pluginToolCount = 0; // set from the dispatch map on every tool call
 
-const options: PluginOptions = {
+// blockbench-types 5 keeps PluginOptions module-private; take it from register().
+const options: Parameters<typeof BBPlugin.register>[1] = {
   title: "MCP Plugin",
   // Original plugin by enfpdev; this is a personal fork.
   author: "enfpdev (fork: Nokedli25TTV)",
@@ -74,7 +75,7 @@ const options: PluginOptions = {
     };
 
     // Create the MCP command history panel
-    mcpPanel = new Panel({
+    mcpPanel = new Panel('mcp_command_history', {
       id: 'mcp_command_history',
       name: 'MCP Command History',
       icon: 'history',
@@ -269,6 +270,13 @@ const options: PluginOptions = {
     const findCubeByName = (n: string): any => allCubes().find((c: any) => c.name === n);
 
     const hasProject = (): boolean => !(typeof Project === 'undefined' || !Project);
+    // Blockbench 5 has no setProjectResolution(): set the size, then let Blockbench
+    // refresh the UV editor and UV density (checked live on 5.2.1).
+    const setTextureResolution = (width?: number, height?: number) => {
+      if (typeof width === 'number' && width > 0) (Project as any).texture_width = width;
+      if (typeof height === 'number' && height > 0) (Project as any).texture_height = height;
+      if (typeof updateProjectResolution === 'function') updateProjectResolution();
+    };
 
     // Create a real cube in the current Blockbench project using the Blockbench API.
     // Returns a result object that is sent back to the MCP server as an ack.
@@ -1705,19 +1713,20 @@ const options: PluginOptions = {
         let world_bbox: { min: number[]; max: number[]; lowest_y: number } | null = null;
         try {
           const mesh = (group as any).mesh;
-          if (mesh && typeof THREE !== 'undefined') {
+          const T = (globalThis as any).THREE; // a runtime global, not in the typings
+          if (mesh && T) {
             // Update parents AND children so both the bone transform and the
             // descendant geometry reflect the (animated) pose for the bbox below.
             if (mesh.updateWorldMatrix) mesh.updateWorldMatrix(true, true);
             const r2 = (n: number) => Math.round(n * 100) / 100;
             if (mesh.getWorldQuaternion) {
-              const q = new (THREE as any).Quaternion(); mesh.getWorldQuaternion(q);
-              const e = new (THREE as any).Euler().setFromQuaternion(q, 'ZYX');
+              const q = new T.Quaternion(); mesh.getWorldQuaternion(q);
+              const e = new T.Euler().setFromQuaternion(q, 'ZYX');
               const deg = (r: number) => r2(r * 180 / Math.PI);
               world_rotation = [deg(e.x), deg(e.y), deg(e.z)];
             }
             if (mesh.getWorldPosition) {
-              const p = new (THREE as any).Vector3(); mesh.getWorldPosition(p);
+              const p = new T.Vector3(); mesh.getWorldPosition(p);
               world_position = [r2(p.x), r2(p.y), r2(p.z)]; // bone pivot in scene/world space
             }
             // World-space AABB of the bone's descendant elements at this time — the
@@ -2167,8 +2176,9 @@ const options: PluginOptions = {
         const changed: string[] = [];
         if (typeof input.model_identifier === 'string') { (Project as any).model_identifier = input.model_identifier; changed.push('model_identifier'); }
         if (typeof input.name === 'string') { (Project as any).name = input.name; changed.push('name'); }
-        if (typeof input.texture_width === 'number' && input.texture_width > 0) { (Project as any).texture_width = input.texture_width; changed.push('texture_width'); }
-        if (typeof input.texture_height === 'number' && input.texture_height > 0) { (Project as any).texture_height = input.texture_height; changed.push('texture_height'); }
+        if (typeof input.texture_width === 'number' && input.texture_width > 0) changed.push('texture_width');
+        if (typeof input.texture_height === 'number' && input.texture_height > 0) changed.push('texture_height');
+        if (changed.some((c) => c.startsWith('texture_'))) setTextureResolution(input.texture_width, input.texture_height);
         if (!changed.length) {
           return { ok: false, error: 'Nothing to set. Provide model_identifier, name, texture_width, or texture_height.' };
         }
@@ -2204,8 +2214,7 @@ const options: PluginOptions = {
         if (created === false || !hasProject()) return { ok: false, error: `Blockbench did not create the ${formatId} project.` };
         if (typeof input.name === 'string') (Project as any).name = input.name;
         if (typeof input.model_identifier === 'string') (Project as any).model_identifier = input.model_identifier;
-        if (typeof input.texture_width === 'number' && input.texture_width > 0) (Project as any).texture_width = input.texture_width;
-        if (typeof input.texture_height === 'number' && input.texture_height > 0) (Project as any).texture_height = input.texture_height;
+        setTextureResolution(input.texture_width, input.texture_height);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
         logToHistory(`created ${formatId} project "${(Project as any).name || ''}"`);
         return {
@@ -2795,13 +2804,14 @@ const options: PluginOptions = {
           return n;
         };
 
+        const shifted = (v: number[]) => v.map((n, i) => n + offset[i]) as [number, number, number];
         const cloneElement = (el: any, parent: any): any => {
           if (typeof Cube !== 'undefined' && el instanceof Cube) {
             const dupe = new Cube({
               name: uniqueName(el.name),
-              from: el.from.map((v: number, i: number) => v + offset[i]),
-              to: el.to.map((v: number, i: number) => v + offset[i]),
-              origin: el.origin.map((v: number, i: number) => v + offset[i]),
+              from: shifted(el.from),
+              to: shifted(el.to),
+              origin: shifted(el.origin),
               rotation: el.rotation, autouv: el.autouv, uv_offset: el.uv_offset,
               mirror_uv: el.mirror_uv, shade: el.shade, inflate: el.inflate,
               color: el.color, visibility: el.visibility,
@@ -2812,7 +2822,7 @@ const options: PluginOptions = {
           if (typeof Group !== 'undefined' && el instanceof Group) {
             const dupeGroup = new Group({
               name: uniqueName(el.name),
-              origin: el.origin.map((v: number, i: number) => v + offset[i]),
+              origin: shifted(el.origin),
               rotation: el.rotation, autouv: el.autouv, visibility: el.visibility, shade: el.shade,
             }).init();
             dupeGroup.addTo(parent);
@@ -2820,13 +2830,18 @@ const options: PluginOptions = {
             return dupeGroup;
           }
           if (typeof Mesh !== 'undefined' && el instanceof Mesh) {
-            const dupe = new Mesh({ name: uniqueName(el.name), vertices: {}, origin: el.origin.map((v: number, i: number) => v + offset[i]), rotation: el.rotation } as any).init();
+            const dupe = new Mesh({ name: uniqueName(el.name), vertices: {}, origin: shifted(el.origin), rotation: el.rotation } as any);
+            dupe.init();
             const map: any = {};
             Object.entries(el.vertices).forEach(([key, coords]: any) => {
               map[key] = dupe.addVertices([coords[0] + offset[0], coords[1] + offset[1], coords[2] + offset[2]])[0];
             });
-            el.faces.forEach((face: any) => {
-              dupe.addFaces(new MeshFace(dupe, { vertices: face.vertices.map((v: any) => map[v]), uv: face.uv } as any));
+            // Mesh.faces is an object keyed by face id (not an array), and a face's uv is
+            // keyed by vertex id — remap both to the new vertices (checked live on 5.2.1).
+            Object.values(el.faces).forEach((face: any) => {
+              const uv: Record<string, any> = {};
+              for (const [vkey, coords] of Object.entries(face.uv || {})) uv[map[vkey]] = coords;
+              dupe.addFaces(new MeshFace(dupe, { vertices: face.vertices.map((v: any) => map[v]), uv, texture: face.texture } as any));
             });
             dupe.addTo(parent);
             return dupe;
@@ -3646,7 +3661,7 @@ const options: PluginOptions = {
         Undo.initEdit({ elements: [mesh], element_aspects: { geometry: true, uv: true, faces: true } } as any);
         const ctx = new (globalThis as any).KnifeToolContext(mesh);
         (input.points || []).forEach((p: any) => {
-          ctx.points.push({ position: new (THREE as any).Vector3(...p.position), fkey: p.face, type: p.face ? 'face' : 'edge' });
+          ctx.points.push({ position: new (globalThis as any).THREE.Vector3(...p.position), fkey: p.face, type: p.face ? 'face' : 'edge' });
         });
         ctx.apply();
         Undo.finishEdit('Knife cut via MCP');
@@ -4053,18 +4068,20 @@ const options: PluginOptions = {
 
     const createBrushPreset = (input: any): any => {
       try {
-        if (typeof StateMemory === 'undefined') return { ok: false, error: 'StateMemory not available.' };
+        const StateMemory = (globalThis as any).StateMemory; // runtime global, not in the typings
+        if (!StateMemory) return { ok: false, error: 'StateMemory not available.' };
         const preset = { name: input.name, size: input.size ?? null, opacity: input.opacity ?? null, softness: input.softness ?? null, shape: input.shape || 'square', color: input.color || null, blend_mode: input.blend_mode || 'default', pixel_perfect: input.pixel_perfect || false };
-        (StateMemory as any).brush_presets.push(preset);
-        (StateMemory as any).save('brush_presets');
+        StateMemory.brush_presets.push(preset);
+        StateMemory.save('brush_presets');
         return { ok: true, name: input.name };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
     const loadBrushPreset = (input: any): any => {
       try {
-        if (typeof StateMemory === 'undefined') return { ok: false, error: 'StateMemory not available.' };
-        const preset = (StateMemory as any).brush_presets.find((p: any) => p.name === input.preset_name);
+        const StateMemory = (globalThis as any).StateMemory; // runtime global, not in the typings
+        if (!StateMemory) return { ok: false, error: 'StateMemory not available.' };
+        const preset = StateMemory.brush_presets.find((p: any) => p.name === input.preset_name);
         if (!preset) return { ok: false, error: `Brush preset "${input.preset_name}" not found.` };
         (Painter as any).loadBrushPreset(preset);
         return { ok: true, name: input.preset_name };
@@ -4201,10 +4218,11 @@ const options: PluginOptions = {
         // `palette` name. This is how you texture to an EXACT reference colour instead of a preset.
         let pal: string[] | null = null;
         let palName = input.palette || 'custom';
-        if (Array.isArray(input.colors) && input.colors.length >= 5) { pal = input.colors.slice(0, 5).map((c: any) => String(c)); palName = 'colors'; }
+        if (Array.isArray(input.colors) && input.colors.length >= 5) { pal = (input.colors as unknown[]).slice(0, 5).map((c) => String(c)); palName = 'colors'; }
         else if (input.base_color) { pal = rampFromBase(String(input.base_color)); palName = `base ${input.base_color}`; }
-        else if (input.palette) { pal = getPalette(input.palette); if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes, OR pass base_color (one hex) / colors (5 hex shadow→highlight) for exact colours.` }; }
+        else if (input.palette) { pal = getPalette(input.palette) ?? null; if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes, OR pass base_color (one hex) / colors (5 hex shadow→highlight) for exact colours.` }; }
         else return { ok: false, error: 'Provide a palette name, a base_color (one hex → auto ramp), or colors (5 hex shadow→highlight).' };
+        const ramp: string[] = pal; // non-null here; a const keeps that inside the paint callbacks
         const style = STYLE_KNOBS[input.style] || STYLE_KNOBS.organic;
         const seed = ((input.seed ?? 1) >>> 0) || 1;
         const texture = getAndActivateTexture(input.texture_id);
@@ -4268,7 +4286,7 @@ const options: PluginOptions = {
                 if (doSpec && lx <= 1 && ly <= 1) idx = 4;            // glint near lit corner
                 else if (doSpec && lx === 2 && ly <= 1) idx = 1;      // dark next to glint (4-next-to-1)
                 idx = Math.max(0, Math.min(4, idx));
-                ctx.fillStyle = pal[idx];
+                ctx.fillStyle = ramp[idx];
                 ctx.fillRect(px, py, 1, 1);
                 painted++;
               }
@@ -4356,8 +4374,7 @@ const options: PluginOptions = {
         } else {
           texW = Math.max(16, packedW); texH = Math.max(16, packedH);
           if (input.power_of_two) { texW = pow2(texW); texH = pow2(texH); }
-          if (typeof setProjectResolution === 'function') (setProjectResolution as any)(texW, texH, false);
-          else { (Project as any).texture_width = texW; (Project as any).texture_height = texH; }
+          setTextureResolution(texW, texH);
         }
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 

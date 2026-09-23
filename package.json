@@ -7,7 +7,7 @@
     "dev": "pnpm run --recursive --parallel dev",
     "build": "pnpm run --recursive build",
     "test": "pnpm --filter mcp-server test:model && pnpm --filter mcp-server test:e2e",
-    "typecheck": "pnpm --filter mcp-server exec tsc --noEmit -p . && node tools/check-plugin-types.mjs",
+    "typecheck": "pnpm --filter mcp-server exec tsc --noEmit -p . && pnpm --filter mcp-plugin exec tsc --noEmit -p .",
     "report": "node tools/usage-report.mjs"
   },
   "keywords": [],
