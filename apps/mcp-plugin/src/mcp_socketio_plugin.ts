@@ -3238,7 +3238,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
     };
     // Build a 5-step hue-shifted pixel-art ramp (0=shadow → 4=highlight) from ONE
-    // base color, so auto_shade can use the USER'S colour instead of a preset
+    // base color, so shade_cube can use the USER'S colour instead of a preset
     // palette. Shadows go cooler+darker, highlights warmer+lighter (the same
     // philosophy as the built-in palettes), with the base kept exactly at index 2.
     const rgbToHsl = (r: number, g: number, b: number): [number, number, number] => {
@@ -4180,120 +4180,12 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     };
 
     // ---------------------------------------------------------------------
-    // auto_shade: generate shaded pixel-art automatically (no hand-painted
-    // matrices). Encodes the blockbench-pixel-shading rules as code — pick a
-    // palette + material style and the tool does directional light, AO at the
-    // cube seams, per-pixel noise/dither, wood grain and specular glints. All
-    // palette-locked (indices 0-4 only) and 1px/cell → no anti-aliasing.
-    // ---------------------------------------------------------------------
-    const FACE_BASE: Record<string, number> = { up: 3, north: 3, west: 2, east: 1, south: 1, down: 0 };
-    const STYLE_KNOBS: Record<string, { contrast: number; noise: number; specular: boolean; grain: boolean; dir: number }> = {
-      weapon_metal: { contrast: 1.2, noise: 0.10, specular: true,  grain: false, dir: 1.0 },
-      metal:        { contrast: 1.2, noise: 0.10, specular: true,  grain: false, dir: 1.0 },
-      crystal:      { contrast: 1.5, noise: 0.05, specular: true,  grain: false, dir: 1.2 },
-      wood:         { contrast: 0.8, noise: 0.30, specular: false, grain: true,  dir: 0.5 },
-      organic:      { contrast: 0.7, noise: 0.50, specular: false, grain: false, dir: 0.6 },
-      cloth:        { contrast: 0.6, noise: 0.35, specular: false, grain: false, dir: 0.5 },
-    };
-
-    const autoShade = (input: any): any => {
-      try {
-        if (!hasProject()) return { ok: false, error: 'No project open.' };
-        // Colour source priority: explicit `colors` (5 hex shadow→highlight) > `base_color`
-        // (one hex → auto hue-shifted ramp, keeps your exact colour at index 2) > a built-in
-        // `palette` name. This is how you texture to an EXACT reference colour instead of a preset.
-        let pal: string[] | null = null;
-        let palName = input.palette || 'custom';
-        if (Array.isArray(input.colors) && input.colors.length >= 5) { pal = (input.colors as unknown[]).slice(0, 5).map((c) => String(c)); palName = 'colors'; }
-        else if (input.base_color) { pal = rampFromBase(String(input.base_color)); palName = `base ${input.base_color}`; }
-        else if (input.palette) { pal = getPalette(input.palette) ?? null; if (!pal) return { ok: false, error: `Unknown palette "${input.palette}". Use list_palettes, OR pass base_color (one hex) / colors (5 hex shadow→highlight) for exact colours.` }; }
-        else return { ok: false, error: 'Provide a palette name, a base_color (one hex → auto ramp), or colors (5 hex shadow→highlight).' };
-        const ramp: string[] = pal; // non-null here; a const keeps that inside the paint callbacks
-        const style = STYLE_KNOBS[input.style] || STYLE_KNOBS.organic;
-        const seed = ((input.seed ?? 1) >>> 0) || 1;
-        const texture = getAndActivateTexture(input.texture_id);
-        const layer = resolveTextureLayer(texture, input.layer);
-
-        // Build the regions to shade: per-face rects (cube) or one rect (region).
-        const regions: Array<{ x: number; y: number; w: number; h: number; base: number }> = [];
-        if (input.cube_id) {
-          const cube = findCubeByNameOrUuid(input.cube_id);
-          if (!cube) return { ok: false, error: `Cube "${input.cube_id}" not found.` };
-          const faces = cube.faces || {};
-          for (const key of Object.keys(faces)) {
-            const uv = faces[key] && faces[key].uv;
-            if (!uv || uv.length < 4) continue;
-            const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
-            const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
-            if (x1 - x0 <= 0 || y1 - y0 <= 0) continue;
-            regions.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0, base: FACE_BASE[key] ?? 2 });
-          }
-          if (!regions.length) return { ok: false, error: `Cube "${input.cube_id}" has no usable face UVs (give it a texture/uv first).` };
-        } else if (input.region) {
-          const r = input.region;
-          regions.push({ x: Math.round(r.x), y: Math.round(r.y), w: Math.max(1, Math.round(r.w)), h: Math.max(1, Math.round(r.h)), base: input.base ?? 2 });
-        } else {
-          return { ok: false, error: 'Provide cube_id (shade a cube box-UV net) or region {x,y,w,h}.' };
-        }
-
-        const noiseAt = (lx: number, ly: number): number => {
-          const hsh = ((((lx + 1) * 73856093) ^ ((ly + 1) * 19349663) ^ (seed * 83492791)) >>> 0) % 1000 / 1000;
-          if (hsh < style.noise / 2) return -1;
-          if (hsh > 1 - style.noise / 2) return 1;
-          return 0;
-        };
-
-        let painted = 0;
-        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
-        texture.edit((canvas: any) => {
-          const ctx = canvas.getContext('2d');
-          const TW = canvas.width, TH = canvas.height;
-          for (const reg of regions) {
-            // Scale detail to face size: a tiny face (e.g. a 2px blade side) must NOT
-            // get full AO/noise/specular or it turns into dark, blotchy static. Small
-            // faces get just base + a gentle gradient = a clean, readable lit solid.
-            const small = Math.min(reg.w, reg.h);
-            const doAO = small >= 4;        // need an interior beyond the 1-2px AO border
-            const doNoise = small >= 5;     // noise on <5px reads as random static
-            const doSpec = style.specular && small >= 5;
-            for (let ly = 0; ly < reg.h; ly++) {
-              for (let lx = 0; lx < reg.w; lx++) {
-                const px = reg.x + lx, py = reg.y + ly;
-                if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
-                let idx = reg.base;
-                const vt = reg.h > 1 ? ly / (reg.h - 1) : 0;          // 0 top → 1 bottom
-                idx += Math.round((0.5 - vt) * 2 * style.contrast);   // top lighter
-                const dx = reg.w > 1 ? lx / (reg.w - 1) : 0;
-                idx += Math.round((0.5 - (dx + vt) / 2) * 2 * style.dir); // top-left light
-                const edge = Math.min(lx, reg.w - 1 - lx, ly, reg.h - 1 - ly);
-                if (doAO) { if (edge === 0) idx -= 2; else if (edge === 1) idx -= 1; } // AO only when the face is big enough to have an interior
-                if (style.grain && doNoise && ((((lx + 1) * 2654435761) >>> 0) % 5) === 0) idx -= 1; // wood streak
-                if (doNoise) idx += noiseAt(lx, ly);
-                if (doSpec && lx <= 1 && ly <= 1) idx = 4;            // glint near lit corner
-                else if (doSpec && lx === 2 && ly <= 1) idx = 1;      // dark next to glint (4-next-to-1)
-                idx = Math.max(0, Math.min(4, idx));
-                ctx.fillStyle = ramp[idx];
-                ctx.fillRect(px, py, 1, 1);
-                painted++;
-              }
-            }
-          }
-        }, { edit_name: 'Auto-shade' });
-        Undo.finishEdit('Auto-shade via MCP');
-        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-
-        logToHistory(`auto-shaded ${regions.length} region(s), ${painted}px (${palName}/${input.style || 'organic'}) on "${texture.name}"`);
-        return { ok: true, texture: texture.name, palette: palName, style: input.style || 'organic', regions: regions.length, painted, layer: layer ? layer.name : null };
-      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
-    };
-
-    // ---------------------------------------------------------------------
     // pack_uv: give EVERY cube its own non-overlapping atlas region and size
     // the texture to fit the model. THE fix for "all cubes' UVs sit at [0,0],
-    // so any paint/auto_shade pass overwrites the others → garbage texture".
+    // so any paint pass overwrites the others → garbage texture".
     // Mode-agnostic: sets box-UV uv_offset (+autouv:0) AND writes the explicit
     // per-face uv rects, so it works whether the format uses box-UV or per-face.
-    // Run AFTER building geometry, BEFORE create_texture / apply_texture / auto_shade.
+    // Run AFTER building geometry, BEFORE create_texture / apply_texture / painting.
     // ---------------------------------------------------------------------
     const packUv = (input: any): any => {
       try {
