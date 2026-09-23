@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "test:e2e": "node toolchain-e2e.mjs",
     "test:model": "node test/full-model.test.mjs",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:painter": "node test/painter.test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -9,10 +9,13 @@ Flat single-color fills look bad. Real Minecraft pixel art has hue-shifted ramps
 directional light, ambient occlusion, and texture noise. This is a HARD workflow, enforced
 by the tools.
 
-You texture by HAND-PAINTING the atlas with `paint_pixel_matrix` (and `paint_fill_tool` /
-`draw_shape_tool` / `gradient_tool` for blocks/ramps) — there is no auto-shader. That means you
-control every pixel and the EXACT colours (e.g. from a reference image), instead of a generic
-procedural look. Workflow: `pack_uv` → `validate_uv` → know each cube's UV region → paint it.
+**Base first, details by hand.** `shade_cubes` bakes the base in one call from your EXACT colours:
+hue-shifted 7-shade ramps, light from above, dithered gradients (no flat bands), lit edges, contact
+shadow and a per-part `material` pattern (fur, skin, leather, cloth, wood, planks, stone, metal,
+gem, plant). Then HAND-PAINT what makes the model readable — eyes, mouth, belts, trims, scratches,
+glowing runes — with `paint_pixel_matrix` (and `draw_shape_tool` / `paint_fill_tool`), following
+the recipes below. Workflow: `pack_uv` → `validate_uv` → `shade_cubes` → know each cube's UV
+region → paint the details → screenshot.
 
 ## Core rule: pick your colours, then bake the shading in by hand
 - Use the EXACT colours you want (a reference's hexes, or the colours the user gave you). The

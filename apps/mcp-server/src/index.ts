@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { ToolType, SceneTree } from "../../../packages/shared/src/types";
 import { validateScene, buildReport } from "../../../packages/shared/src/validation";
 import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../../packages/shared/src/palettes";
+import { MATERIALS } from "../../../packages/shared/src/facePainter";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -2292,17 +2293,20 @@ server.registerTool(
   {
     title: "Shade Cube (exact colour)",
     description:
-      "Paint a cube's faces with CLEAN directional shading from ONE exact colour — top face lit, sides a " +
-      "top→bottom gradient, bottom in shadow — with NO palette lock and NO procedural noise. This is the " +
-      "reliable way to texture to a reference colour (the per-cube logic behind a good hand-made skin, as a " +
-      "tool). Give `cube_id` (one cube) or `target` (a group → all its cubes, same colour) plus `color` (one " +
-      "hex → auto hue-shifted ramp) or `colors` (5 hex shadow→highlight). Run pack_uv + validate_uv FIRST so " +
-      "each cube has its own UV region (otherwise cubes overwrite each other).",
+      "Texture a cube from ONE exact colour as shaded pixel art: a 7-shade hue-shifted ramp (your colour in " +
+      "the middle), light from above (top face bright, sides a smooth dithered top→bottom gradient, bottom in " +
+      "shade), lit top edges and contact shadow at the bottom, and a material pattern — generic, fur, skin, " +
+      "leather, cloth, wood, planks, stone, metal, gem, plant — so neighbouring pixels vary instead of flat " +
+      "bands. Give `cube_id` (one cube) or `target` (a group → all its cubes) plus `color` (one hex) or " +
+      "`colors` (3–9 hex, dark → light). Run pack_uv + validate_uv FIRST so each cube has its own UV region.",
     inputSchema: {
       cube_id: z.string().optional().describe("One cube name/uuid to shade."),
       target: z.string().optional().describe("Group name → shade all its descendant cubes the same colour (use instead of cube_id)."),
-      color: z.string().optional().describe("⭐ One hex (e.g. '#cc2233') → clean hue-shifted ramp, your colour at the mid. The normal way to hit a reference colour."),
-      colors: z.array(z.string()).min(5).max(5).optional().describe("Full control: 5 hex [shadow → highlight]. Overrides color."),
+      color: z.string().optional().describe("⭐ One hex (e.g. '#cc2233') → hue-shifted 7-shade ramp, your colour in the middle. The normal way to hit a reference colour."),
+      colors: z.array(z.string()).min(3).max(9).optional().describe("Full control: 3–9 hex, dark → light (the middle one is the base). Overrides color."),
+      material: z.enum(MATERIALS).optional().describe("Surface pattern (default generic): fur strands, skin, leather, cloth weave, wood grain, planks, stone, metal (specular streak), gem facets, plant."),
+      detail: z.number().min(0).max(2).optional().describe("Pattern strength 0–2 (default 1; 0 = smooth shading only)."),
+      lighting: z.number().min(0).max(2).optional().describe("Light/shadow strength 0–2 (default 1)."),
       edge_color: z.string().optional().describe("Optional hex for the thin east/west faces (e.g. a dark blade outline / cutting edge)."),
       sheen: z.boolean().optional().describe("Add a brighter centre stripe on the broad north/south faces (blade sheen / blood-groove look)."),
       texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
@@ -2320,18 +2324,22 @@ server.registerTool(
   {
     title: "Shade Cubes (batch, exact colours)",
     description:
-      "Texture a whole model in ONE call: a list of parts, each with its own exact colour, painted with the same " +
-      "clean directional shading as shade_cube, in a single texture edit and undo step. Each item: `cube_id` or " +
-      "`target` (group) + `color` (one hex) or `colors` (5 hex), optional `edge_color` / `sheen`. Items are " +
-      "validated first (nothing is painted if one is invalid) and painted in order. Run pack_uv + validate_uv first.",
+      "Texture a whole model in ONE call: a list of parts, each with its own exact colour and material, painted " +
+      "as shaded pixel art like shade_cube (dithered gradients, lit edges, material pattern) in a single texture " +
+      "edit and undo step. Each item: `cube_id` or `target` (group) + `color` (one hex) or `colors` (3–9 hex), " +
+      "optional `material` / `detail` / `lighting` / `edge_color` / `sheen`. Items are validated first (nothing " +
+      "is painted if one is invalid) and painted in order. Run pack_uv + validate_uv first.",
     inputSchema: {
       items: z
         .array(
           z.object({
             cube_id: z.string().optional().describe("One cube name/uuid."),
             target: z.string().optional().describe("Group name → all its descendant cubes."),
-            color: z.string().optional().describe("One hex → clean hue-shifted ramp."),
-            colors: z.array(z.string()).min(5).max(5).optional().describe("5 hex [shadow → highlight]; overrides color."),
+            color: z.string().optional().describe("One hex → hue-shifted 7-shade ramp."),
+            colors: z.array(z.string()).min(3).max(9).optional().describe("3–9 hex, dark → light; overrides color."),
+            material: z.enum(MATERIALS).optional().describe("generic (default), fur, skin, leather, cloth, wood, planks, stone, metal, gem, plant."),
+            detail: z.number().min(0).max(2).optional().describe("Pattern strength 0–2 (default 1)."),
+            lighting: z.number().min(0).max(2).optional().describe("Light/shadow strength 0–2 (default 1)."),
             edge_color: z.string().optional().describe("Hex for the thin east/west faces (e.g. a blade edge)."),
             sheen: z.boolean().optional().describe("Brighter centre stripe on the broad north/south faces."),
           })

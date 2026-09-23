@@ -30,6 +30,12 @@ section into the new version (see README → Releasing).
   are now caught before export (see Changed).
 
 ### Changed
+- **`shade_cube` / `shade_cubes` paint shaded pixel art instead of flat bands.** Before, every side got
+  three flat stripes and the top and bottom one colour each, so neighbouring pixels were identical and
+  models looked stripy and plastic. Now each pixel is computed from a 7-shade hue-shifted ramp (the
+  exact colour in the middle), light from above with a smooth dithered top→bottom gradient, lit top
+  edges and a contact shadow, per-pixel grain and a `material` pattern; each cube gets its own seed.
+  `colors` takes 3–9 hex (was exactly 5).
 - **Rotation rules follow the project's format** (MODELING_CONSTRAINTS rule 1):
   - GeckoLib/Bedrock: bones and cubes may rotate on several axes. The old single-axis rule came from
     Java block models; Blockbench's GeckoLib format does not restrict it.
@@ -47,6 +53,9 @@ section into the new version (see README → Releasing).
 - The obsolete `@types/socket.io-client` dev dependency.
 
 ### Added
+- `material` (generic, fur, skin, leather, cloth, wood, planks, stone, metal, gem, plant), `detail` and
+  `lighting` on `shade_cube(s)`. The painter is a pure module (`packages/shared/src/facePainter.ts`)
+  with its own test (`test:painter`, part of `pnpm test`) that fails on flat bands.
 - `rotation` on `create_cube`, `create_cubes` (groups and cubes), `create_group` and `modify_cube(s)`;
   `set_rotation` takes a group or a cube, `set_origin` also a cube where cubes rotate.
 - `get_project_info` → `rules`: where rotation may go and the coordinate range, for the open project.

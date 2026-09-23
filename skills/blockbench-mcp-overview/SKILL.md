@@ -56,8 +56,8 @@ pack_uv                                                  # every cube gets its o
 validate_uv                                              # must be VALID before painting
 create_texture: name="atlas"                             # no size → uses the packed size
 apply_texture: target="root", texture="atlas"
-shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", edge_color:"#5f6b75", sheen:true},
-                    {cube_id:"guard", color:"#d6b13a"}, {cube_id:"grip", color:"#5b3a1d"}]   # exact colours, one call
+shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", material:"metal", edge_color:"#5f6b75", sheen:true},
+                    {cube_id:"guard", color:"#d6b13a", material:"metal"}, {cube_id:"grip", color:"#5b3a1d", material:"leather"}]   # exact colours + materials, one call
 validate_model
 capture_screenshot
 export_model: codec_id="bedrock"   +   export_animations

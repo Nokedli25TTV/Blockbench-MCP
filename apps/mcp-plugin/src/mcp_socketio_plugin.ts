@@ -5,6 +5,8 @@ import { ToolType } from "@blockbench-mcp/shared/types";
 import { getPalette } from "../../../packages/shared/src/palettes";
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor, javaVersionLabel } from "../../../packages/shared/src/formatRules";
 import type { FormatInfo, FormatRules } from "../../../packages/shared/src/formatRules";
+import { paintFace, rampFromBase as rampFromBase7, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter";
+import type { FaceKey, Material } from "../../../packages/shared/src/facePainter";
 
 // Global variable declarations
 let mcpPanel: Panel;
@@ -3361,33 +3363,6 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       const n = parseInt(s, 16) || 0;
       return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
     };
-    // Build a 5-step hue-shifted pixel-art ramp (0=shadow → 4=highlight) from ONE
-    // base color, so shade_cube can use the USER'S colour instead of a preset
-    // palette. Shadows go cooler+darker, highlights warmer+lighter (the same
-    // philosophy as the built-in palettes), with the base kept exactly at index 2.
-    const rgbToHsl = (r: number, g: number, b: number): [number, number, number] => {
-      r /= 255; g /= 255; b /= 255;
-      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0, s = 0; const l = (mx + mn) / 2;
-      if (d) { s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; }
-      return [h, s, l];
-    };
-    const hslToHex = (h: number, s: number, l: number): string => {
-      h = (((h % 360) + 360) % 360) / 360; s = Math.max(0, Math.min(1, s)); l = Math.max(0, Math.min(1, l));
-      const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
-      const ch = (t: number) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1 / 6) return p + (q - p) * 6 * t; if (t < 1 / 2) return q; if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6; return p; };
-      const r = s === 0 ? l : ch(h + 1 / 3), g = s === 0 ? l : ch(h), b = s === 0 ? l : ch(h - 1 / 3);
-      return '#' + [r, g, b].map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
-    };
-    const rampFromBase = (hex: string): string[] => {
-      const [r, g, b] = hexToRgb(hex); const [h, s, l] = rgbToHsl(r, g, b);
-      return [
-        hslToHex(h - 14, s * 1.10, l * 0.42),                 // 0 deep shadow (cool)
-        hslToHex(h - 7,  s * 1.05, l * 0.68),                 // 1 shadow
-        hex.startsWith('#') ? hex : '#' + hex,                // 2 base (exact)
-        hslToHex(h + 9,  s * 0.95, l + (1 - l) * 0.42),       // 3 light (warm)
-        hslToHex(h + 18, s * 0.85, l + (1 - l) * 0.70),       // 4 highlight (warm)
-      ];
-    };
 
     const paintFillTool = (input: any): any => {
       try {
@@ -4453,14 +4428,17 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     };
 
     // ---------------------------------------------------------------------
-    // shade_cube: paint a cube's faces with CLEAN directional shading from ONE
-    // exact colour (or a 5-hex ramp) — no palette lock, no procedural noise. This
-    // is the per-cube logic that made the hand-authored sword texture look good,
-    // as a tool: top face lit, sides a top→bottom gradient, bottom in shadow,
-    // optional dark cutting-edge colour and a centre sheen on broad faces. Reads
-    // each face's packed UV rect, so run pack_uv + validate_uv first.
+    // shade_cube(s): paint cube faces from ONE exact colour with the shared face
+    // painter (packages/shared/src/facePainter.ts): a 7-shade hue-shifted ramp, face
+    // light (top bright, bottom dark), a smooth dithered gradient on the sides, lit and
+    // shaded edges, and a material pattern (fur, stone, wood grain, …) — so the result
+    // reads like hand-made pixel art instead of the old flat bands. Reads each face's
+    // packed UV rect, so run pack_uv + validate_uv first.
     // ---------------------------------------------------------------------
-    type ShadeSpec = { cubes: any[]; ramp: string[]; edgeColor: string | null; sheen: boolean; label: string };
+    type ShadeSpec = {
+      cubes: any[]; ramp: string[]; edgeRamp: string[] | null; sheen: boolean; label: string;
+      material: Material; detail: number; lighting: number;
+    };
 
     // Resolve one shade request (cube_id or group target + colour) without painting.
     const resolveShadeSpec = (input: any): { error: string } | ShadeSpec => {
@@ -4478,38 +4456,51 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } else return { error: 'Provide cube_id (one cube) or target (a group of cubes).' };
 
       let ramp: string[];
-      if (Array.isArray(input.colors) && input.colors.length >= 5) ramp = input.colors.slice(0, 5).map((c: any) => String(c));
-      else if (input.color) ramp = rampFromBase(String(input.color));
-      else return { error: 'Provide color (one hex → auto ramp) or colors (5 hex shadow→highlight).' };
-      return { cubes, ramp, edgeColor: input.edge_color ? String(input.edge_color) : null, sheen: !!input.sheen, label };
+      if (Array.isArray(input.colors) && input.colors.length >= 3) ramp = input.colors.slice(0, 9).map((c: any) => String(c));
+      else if (input.color) ramp = rampFromBase7(String(input.color));
+      else return { error: 'Provide color (one hex → auto ramp) or colors (3–9 hex, dark → light).' };
+      if (input.material !== undefined && !(MATERIALS as readonly string[]).includes(input.material)) {
+        return { error: `Unknown material "${input.material}". Use one of: ${MATERIALS.join(', ')}.` };
+      }
+      const level = (v: any, fallback: number) => (typeof v === 'number' && isFinite(v) ? Math.max(0, Math.min(2, v)) : fallback);
+      return {
+        cubes, ramp, label,
+        edgeRamp: input.edge_color ? rampFromBase7(String(input.edge_color)) : null,
+        sheen: !!input.sheen,
+        material: (input.material || 'generic') as Material,
+        detail: level(input.detail, 1),
+        lighting: level(input.lighting, 1),
+      };
     };
 
     // Paint one spec's cubes into an open texture canvas; returns pixels painted.
     const paintShadeSpec = (ctx: any, TW: number, TH: number, spec: ShadeSpec): number => {
-      const { cubes, ramp, edgeColor, sheen } = spec;
       let painted = 0;
-      for (const cube of cubes) {
+      for (const cube of spec.cubes) {
+        const seed = seedFrom(String(cube.name || cube.uuid || ''));
         for (const fk of Object.keys(cube.faces || {})) {
           const uv = cube.faces[fk] && cube.faces[fk].uv;
           if (!uv || uv.length < 4) continue;
           const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
           const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
           const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
-          const isEdge = (fk === 'east' || fk === 'west');
-          const isBroad = (fk === 'north' || fk === 'south');
+          const face = fk as FaceKey;
+          const thinSide = spec.edgeRamp && (face === 'east' || face === 'west');
+          const rows = paintFace(face, w, h, {
+            ramp: thinSide ? spec.edgeRamp! : spec.ramp,
+            material: spec.material,
+            seed,
+            detail: spec.detail,
+            lighting: spec.lighting,
+            sheen: spec.sheen,
+          });
+          // A flipped UV rect (mirrored face) must get the painted face flipped too, so
+          // the light stays on top and on the same side.
+          const flipX = uv[0] > uv[2], flipY = uv[1] > uv[3];
           for (let ly = 0; ly < h; ly++) for (let lx = 0; lx < w; lx++) {
             const px = x0 + lx, py = y0 + ly; if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
-            if (isEdge && edgeColor) { ctx.fillStyle = edgeColor; ctx.fillRect(px, py, 1, 1); painted++; continue; }
-            let idx: number;
-            if (fk === 'up') idx = 4;
-            else if (fk === 'down') idx = 0;
-            else {
-              const t = h > 1 ? ly / (h - 1) : 0;          // 0 top → 1 bottom
-              idx = t < 0.30 ? 3 : t < 0.72 ? 2 : 1;       // clean bands, NO noise
-              if (isEdge) idx = Math.max(0, idx - 1);      // thin edges a touch darker
-              if (sheen && isBroad && w >= 3 && Math.abs(lx - (w - 1) / 2) < 0.6) idx = Math.min(4, idx + 1);
-            }
-            ctx.fillStyle = ramp[idx]; ctx.fillRect(px, py, 1, 1); painted++;
+            ctx.fillStyle = rows[flipY ? h - 1 - ly : ly][flipX ? w - 1 - lx : lx];
+            ctx.fillRect(px, py, 1, 1); painted++;
           }
         }
       }

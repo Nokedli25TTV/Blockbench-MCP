@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 // The same rotation/coordinate rules the plugin enforces (Node strips the TS types).
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor } from "../../../packages/shared/src/formatRules.ts";
+import { rampFromBase, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
 
 const require = createRequire(import.meta.url);
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -646,8 +647,9 @@ export function createMockScene() {
       else if (input.target) { const g = findGroup(input.target); if (g) walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); else { const c = findCube(input.target); if (c) cubes = [c]; } }
       else return { ok: false, error: "cube_id or target required" };
       if (!input.color && !input.colors) return { ok: false, error: "color or colors required" };
+      if (input.material !== undefined && !MATERIALS.includes(input.material)) return { ok: false, error: `Unknown material "${input.material}"` };
       let painted = 0; cubes.forEach((c) => { painted += Object.keys(c.faces || {}).length * 8; });
-      const ramp = input.colors ? input.colors.slice(0, 5) : [input.color, input.color, input.color, input.color, input.color];
+      const ramp = input.colors ? input.colors.slice(0, 9) : rampFromBase(input.color);
       return { ok: true, cubes: cubes.length, painted, texture: input.texture_id || "atlas", ramp, layer: input.layer || null };
     },
     shade_cubes(input) {
@@ -661,6 +663,7 @@ export function createMockScene() {
         else if (it.target) { const g = findGroup(it.target); if (!g) return { ok: false, error: `items[${i}]: "${it.target}" is not a group.` }; walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); }
         else return { ok: false, error: `items[${i}]: cube_id or target required` };
         if (!it.color && !it.colors) return { ok: false, error: `items[${i}]: color or colors required` };
+        if (it.material !== undefined && !MATERIALS.includes(it.material)) return { ok: false, error: `items[${i}]: Unknown material "${it.material}"` };
         resolved.push({ target: it.cube_id || it.target, cubes: cubes.length, painted: cubes.length * 48 });
       }
       return { ok: true, items: resolved.length, cubes: resolved.reduce((a, r) => a + r.cubes, 0), painted: resolved.reduce((a, r) => a + r.painted, 0), texture: input.texture_id || "atlas", layer: input.layer || null, results: resolved };
