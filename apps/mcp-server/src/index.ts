@@ -1650,15 +1650,20 @@ server.registerTool(
   {
     title: "Duplicate Element",
     description:
-      "Duplicate a cube, group (recursively), or mesh, offset by a vector. Names get a unique '_copy' " +
-      "suffix unless newName is given (rule #4).",
+      "Duplicate a cube, mesh, locator or a whole group (with everything inside), offset by a vector. " +
+      "Keeps all data (per-face UV, textures). The copy is named newName, or '<name>_copy'; everything " +
+      "inside a copied group gets a unique '<name>_copy' name (rule #4). One undo step.",
     inputSchema: {
       id: z.string().describe("Name or uuid of the element to duplicate."),
       offset: vec3.optional().describe("Position offset [x,y,z] for the copy. Default [0,0,0]."),
-      newName: z.string().optional().describe("Explicit name for the copy."),
+      newName: z.string().optional().describe("Name for the top-level copy (must be unused)."),
     },
   },
-  async (args) => forward("duplicate_element", args, (r) => `Duplicated "${r.source}" as "${r.name}".`)
+  async (args) =>
+    forward("duplicate_element", args, (r) => {
+      const inside = Array.isArray(r.names) && r.names.length > 1 ? ` with ${r.names.length - 1} element(s) inside: ${r.names.slice(1).join(", ")}` : "";
+      return `Duplicated "${r.source}" as "${r.name}"${inside}.`;
+    })
 );
 
 server.registerTool(

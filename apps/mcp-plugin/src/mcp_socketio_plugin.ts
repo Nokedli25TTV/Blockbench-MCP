@@ -2788,76 +2788,56 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
+    // Uses Blockbench's own duplicate(), which copies every property (per-face UV,
+    // textures, …) and every child type (cubes, meshes, locators, groups). The old
+    // hand-written clone lost face data, offset meshes twice (their vertices are
+    // relative to the origin), gave newName to every child (duplicate names), and
+    // put groups in the Undo "elements" aspect, which throws in Blockbench 5
+    // after the copy was already made (all seen live on 5.2.1).
     const duplicateElement = (input: any): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         if (!input.id) return { ok: false, error: 'id is required.' };
         const element = findElementAny(input.id);
         if (!element) return { ok: false, error: `Element "${input.id}" not found.` };
+        if (typeof (element as any).duplicate !== 'function') return { ok: false, error: `"${element.name}" cannot be duplicated.` };
+        if (input.newName && nameTaken(input.newName)) return { ok: false, error: `Name "${input.newName}" already exists. Names must be unique (rule #4).` };
         const offset: number[] = isVec3(input.offset) ? input.offset : [0, 0, 0];
 
-        const uniqueName = (base: string): string => {
-          if (input.newName) return input.newName;
+        const uniqueCopyName = (base: string): string => {
           let n = `${base}_copy`;
           let i = 1;
           while (nameTaken(n)) n = `${base}_copy${i++}`;
           return n;
         };
-
-        const shifted = (v: number[]) => v.map((n, i) => n + offset[i]) as [number, number, number];
-        const cloneElement = (el: any, parent: any): any => {
-          if (typeof Cube !== 'undefined' && el instanceof Cube) {
-            const dupe = new Cube({
-              name: uniqueName(el.name),
-              from: shifted(el.from),
-              to: shifted(el.to),
-              origin: shifted(el.origin),
-              rotation: el.rotation, autouv: el.autouv, uv_offset: el.uv_offset,
-              mirror_uv: el.mirror_uv, shade: el.shade, inflate: el.inflate,
-              color: el.color, visibility: el.visibility,
-            }).init();
-            dupe.addTo(parent);
-            return dupe;
-          }
-          if (typeof Group !== 'undefined' && el instanceof Group) {
-            const dupeGroup = new Group({
-              name: uniqueName(el.name),
-              origin: shifted(el.origin),
-              rotation: el.rotation, autouv: el.autouv, visibility: el.visibility, shade: el.shade,
-            }).init();
-            dupeGroup.addTo(parent);
-            (el.children || []).forEach((child: any) => cloneElement(child, dupeGroup));
-            return dupeGroup;
-          }
-          if (typeof Mesh !== 'undefined' && el instanceof Mesh) {
-            const dupe = new Mesh({ name: uniqueName(el.name), vertices: {}, origin: shifted(el.origin), rotation: el.rotation } as any);
-            dupe.init();
-            const map: any = {};
-            Object.entries(el.vertices).forEach(([key, coords]: any) => {
-              map[key] = dupe.addVertices([coords[0] + offset[0], coords[1] + offset[1], coords[2] + offset[2]])[0];
-            });
-            // Mesh.faces is an object keyed by face id (not an array), and a face's uv is
-            // keyed by vertex id — remap both to the new vertices (checked live on 5.2.1).
-            Object.values(el.faces).forEach((face: any) => {
-              const uv: Record<string, any> = {};
-              for (const [vkey, coords] of Object.entries(face.uv || {})) uv[map[vkey]] = coords;
-              dupe.addFaces(new MeshFace(dupe, { vertices: face.vertices.map((v: any) => map[v]), uv, texture: face.texture } as any));
-            });
-            dupe.addTo(parent);
-            return dupe;
-          }
-          throw new Error('Unsupported element type.');
+        const shift = (v: any) => { if (isVec3(v)) for (let i = 0; i < 3; i++) v[i] += offset[i]; };
+        const copies: any[] = [];
+        // Walk source and copy side by side (duplicate() keeps the child order).
+        const adjust = (src: any, cp: any, top: boolean) => {
+          copies.push(cp);
+          cp.name = top && input.newName ? input.newName : uniqueCopyName(src.name);
+          if (isVec3(cp.from) && isVec3(cp.to)) { shift(cp.from); shift(cp.to); shift(cp.origin); } // cube
+          else if (isVec3(cp.position)) shift(cp.position); // locator / null object
+          else shift(cp.origin); // group, mesh (mesh vertices are relative to the origin)
+          (src.children || []).forEach((child: any, i: number) => { if (cp.children?.[i]) adjust(child, cp.children[i], false); });
         };
 
-        Undo.initEdit({ elements: [], outliner: true } as any);
-        let dup: any = null;
-        let err: any = null;
-        try { dup = cloneElement(element, element.parent ?? 'root'); } catch (e) { err = e; }
-        Undo.finishEdit('Duplicate element via MCP', dup ? { elements: [dup], outliner: true } : { outliner: true });
+        Undo.initEdit({ elements: [], outliner: true, selection: true } as any);
+        let copy: any = null;
+        try {
+          copy = (element as any).duplicate();
+          adjust(element, copy, true);
+        } catch (e: any) {
+          try { if (copy) copy.remove(); } catch { /* best effort */ }
+          Undo.cancelEdit(false);
+          return { ok: false, error: `duplicate_element failed, nothing was kept: ${e?.message || String(e)}` };
+        }
+        // Groups are recorded by the outliner aspect; "elements" takes only cubes/meshes/locators.
+        const isGroup = (n: any) => typeof Group !== 'undefined' && n instanceof Group;
+        Undo.finishEdit('Duplicate element via MCP', { elements: copies.filter((n) => !isGroup(n)), outliner: true, selection: true } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-        if (!dup) return { ok: false, error: err?.message || String(err) };
-        logToHistory(`duplicated "${element.name}" → "${dup.name}"`);
-        return { ok: true, source: element.name, name: dup.name, uuid: dup.uuid };
+        logToHistory(`duplicated "${element.name}" → "${copy.name}" (${copies.length} element(s))`);
+        return { ok: true, source: element.name, name: copy.name, uuid: copy.uuid, count: copies.length, names: copies.map((n) => n.name) };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 

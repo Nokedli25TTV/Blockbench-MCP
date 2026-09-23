@@ -393,12 +393,24 @@ export function createMockScene() {
       return { ok: true, id: input.id, name: input.new_name };
     },
     duplicate_element(input) {
+      // Mirrors the plugin: newName for the top copy only, unique "_copy" names inside.
       const el = findCube(input.id) || findGroup(input.id);
       if (!el) return { ok: false, error: "not found" };
-      const name = input.newName || `${el.name}_copy`;
-      const dupe = { ...el, uuid: randomUUID(), name, children: el.type === "group" ? [] : undefined };
+      if (input.newName && taken(input.newName)) return { ok: false, error: `Name "${input.newName}" already exists` };
+      const off = input.offset || [0, 0, 0];
+      const add = (v) => (v ? v.map((n, i) => n + off[i]) : v);
+      const names = [];
+      const copyName = (base) => { let n = `${base}_copy`, i = 1; while (taken(n) || names.includes(n)) n = `${base}_copy${i++}`; return n; };
+      const clone = (src, top) => {
+        const name = top && input.newName ? input.newName : copyName(src.name);
+        names.push(name);
+        const c = { ...src, uuid: randomUUID(), name, origin: add(src.origin), from: add(src.from), to: add(src.to) };
+        if (src.type === "group") c.children = src.children.map((ch) => clone(ch, false));
+        return c;
+      };
+      const dupe = clone(el, true);
       scene.roots.push(dupe);
-      return { ok: true, source: el.name, name: dupe.name, uuid: dupe.uuid };
+      return { ok: true, source: el.name, name: dupe.name, uuid: dupe.uuid, count: names.length, names };
     },
     find_elements_by_criteria(input) {
       const matches = [];

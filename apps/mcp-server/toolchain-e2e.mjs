@@ -225,6 +225,13 @@ try {
     g.stop();
   }
 
+  console.log("\n--- duplicate_element: a group copy keeps names unique ---");
+  const dg = await h.call("duplicate_element", { id: "handle_root", newName: "handle_root_b", offset: [0, 0, 8] });
+  check("duplicating a group names only the top copy newName", !dg.isError && !!h.mock.findGroup("handle_root_b"), dg.text);
+  check("everything inside the copied group gets a unique _copy name", /handle_bone_copy/.test(dg.text) && !!h.mock.findCube("grip_copy"), dg.text);
+  const dgTaken = await h.call("duplicate_element", { id: "grip", newName: "pommel" });
+  check("duplicate_element refuses a newName that is already used", dgTaken.isError && /^\[DUPLICATE_NAME\]/.test(dgTaken.text), dgTaken.text);
+
   // Last, because it kills the main server.
   console.log("\n--- Shared bridge (4.2): a second server relays, then takes over ---");
   const relay = startServer({ port: h.port });
