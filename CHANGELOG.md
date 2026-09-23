@@ -16,6 +16,9 @@ section into the new version (see README → Releasing).
 ## [Unreleased]
 
 ### Fixed
+- `capture_screenshot` with `project` rendered whichever project came first in the tab list when the
+  open one was earlier — a screenshot of another tab silently showed the wrong model. It now matches
+  the named project exactly and lists the open projects if the name is unknown.
 - `duplicate_element` now uses Blockbench's own duplicate: it keeps per-face UV and textures,
   copies every child type, moves meshes once (their vertices are relative to the origin), names
   only the top copy `newName` and everything inside a unique `<name>_copy`, refuses a `newName`

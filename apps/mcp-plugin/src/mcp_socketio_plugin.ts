@@ -2713,10 +2713,15 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     const captureScreenshot = (input: any): any => {
       try {
         let selectedProject: any = (typeof Project !== 'undefined') ? Project : null;
-        if ((!selectedProject || input.project !== undefined) && typeof ModelProject !== 'undefined') {
-          selectedProject = (ModelProject as any).all.find(
-            (p: any) => p.name === input.project || p.uuid === input.project || p.selected
-          );
+        const projects: any[] = typeof ModelProject !== 'undefined' ? (ModelProject as any).all : [];
+        if (input.project !== undefined) {
+          // Match the requested project exactly. (The old `name || uuid || selected`
+          // test returned whichever project came first — often the open one, so a
+          // screenshot of another tab silently showed the wrong model; seen live.)
+          selectedProject = projects.find((p: any) => p.name === input.project || p.uuid === input.project);
+          if (!selectedProject) return { ok: false, error: `Project "${input.project}" not found. Open projects: ${projects.map((p: any) => p.name).join(', ') || '(none)'}.` };
+        } else if (!selectedProject) {
+          selectedProject = projects.find((p: any) => p.selected) || null;
         }
         if (!selectedProject) return { ok: false, error: 'No project found.' };
         if (!selectedProject.selected) selectedProject.select();
