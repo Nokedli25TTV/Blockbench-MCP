@@ -95,6 +95,10 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   find_elements_by_criteria: 20_000,
   // Batch geometry creation can build a whole model in one call.
   create_cubes: 30_000,
+  // Opening a new project tab / importing or decoding a whole image.
+  create_project: 20_000,
+  manage_animation: 20_000,
+  replace_texture: 20_000,
   // Geometry/UV packing and large canvas paints.
   pack_uv: 30_000,
   paint_pixel_matrix: 20_000,
@@ -208,6 +212,15 @@ async function forwardImageOrText(tool: ToolType, args: Record<string, any>, onT
 }
 
 const vec3 = z.array(z.number()).length(3);
+// Longest edge of a returned screenshot. Smaller images cost the model far fewer
+// tokens to read; 800 px keeps a model clearly legible.
+const screenshotMaxSize = z
+  .number()
+  .int()
+  .min(0)
+  .max(4096)
+  .optional()
+  .describe("Longest image edge in px (default 800; 0 = native size). Raise only when you need fine detail.");
 const modifyCubeInputSchema = {
   id: z.string().optional().describe("Cube name or UUID to modify."),
   cube_name: z.string().optional().describe("Deprecated alias for id; accepted for compatibility."),
@@ -229,12 +242,78 @@ const modifyCubeInputSchema = {
 // Load bundled skill guides and inject their index into the server instructions,
 // so every client sees them at startup (initialize) and is told to consult them.
 const skills = loadSkills();
-const instructions = buildInstructions(skills);
+
+// ---------------------------------------------------------------------------
+// Tool profile. Every loaded tool's schema is sent to the model, and 50 tools —
+// mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush
+// emulation — don't apply to GeckoLib/Bedrock cube models (8 of 1659 measured
+// calls). The default "geckolib" profile doesn't load them (~30% shorter tool
+// list); BLOCKBENCH_MCP_PROFILE=full loads everything.
+// ---------------------------------------------------------------------------
+const PROFILE = (process.env.BLOCKBENCH_MCP_PROFILE || "geckolib").toLowerCase() === "full" ? "full" : "geckolib";
+const GECKOLIB_HIDDEN = new Set([
+  // Mesh editing (GeckoLib renders cubes only).
+  "place_mesh", "create_sphere", "create_cylinder", "extrude_mesh", "subdivide_mesh", "select_mesh_elements",
+  "move_mesh_vertices", "delete_mesh_elements", "merge_mesh_vertices", "create_mesh_face", "knife_tool",
+  "set_mesh_uv", "auto_uv_mesh", "rotate_mesh_uv",
+  // Armatures + vertex weights (mesh skinning; GeckoLib bones are groups).
+  "list_armatures", "get_armature", "add_armature", "remove_armature", "update_armature", "list_armature_bones",
+  "get_armature_bone", "add_armature_bone", "remove_armature_bone", "update_armature_bone",
+  "update_armature_bones_batch", "select_armature_bones", "get_vertex_weights", "set_vertex_weight",
+  "set_vertex_weights_batch", "clear_vertex_weights",
+  // Bedrock RTX PBR materials + block material instances.
+  "create_pbr_material", "configure_material", "list_materials", "get_material_info", "import_texture_set",
+  "assign_texture_channel", "save_material_config", "get_face_material_instances", "set_face_material_instance",
+  "list_material_instances", "bulk_set_material_instances", "clear_material_instances", "add_texture_group",
+  // Brush emulation (the canvas-direct paint tools cover these).
+  "copy_brush_tool", "eraser_tool", "paint_settings", "paint_with_brush", "create_brush_preset",
+  "load_brush_preset", "texture_selection",
+]);
+const profileNote = PROFILE === "full" ? "" :
+  "\n\nTool profile \"geckolib\": mesh-editing, armature/vertex-weight, Bedrock PBR/material-instance and " +
+  "brush-emulation tools are not loaded (GeckoLib renders cubes only). If a task truly needs them, ask the " +
+  "user to set BLOCKBENCH_MCP_PROFILE=full in the MCP server config and restart the client.";
+const instructions = (buildInstructions(skills) || "") + profileNote;
+
+// MCP tool annotations so clients can tell reads from edits (per the spec,
+// readOnlyHint defaults to false and destructiveHint to true, so both are set
+// explicitly). "Read-only" = changes no project data or undo history; camera or
+// timeline view state may still move (e.g. capture_screenshot with a `time`).
+const READ_ONLY_TOOLS = new Set([
+  "get_scene_tree", "get_project_info", "validate_model", "validate_uv", "list_animations", "get_keyframes",
+  "get_bone_pose", "list_export_formats", "list_textures", "get_texture", "find_elements_by_criteria",
+  "filter_by_material", "get_selection", "get_undo_stack", "capture_screenshot", "capture_app_screenshot",
+  "list_materials", "get_material_info", "get_face_material_instances", "list_material_instances",
+  "list_palettes", "get_palette", "list_actions", "list_armatures", "get_armature", "list_armature_bones",
+  "get_armature_bone", "get_vertex_weights", "list_skills", "get_skill",
+]);
+const DESTRUCTIVE_TOOLS = new Set([
+  "delete_element", "delete_mesh_elements", "remove_armature", "remove_armature_bone", "clear_vertex_weights",
+  "clear_material_instances", "undo", "redo", "risky_eval", "manage_animation", "replace_texture",
+  "eraser_tool", "knife_tool", "merge_mesh_vertices",
+]);
+const toolAnnotations = (name: string) =>
+  READ_ONLY_TOOLS.has(name)
+    ? { readOnlyHint: true, openWorldHint: false }
+    : {
+        readOnlyHint: false,
+        destructiveHint: DESTRUCTIVE_TOOLS.has(name) || !/^(create_|add_|register_|place_|duplicate_|save_checkpoint$)/.test(name),
+        openWorldHint: name === "from_geo_json", // the only tool that can reach the network
+      };
 
 const server = new McpServer(
   { name: "blockbench-mcp", version: "0.2.0" },
   instructions ? { instructions } : undefined
 );
+
+// Every registerTool below goes through here: tools hidden by the profile are
+// simply not registered, and the rest get their annotations.
+const notLoaded: string[] = [];
+const registerToolUnfiltered = server.registerTool.bind(server);
+(server as any).registerTool = (name: string, config: any, cb: any) => {
+  if (PROFILE !== "full" && GECKOLIB_HIDDEN.has(name)) { notLoaded.push(name); return undefined; }
+  return registerToolUnfiltered(name, { ...config, annotations: { ...toolAnnotations(name), ...config.annotations } }, cb);
+};
 
 server.registerTool(
   "create_cube",
@@ -759,6 +838,29 @@ server.registerTool(
 );
 
 server.registerTool(
+  "manage_animation",
+  {
+    title: "Manage Animation (delete / rename / duplicate)",
+    description:
+      "Delete, rename or duplicate a WHOLE animation. A bare new_name gets the 'animation.' prefix. " +
+      "duplicate copies every keyframe (e.g. make walk_fast from walk, then edit the copy).",
+    inputSchema: {
+      action: z.enum(["delete", "rename", "duplicate"]).describe("What to do with the animation."),
+      animation_id: z.string().describe("Animation UUID, full name ('animation.walk') or short name ('walk')."),
+      new_name: z.string().optional().describe("New name — required for rename and duplicate."),
+    },
+  },
+  async (args) =>
+    forward("manage_animation", args, (r) =>
+      r.action === "delete"
+        ? `Deleted animation "${r.name}" (${r.remaining} left).`
+        : r.action === "rename"
+          ? `Renamed "${r.previous_name}" to "${r.name}".`
+          : `Duplicated "${r.source}" as "${r.name}" (uuid ${r.uuid}).`
+    )
+);
+
+server.registerTool(
   "get_keyframes",
   {
     title: "Get Keyframes (read-back)",
@@ -986,6 +1088,30 @@ server.registerTool(
     forward("set_project", args, (r) => `Updated ${r.changed.join(", ")}. geometry identifier: ${r.model_identifier ?? "(none)"}.`)
 );
 
+server.registerTool(
+  "create_project",
+  {
+    title: "Create Project",
+    description:
+      "Create a NEW Blockbench project in a given format (opens a new tab; the current project stays open). " +
+      "Use it when the open project has the wrong format — e.g. 'free' or Java instead of GeckoLib/Bedrock — " +
+      "instead of risky_eval. Aliases: 'geckolib', 'bedrock', 'java'; an unknown id returns the available list. " +
+      "Optionally set name, model_identifier (geometry.<id>) and texture size in the same call.",
+    inputSchema: {
+      format: z.string().describe("Format id or alias: 'geckolib', 'bedrock', 'java', 'free', or any Blockbench format id."),
+      name: z.string().optional().describe("Project name."),
+      model_identifier: z.string().optional().describe("Geometry identifier, e.g. 'dagger' → geometry.dagger."),
+      texture_width: z.number().int().min(1).optional().describe("Texture atlas width."),
+      texture_height: z.number().int().min(1).optional().describe("Texture atlas height."),
+    },
+  },
+  async (args) =>
+    forward("create_project", args, (r) =>
+      `Created ${r.format} project "${r.name ?? ""}" (animations: ${r.animation_mode ? "yes" : "no"}, ` +
+      `geometry identifier: ${r.model_identifier ?? "(none)"}, texture ${r.texture?.[0] ?? "?"}x${r.texture?.[1] ?? "?"}).`
+    )
+);
+
 // ---------------------------------------------------------------------------
 // Texture & UV tools (ported from upstream texture.ts + uv.ts).
 // ---------------------------------------------------------------------------
@@ -1013,6 +1139,22 @@ server.registerTool(
     },
   },
   async (args) => forward("create_texture", args, (r) => `Created texture "${r.name}" (${r.width}x${r.height}, id ${r.id}).`)
+);
+
+server.registerTool(
+  "replace_texture",
+  {
+    title: "Replace Texture Image",
+    description:
+      "Replace the IMAGE of an existing texture from a PNG data URL or an absolute file path, keeping the " +
+      "texture itself (name, uuid, every face mapped to it). Use it to restore a lost/broken atlas or swap in " +
+      "an externally painted one — one undoable step. The texture size follows the new image.",
+    inputSchema: {
+      texture: z.string().describe("Existing texture name/uuid/id (see list_textures)."),
+      data: z.string().describe("PNG data URL ('data:image/png;base64,…') or absolute file path."),
+    },
+  },
+  async (args) => forward("replace_texture", args, (r) => `Replaced the image of texture "${r.name}" (from ${r.source === "path" ? "file" : "data URL"}).`)
 );
 
 server.registerTool(
@@ -1311,11 +1453,13 @@ server.registerTool(
       "visual results (geometry, textures) directly instead of relying on the user's viewport. To verify an " +
       "ANIMATION frame, pass `time` (seconds) — the tool evaluates the animation at that moment right before " +
       "rendering, so you get the posed frame, NOT the rest pose (without it, a screenshot after animation_timeline " +
-      "set_time can race the timeline and show the bind pose). Pass `animation_id` to pick which animation.",
+      "set_time can race the timeline and show the bind pose). Pass `animation_id` to pick which animation. " +
+      "Images are downscaled to `max_size` px (default 800) — ask for more only when you need fine detail.",
     inputSchema: {
       project: z.string().optional().describe("Project name/uuid; default the open one."),
       time: z.number().optional().describe("Seconds — evaluate the animation at this moment before rendering (for posed/animation frames)."),
       animation_id: z.string().optional().describe("Animation UUID or name to evaluate at `time`. Default: the selected animation."),
+      max_size: screenshotMaxSize,
     },
   },
   async (args) => forwardImage("capture_screenshot", args)
@@ -1325,10 +1469,10 @@ server.registerTool(
   "capture_app_screenshot",
   {
     title: "Capture App Screenshot",
-    description: "Return a screenshot of the whole Blockbench application window (desktop only).",
-    inputSchema: {},
+    description: "Return a screenshot of the whole Blockbench application window (desktop only), downscaled to `max_size` px (default 800).",
+    inputSchema: { max_size: screenshotMaxSize },
   },
-  async () => forwardImage("capture_app_screenshot", {})
+  async (args) => forwardImage("capture_app_screenshot", args)
 );
 
 server.registerTool(
@@ -1336,16 +1480,19 @@ server.registerTool(
   {
     title: "Set Camera Angle",
     description:
-      "Position the preview camera (position, optional target/rotation, projection) and return the " +
-      "resulting screenshot. Use to frame the model before capturing.",
+      "Position the preview camera (position, optional target/rotation, projection). Returns the resulting " +
+      "screenshot unless `screenshot:false` — use false when you only move the camera before a " +
+      "capture_screenshot (e.g. with a `time`), to skip reading an extra image.",
     inputSchema: {
       position: vec3.describe("Camera position [x,y,z]."),
       target: vec3.optional().describe("Look-at target [x,y,z]."),
       rotation: vec3.optional().describe("Camera rotation [x,y,z]."),
       projection: z.enum(["unset", "orthographic", "perspective"]).describe("Projection type."),
+      screenshot: z.boolean().optional().describe("Return a screenshot after moving the camera (default true)."),
+      max_size: screenshotMaxSize,
     },
   },
-  async (args) => forwardImage("set_camera_angle", args)
+  async (args) => forwardImageOrText("set_camera_angle", args, (r) => r.message || "Camera set.")
 );
 
 // ---------------------------------------------------------------------------
@@ -2169,7 +2316,10 @@ async function main() {
   await server.connect(transport);
   // The full tool list is what the client receives via tools/list; don't keep a
   // hand-maintained copy here (it went stale as tools were added).
-  log("MCP server ready (stdio).");
+  log(
+    `MCP server ready (stdio). Tool profile: ${PROFILE}` +
+      (notLoaded.length ? ` — ${notLoaded.length} tools not loaded (set BLOCKBENCH_MCP_PROFILE=full to load all).` : ".")
+  );
   if (skills.dir) log(`Loaded ${skills.skills.length} skill guide(s) from ${skills.dir}: ${skills.skills.map((s) => s.name).join(", ")}`);
   else log("No skills directory found — skill guides are not available.");
 }

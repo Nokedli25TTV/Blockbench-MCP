@@ -10,6 +10,10 @@ let mcpSocket: ReturnType<typeof io> | null = null;
 let mcpInterval: ReturnType<typeof setInterval> | null = null;
 let commandListElement: HTMLElement;
 const commandHistory: Array<{ timestamp: Date; type: 'sent' | 'received'; command: string; data?: any }> = [];
+// Reported by get_project_info so you can confirm Blockbench loaded THIS build
+// after a rebuild (File → Plugins → reload). Bump it whenever the plugin changes.
+const PLUGIN_BUILD = '2026-09-23-r2';
+let pluginToolCount = 0; // set from the dispatch map on every tool call
 
 const options: PluginOptions = {
   title: "MCP Plugin",
@@ -1407,6 +1411,59 @@ const options: PluginOptions = {
       }
     };
 
+    // Delete / rename / duplicate a whole animation (previously only possible via
+    // risky_eval). Names follow create_animation: a bare name gets "animation.".
+    const fullAnimationName = (n: string): string => (n.startsWith('animation.') ? n : `animation.${n}`);
+    const manageAnimation = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        if (!input.animation_id) return { ok: false, error: 'animation_id (UUID, full or short name) is required.' };
+        const anim = findAnimation(input.animation_id);
+        if (!anim) return { ok: false, error: `Animation "${input.animation_id}" not found (use list_animations).` };
+        const all = () => ((typeof Animation !== 'undefined' && (Animation as any).all) ? (Animation as any).all : []);
+
+        if (input.action === 'delete') {
+          const name = anim.name;
+          Undo.initEdit({ animations: [anim] } as any);
+          anim.remove(false);
+          Undo.finishEdit('Delete animation via MCP', { animations: [] } as any);
+          logToHistory(`deleted animation "${name}"`);
+          return { ok: true, action: 'delete', name, remaining: all().length };
+        }
+
+        if (!input.new_name) return { ok: false, error: `new_name is required for ${input.action}.` };
+        const newName = fullAnimationName(String(input.new_name));
+        if (findAnimation(newName)) return { ok: false, error: `Animation "${newName}" already exists (rule #4: unique names).` };
+
+        if (input.action === 'rename') {
+          const oldName = anim.name;
+          Undo.initEdit({ animations: [anim] } as any);
+          anim.name = newName;
+          Undo.finishEdit('Rename animation via MCP', { animations: [anim] } as any);
+          logToHistory(`renamed animation "${oldName}" -> "${newName}"`);
+          return { ok: true, action: 'rename', name: newName, previous_name: oldName, uuid: anim.uuid };
+        }
+
+        if (input.action === 'duplicate') {
+          // Round-trip through the Bedrock compiler + importer (the create_animation
+          // path): the sign conversion is applied both ways, so stored values match.
+          if (typeof anim.compileBedrockAnimation !== 'function') return { ok: false, error: 'compileBedrockAnimation unavailable in this Blockbench build.' };
+          const data = anim.compileBedrockAnimation();
+          Animator.loadFile({ content: JSON.stringify({ format_version: '1.8.0', animations: { [newName]: data } }) } as any);
+          const copy = findAnimation(newName);
+          if (!copy) return { ok: false, error: `Duplicate "${newName}" was not created.` };
+          logToHistory(`duplicated animation "${anim.name}" -> "${newName}"`);
+          return { ok: true, action: 'duplicate', name: newName, source: anim.name, uuid: copy.uuid };
+        }
+
+        return { ok: false, error: `Unknown action "${input.action}" (delete | rename | duplicate).` };
+      } catch (err: any) {
+        console.error('[MCP Plugin] manageAnimation failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
     // Read back the ACTUAL stored keyframe values for a bone (verify writes, don't
     // guess). Returns per-channel [{time, values:[x,y,z], interpolation}].
     const getKeyframes = (input: any): any => {
@@ -1736,8 +1793,8 @@ const options: PluginOptions = {
               model_identifier: (Project as any).model_identifier || null,
               save_path: (Project as any).save_path || null,
             },
-            plugin_build: '2026-06-16-shadecube', // bump on each plugin rebuild to confirm the loaded build
-            tool_count: 110,
+            plugin_build: PLUGIN_BUILD, // bump on each plugin change to confirm the loaded build
+            tool_count: pluginToolCount,
             format: { id: fmt ? fmt.id : null, name: fmt ? (fmt.display_name || fmt.name) : null, animation_mode: fmt ? !!fmt.animation_mode : false },
             resolution: { texture_width: (Project as any).texture_width || null, texture_height: (Project as any).texture_height || null },
             counts: {
@@ -1771,6 +1828,48 @@ const options: PluginOptions = {
         logToHistory(`set project: ${changed.join(', ')}`);
         return { ok: true, changed, model_identifier: (Project as any).model_identifier || null, name: (Project as any).name };
       } catch (err: any) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Create a NEW project in a given format (opens a new tab; the open project
+    // stays). Replaces the risky_eval workaround for "the open project is in the
+    // wrong format" (free/Java instead of Bedrock/GeckoLib).
+    const FORMAT_ALIASES: Record<string, string[]> = {
+      geckolib: ['geckolib_model', 'animated_entity_model'],
+      bedrock: ['bedrock'],
+      java: ['java_block'],
+    };
+    const createProject = (input: any): any => {
+      try {
+        const formats: any = (typeof Formats !== 'undefined') ? Formats : null;
+        if (!formats || typeof newProject !== 'function') return { ok: false, error: 'Project creation API (Formats/newProject) unavailable in this Blockbench build.' };
+        const available = Object.keys(formats);
+        const wanted = String(input.format || '').trim();
+        const candidates = FORMAT_ALIASES[wanted.toLowerCase()] || [wanted];
+        const formatId = candidates.find((id) => formats[id]);
+        if (!formatId) {
+          const list = available.map((id) => `${id} (${formats[id].name || id})`).join(', ');
+          return { ok: false, error: `Format "${wanted}" not found. Available: ${list}. Aliases: geckolib, bedrock, java.` };
+        }
+        const created = newProject(formats[formatId]);
+        if (created === false || !hasProject()) return { ok: false, error: `Blockbench did not create the ${formatId} project.` };
+        if (typeof input.name === 'string') (Project as any).name = input.name;
+        if (typeof input.model_identifier === 'string') (Project as any).model_identifier = input.model_identifier;
+        if (typeof input.texture_width === 'number' && input.texture_width > 0) (Project as any).texture_width = input.texture_width;
+        if (typeof input.texture_height === 'number' && input.texture_height > 0) (Project as any).texture_height = input.texture_height;
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`created ${formatId} project "${(Project as any).name || ''}"`);
+        return {
+          ok: true,
+          format: formatId,
+          name: (Project as any).name || null,
+          model_identifier: (Project as any).model_identifier || null,
+          animation_mode: !!(formats[formatId].animation_mode),
+          texture: [(Project as any).texture_width || null, (Project as any).texture_height || null],
+        };
+      } catch (err: any) {
+        console.error('[MCP Plugin] createProject failed:', err);
         return { ok: false, error: err?.message || String(err) };
       }
     };
@@ -1880,6 +1979,40 @@ const options: PluginOptions = {
         return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name, width: tex.width || w, height: tex.height || h, layers_enabled: !!tex.layers_enabled };
       } catch (err: any) {
         console.error('[MCP Plugin] createTexture failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Swap the IMAGE of an existing texture (PNG data URL or file path) while
+    // keeping the texture itself — uuid, name and every face that uses it — so a
+    // lost/broken atlas can be restored in one call instead of via risky_eval.
+    const replaceTexture = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        if (!input.texture) return { ok: false, error: 'texture (name/uuid/id) is required.' };
+        const tex = findTexture(input.texture);
+        if (!tex) return { ok: false, error: `Texture "${input.texture}" not found (use list_textures).` };
+        const data = typeof input.data === 'string' ? input.data.trim() : '';
+        if (!data) return { ok: false, error: 'data (PNG data URL or absolute file path) is required.' };
+
+        const keepName = tex.name;
+        Undo.initEdit({ textures: [tex], bitmap: true } as any);
+        let source: 'data_url' | 'path';
+        if (data.startsWith('data:image/')) {
+          tex.fromDataURL(data);
+          source = 'data_url';
+        } else {
+          const path = data.replace(/^file:\/\//, '');
+          tex.fromFile({ name: path.split(/[\\/]/).pop() || path, path } as any);
+          source = 'path';
+        }
+        tex.name = keepName; // loading from a file may rename it after the file
+        Undo.finishEdit('Replace texture via MCP', { textures: [tex], bitmap: true } as any);
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        logToHistory(`replaced image of texture "${keepName}" from ${source}`);
+        return { ok: true, name: keepName, uuid: tex.uuid, source };
+      } catch (err: any) {
+        console.error('[MCP Plugin] replaceTexture failed:', err);
         return { ok: false, error: err?.message || String(err) };
       }
     };
@@ -2031,11 +2164,50 @@ const options: PluginOptions = {
     // Return a data URL; the server turns it into MCP image content.
     // ---------------------------------------------------------------------
 
-    const renderPreviewDataURL = (preview: any): string | undefined => {
+    // Screenshots are the heaviest thing the model has to read. Downscale so the
+    // longest edge is at most `max_size` px — 800 keeps a model clearly readable at
+    // roughly a third of the image tokens of a full viewport. 0 = native size.
+    const DEFAULT_SCREENSHOT_MAX = 800;
+    const screenshotMax = (input: any): number => {
+      const v = Number(input?.max_size);
+      return input?.max_size !== undefined && Number.isFinite(v) && v >= 0 ? Math.floor(v) : DEFAULT_SCREENSHOT_MAX;
+    };
+    const scaledSize = (w: number, h: number, maxSize: number): [number, number] | null => {
+      const longest = Math.max(w, h);
+      if (!maxSize || longest <= maxSize) return null;
+      const k = maxSize / longest;
+      return [Math.max(1, Math.round(w * k)), Math.max(1, Math.round(h * k))];
+    };
+    const drawScaled = (src: CanvasImageSource, w: number, h: number): string | null => {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) return null;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(src, 0, 0, w, h);
+      return c.toDataURL();
+    };
+    // Scale an image data URL (e.g. a Screencam app capture) the same way.
+    const scaleDataURL = (dataUrl: string, maxSize: number): Promise<string> =>
+      new Promise((resolve) => {
+        if (!maxSize || !dataUrl) { resolve(dataUrl); return; }
+        const img = new Image();
+        img.onload = () => {
+          const size = scaledSize(img.width, img.height, maxSize);
+          resolve(size ? (drawScaled(img, size[0], size[1]) || dataUrl) : dataUrl);
+        };
+        img.onerror = () => resolve(dataUrl);
+        img.src = dataUrl;
+      });
+
+    const renderPreviewDataURL = (preview: any, maxSize = DEFAULT_SCREENSHOT_MAX): string | undefined => {
       let dataUrl: string | undefined;
       (Canvas as any).withoutGizmos(() => {
         preview.render();
-        dataUrl = preview.canvas.toDataURL();
+        // Read the WebGL canvas in the same tick as render(), before it is cleared.
+        const canvas = preview.canvas;
+        const size = scaledSize(canvas.width, canvas.height, maxSize);
+        dataUrl = (size && drawScaled(canvas, size[0], size[1])) || canvas.toDataURL();
       });
       return dataUrl;
     };
@@ -2070,7 +2242,7 @@ const options: PluginOptions = {
         const preview = (Preview as any).selected;
         if (!preview) return { ok: false, error: 'No preview available for the selected project.' };
 
-        const dataUrl = renderPreviewDataURL(preview);
+        const dataUrl = renderPreviewDataURL(preview, screenshotMax(input));
         if (!dataUrl) return { ok: false, error: 'Failed to capture preview screenshot.' };
         return { ok: true, data_url: dataUrl };
       } catch (err: any) {
@@ -2079,7 +2251,9 @@ const options: PluginOptions = {
       }
     };
 
-    const captureAppScreenshot = (): Promise<any> =>
+    // Whole-window capture (also used after trigger_action / emulate_clicks /
+    // from_geo_json). A full app window is large, so it is downscaled too.
+    const captureAppScreenshot = (input?: any): Promise<any> =>
       new Promise((resolve) => {
         try {
           if (typeof Screencam === 'undefined' || !(Screencam as any).fullScreen) {
@@ -2088,11 +2262,12 @@ const options: PluginOptions = {
           }
           let done = false;
           const t = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: 'App screenshot timed out.' }); } }, 5000);
-          (Screencam as any).fullScreen({}, (dataUrl: string) => {
+          (Screencam as any).fullScreen({}, async (dataUrl: string) => {
             if (done) return;
             done = true;
             clearTimeout(t);
-            resolve(dataUrl ? { ok: true, data_url: dataUrl } : { ok: false, error: 'No data returned.' });
+            if (!dataUrl) { resolve({ ok: false, error: 'No data returned.' }); return; }
+            resolve({ ok: true, data_url: await scaleDataURL(dataUrl, screenshotMax(input)) });
           });
         } catch (err: any) {
           resolve({ ok: false, error: err?.message || String(err) });
@@ -2110,7 +2285,10 @@ const options: PluginOptions = {
           rotation: input.rotation,
           projection: input.projection,
         });
-        const dataUrl = renderPreviewDataURL(preview);
+        // screenshot:false = just move the camera (e.g. before a capture_screenshot
+        // with a `time`), saving a whole image round-trip for the model.
+        if (input.screenshot === false) return { ok: true, message: `Camera set to [${(input.position || []).join(', ')}].` };
+        const dataUrl = renderPreviewDataURL(preview, screenshotMax(input));
         if (!dataUrl) return { ok: false, error: 'Failed to capture screenshot after setting angle.' };
         return { ok: true, data_url: dataUrl };
       } catch (err: any) {
@@ -4007,6 +4185,7 @@ const options: PluginOptions = {
         batch_keyframe_operations: batchKeyframeOperations,
         animation_copy_paste: animationCopyPaste,
         list_animations: listAnimations,
+        manage_animation: manageAnimation,
         get_keyframes: getKeyframes,
         get_bone_pose: getBonePose,
         modify_cube: modifyCube,
@@ -4017,7 +4196,9 @@ const options: PluginOptions = {
         export_animations: exportAnimations,
         get_project_info: getProjectInfo,
         set_project: setProject,
+        create_project: createProject,
         create_texture: createTexture,
+        replace_texture: replaceTexture,
         list_textures: listTextures,
         get_texture: getTexture,
         activate_texture: activateTexture,
@@ -4100,6 +4281,7 @@ const options: PluginOptions = {
         validate_uv: validateUv,
         shade_cube: shadeCube,
       };
+      pluginToolCount = Object.keys(handlers).length;
 
       let response: any;
       const handler = handlers[cmd.tool];

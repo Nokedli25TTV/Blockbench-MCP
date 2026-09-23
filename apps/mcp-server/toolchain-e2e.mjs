@@ -104,6 +104,30 @@ try {
   const km = await h.call("manage_keyframes", { action: "edit", bone_name: "crystal_x", channel: "rotation", keyframes: [{ time: 0.5, values: [9, 9, 9] }] });
   check("edit at a time with no keyframe is flagged, not silent", !km.isError && /No keyframe matched/.test(km.text || ""), km.text);
 
+  console.log("\n--- Round 1: screenshot diet + new tools ---");
+  const cam = await h.call("set_camera_angle", { position: [20, 20, 20], projection: "perspective", screenshot: false });
+  check("set_camera_angle screenshot:false returns text, no image", !cam.isError && cam.raw?.content?.[0]?.type === "text" && /Camera set/.test(cam.text), cam.text);
+  const shot = await h.call("capture_screenshot", { max_size: 400 });
+  check("capture_screenshot accepts max_size", !shot.isError && shot.raw?.content?.[0]?.type === "image");
+  const badFmt = await h.call("create_project", { format: "nope" });
+  check("create_project rejects an unknown format and lists the available ones", badFmt.isError && /Available:/.test(badFmt.text), badFmt.text);
+  const proj = await h.call("create_project", { format: "geckolib", name: "dagger", model_identifier: "dagger" });
+  check("create_project resolves the geckolib alias", !proj.isError && /geckolib_model/.test(proj.text), proj.text);
+  const anim = await h.call("create_animation", { name: "wobble", loop: true, bones: { crystal_x: [{ time: 0, rotation: [0, 0, 0] }] } });
+  check("create_animation (setup)", !anim.isError, anim.text);
+  const dup = await h.call("manage_animation", { action: "duplicate", animation_id: "wobble", new_name: "wobble_fast" });
+  check("manage_animation duplicate", !dup.isError && /animation\.wobble_fast/.test(dup.text), dup.text);
+  const ren = await h.call("manage_animation", { action: "rename", animation_id: "wobble_fast", new_name: "wobble_quick" });
+  check("manage_animation rename", !ren.isError && /animation\.wobble_quick/.test(ren.text), ren.text);
+  const del = await h.call("manage_animation", { action: "delete", animation_id: "animation.wobble_quick" });
+  const animsLeft = JSON.parse((await h.call("list_animations")).text).map((a) => a.name);
+  check("manage_animation delete leaves only the original", !del.isError && animsLeft.length === 1 && animsLeft[0] === "animation.wobble", animsLeft.join(","));
+  await h.call("register_texture", { name: "atlas_r1" });
+  const rep = await h.call("replace_texture", { texture: "atlas_r1", data: "data:image/png;base64,iVBORw0KGgo=" });
+  check("replace_texture swaps the image of an existing texture", !rep.isError && /atlas_r1/.test(rep.text), rep.text);
+  const repBad = await h.call("replace_texture", { texture: "missing_tex", data: "C:/x.png" });
+  check("replace_texture on an unknown texture fails with a code", repBad.isError && /^\[NOT_FOUND\]/.test(repBad.text), repBad.text);
+
   console.log("\n--- Validation (expected PASS) ---");
   const v1 = await h.call("validate_model");
   console.log(v1.text);
@@ -127,6 +151,22 @@ try {
   check("validate_model FAILS on corrupted scene", v2.isError && v2.text.includes("FAILED"));
   check("detects illegal cube rotation", v2.text.includes("illegal-cube-rotation"));
   check("detects duplicate name", v2.text.includes("duplicate-name"));
+
+  console.log("\n--- Tool profile: default 'geckolib' drops the non-cube tool groups ---");
+  const g = await startHarness({ profile: "geckolib" });
+  try {
+    const defs = await g.listToolDefs();
+    const names = defs.map((t) => t.name);
+    console.log(`   full: ${tools.length} tools, geckolib: ${names.length} tools`);
+    check("geckolib profile keeps the core tools", ["create_cubes", "get_scene_tree", "pack_uv", "manage_animation", "create_project", "replace_texture"].every((t) => names.includes(t)));
+    check("geckolib profile drops mesh/armature/PBR/brush tools", !["create_sphere", "add_armature", "create_pbr_material", "paint_with_brush"].some((t) => names.includes(t)));
+    check("geckolib profile loads exactly 50 fewer tools than full", tools.length - names.length === 50, `${tools.length} - ${names.length}`);
+    const ann = (n) => defs.find((t) => t.name === n)?.annotations || {};
+    check("annotations: reads are readOnlyHint", ann("get_scene_tree").readOnlyHint === true && ann("capture_screenshot").readOnlyHint === true);
+    check("annotations: delete is destructive, create is additive", ann("delete_element").destructiveHint === true && ann("create_cube").destructiveHint === false);
+  } finally {
+    g.stop();
+  }
 
   console.log(`\n${failures === 0 ? "🎉 ALL CHECKS PASSED" : "💥 " + failures + " CHECK(S) FAILED"}`);
   h.stop();

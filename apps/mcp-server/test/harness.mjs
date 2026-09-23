@@ -34,6 +34,9 @@ export function createMockScene() {
     return d.some((n) => n < 1) ? `${label} is thinner than 1 unit on an axis [${d.join(", ")}]` : null;
   };
   const keyframes = {}; // "bone.channel" -> [{ time, values, interpolation }]
+  const animations = []; // [{ uuid, name }]
+  const animName = (n) => (n.startsWith("animation.") ? n : `animation.${n}`);
+  const findAnim = (id) => animations.find((a) => a.uuid === id || a.name === id || a.name === animName(id));
 
   const handlers = {
     create_group(input) {
@@ -57,6 +60,42 @@ export function createMockScene() {
       (parent ? parent.children : scene.roots).push(c);
       const warning = thinWarning(from, to, `Cube "${c.name}"`);
       return { ok: true, name: c.name, from, to, ...(warning ? { warning } : {}) };
+    },
+    create_animation(input) {
+      if (!input.name) return { ok: false, error: "name required" };
+      const missing = Object.keys(input.bones || {}).filter((b) => !findGroup(b));
+      if (missing.length) return { ok: false, error: `Bone(s) not found: ${missing.join(", ")}` };
+      if (findAnim(input.name)) return { ok: false, error: `Animation "${input.name}" already exists` };
+      const a = { uuid: randomUUID(), name: animName(input.name) };
+      animations.push(a);
+      return { ok: true, name: a.name, uuid: a.uuid, selected: true, bones: Object.keys(input.bones || {}).length };
+    },
+    list_animations() { return { ok: true, animations: animations.map((a) => ({ uuid: a.uuid, name: a.name })) }; },
+    manage_animation(input) {
+      const a = findAnim(input.animation_id || "");
+      if (!a) return { ok: false, error: `Animation "${input.animation_id}" not found` };
+      if (input.action === "delete") { animations.splice(animations.indexOf(a), 1); return { ok: true, action: "delete", name: a.name, remaining: animations.length }; }
+      if (!input.new_name) return { ok: false, error: `new_name is required for ${input.action}` };
+      const nn = animName(input.new_name);
+      if (findAnim(nn)) return { ok: false, error: `Animation "${nn}" already exists` };
+      if (input.action === "rename") { const prev = a.name; a.name = nn; return { ok: true, action: "rename", name: nn, previous_name: prev, uuid: a.uuid }; }
+      const copy = { uuid: randomUUID(), name: nn };
+      animations.push(copy);
+      return { ok: true, action: "duplicate", name: nn, source: a.name, uuid: copy.uuid };
+    },
+    create_project(input) {
+      const aliases = { geckolib: "geckolib_model", bedrock: "bedrock", java: "java_block" };
+      const known = ["geckolib_model", "bedrock", "java_block", "free"];
+      const id = aliases[String(input.format || "").toLowerCase()] || input.format;
+      if (!known.includes(id)) return { ok: false, error: `Format "${input.format}" not found. Available: ${known.join(", ")}.` };
+      if (input.model_identifier) scene.model_identifier = input.model_identifier;
+      return { ok: true, format: id, name: input.name || null, model_identifier: scene.model_identifier || null, animation_mode: id !== "java_block", texture: [input.texture_width || 16, input.texture_height || 16] };
+    },
+    replace_texture(input) {
+      const t = scene.textures.find((x) => x.uuid === input.texture || x.name === input.texture);
+      if (!t) return { ok: false, error: `Texture "${input.texture}" not found` };
+      if (!input.data) return { ok: false, error: "data required" };
+      return { ok: true, name: t.name, uuid: t.uuid, source: String(input.data).startsWith("data:image/") ? "data_url" : "path" };
     },
     manage_keyframes(input) {
       if (!findGroup(input.bone_name)) return { ok: false, error: `Bone "${input.bone_name}" not found` };
@@ -268,7 +307,10 @@ export function createMockScene() {
     },
     capture_screenshot() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
     capture_app_screenshot() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
-    set_camera_angle() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
+    set_camera_angle(input) {
+      if (input.screenshot === false) return { ok: true, message: `Camera set to [${(input.position || []).join(", ")}].` };
+      return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" };
+    },
     rename_element(input) {
       const find = (n) => findGroup(n) || findCube(n);
       const el = find(input.id);
@@ -525,13 +567,15 @@ export function createMockScene() {
 // --------------------------------------------------------------------------
 // Start server + mock + MCP client, return helpers.
 // --------------------------------------------------------------------------
-export async function startHarness() {
+// `profile` defaults to "full" so the suites exercise every tool; pass
+// "geckolib" to test the lean default profile.
+export async function startHarness({ profile = "full" } = {}) {
   const mock = createMockScene();
   // Run on an isolated random port so an open Blockbench (on 9999) can't interfere.
   const port = process.env.MCP_BRIDGE_PORT || String(20000 + Math.floor(Math.random() * 2000));
   const child = spawn("node", [serverPath], {
     stdio: ["pipe", "pipe", "inherit"],
-    env: { ...process.env, MCP_BRIDGE_PORT: port },
+    env: { ...process.env, MCP_BRIDGE_PORT: port, BLOCKBENCH_MCP_PROFILE: profile },
   });
 
   let buf = "";
@@ -560,7 +604,8 @@ export async function startHarness() {
     const r = await rpc("tools/call", { name, arguments: args });
     return { isError: !!r.result?.isError, text: r.result?.content?.[0]?.text ?? "", raw: r.result };
   };
-  const listTools = async () => (await rpc("tools/list", {})).result.tools.map((t) => t.name);
+  const listToolDefs = async () => (await rpc("tools/list", {})).result.tools;
+  const listTools = async () => (await listToolDefs()).map((t) => t.name);
 
   const socket = io(`http://localhost:${port}`, { transports: ["websocket", "polling"] });
   socket.on("tool_command", (cmd, ack) => {
@@ -579,5 +624,5 @@ export async function startHarness() {
   });
 
   const stop = () => { try { socket.disconnect(); } catch {} try { child.kill(); } catch {} };
-  return { call, rpc, notify, listTools, scene: mock.scene, mock, stop };
+  return { call, rpc, notify, listTools, listToolDefs, scene: mock.scene, mock, stop };
 }

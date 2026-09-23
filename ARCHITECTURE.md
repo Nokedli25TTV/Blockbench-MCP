@@ -6,7 +6,7 @@ How this project is built and where everything lives. Companion to `MODELING_CON
 ## 1. What it is
 
 A custom integration that lets **Claude (Claude Desktop)** do 3D modeling in **Blockbench**
-over the **Model Context Protocol (MCP)**. 112 MCP tools cover modeling, animation, export,
+over the **Model Context Protocol (MCP)**. 115 MCP tools cover modeling, animation, export,
 texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 
 ## 2. The three processes + data flow
@@ -32,6 +32,14 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 - Every tool call carries its own Socket.IO ack and a per-tool timeout (`TOOL_TIMEOUTS` in
   `index.ts`: 10 s default, 20 s reads/animation, 30 s render/pack, 60 s export). A connected
   plugin is usable immediately — there is no separate "ready" gate.
+- **Tool profile** (`BLOCKBENCH_MCP_PROFILE`, default `geckolib`): skips 50 mesh / armature /
+  Bedrock-PBR / brush-emulation tools that don't apply to cube models — the tools/list sent to the
+  model shrinks from ~24k to ~16k tokens. `full` loads all 115. Set it in the client's MCP server
+  config (`"env": { "BLOCKBENCH_MCP_PROFILE": "full" }`). Every tool also carries MCP annotations
+  (`readOnlyHint` / `destructiveHint`).
+- Screenshots (`capture_screenshot`, `set_camera_angle`, app captures) are downscaled to 800 px on
+  the longest edge by default (`max_size`; 0 = native) — images are the costliest thing the model
+  reads. Measured: tool execution is ~0.1% of session time; round-trips and reading dominate.
 
 ## 3. Repository layout (what's where)
 
@@ -40,7 +48,7 @@ blockbench-mcp/
 ├─ apps/
 │  ├─ mcp-server/                 # the external MCP server (Node, stdio + Socket.IO bridge)
 │  │  ├─ src/
-│  │  │  ├─ index.ts              # ★ registers ALL 112 MCP tools; the :9999 bridge; forward() helpers
+│  │  │  ├─ index.ts              # ★ registers ALL 115 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
 │  │  │  └─ skills.ts             # loads skills/*, builds the MCP `instructions` index, get_skill content
 │  │  ├─ test/
 │  │  │  ├─ harness.mjs           # spawns real server + a MOCK Blockbench scene + an MCP stdio client
