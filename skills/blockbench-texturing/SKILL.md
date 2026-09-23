@@ -26,6 +26,10 @@ Create and paint textures for 3D models using Blockbench MCP tools.
    cubes one colour, `edge_color` for a dark cutting edge, `sheen` for a blade highlight. For full hand
    control use `paint_pixel_matrix` / `paint_fill_tool` / `draw_shape_tool` (all take real hex). Match
    the reference's colours per part. (No procedural auto-shader; see `blockbench-pixel-shading`.)
+   **Texture the whole model in ONE call with `shade_cubes`** — `items=[{cube_id|target, color|colors,
+   edge_color?, sheen?}, …]` paints every part with its own colour in one texture edit and one undo
+   step (all-or-nothing; items paint in order). Need manual UV offsets? Set them all at once with
+   `modify_cubes cubes=[{id, uv_offset:[u,v]}, …]` instead of one `modify_cube` per cube.
 7. **Verify.** `get_texture` (image) + `capture_screenshot`.
 
 ### ⚠ Critical: UV must be packed first (the #1 texturing failure)
@@ -48,6 +52,8 @@ offset sticks; with `autouv:1` Blockbench re-collapses it to `[0,0]`).
 | `pack_uv` | Pack each cube's UV into its own region + fit the texture (run before painting) |
 | `validate_uv` | Check UVs (overlap/oob) before painting |
 | `shade_cube` | **Shade a cube's faces from ONE exact hex** (clean directional, no palette/noise) |
+| `shade_cubes` | **Batch `shade_cube`** — many parts, each its own colour, one call / one undo step |
+| `modify_cubes` | Batch cube edits, e.g. every cube's `uv_offset` in one call |
 
 ### Paint Tools
 | Tool | Purpose |

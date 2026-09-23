@@ -8,9 +8,12 @@ description: Create and manage animations in Blockbench using MCP tools. Use whe
 Create animations for 3D models using Blockbench MCP tools.
 
 ## ⚠ Workflow & gotchas (read first — these cost whole sessions otherwise)
-- **Verify by read-back, never by eye.** After EVERY `manage_keyframes` / `animation_copy_paste`,
-  call **`get_keyframes`** (it returns the values ACTUALLY stored). `manage_keyframes` also echoes
-  the stored values in its ack. Catches silent write failures in round 1, not round 5.
+- **Verify by read-back, never by eye.** `manage_keyframes` and `set_keyframes` reply with the values
+  ACTUALLY stored — read that instead of calling anything else. After `create_animation` or
+  `animation_copy_paste`, one **`get_keyframes`** (omit `bone_name` to get every animated bone at
+  once) confirms what landed. Catches silent write failures in round 1, not round 5.
+- **Batch keyframe edits.** Key or fix a whole pose with ONE `set_keyframes` (many bones × channels ×
+  times, one undo step, upsert by time); `clear_first:true` rewrites the listed channels.
 - **Calibrate rotation direction ONCE, up front.** Don't guess "forward/back" from a camera angle —
   set a known +X on a bone, call **`get_bone_pose`** to read its world-space rotation (a number),
   note "for this rig +X = forward/back", then never guess again. **Sign conventions can differ

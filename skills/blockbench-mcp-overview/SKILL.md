@@ -17,11 +17,11 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Domain | Tools |
 |--------|-------|
 | Project | `get_project_info`, `create_project` (new tab in a format: `geckolib`/`bedrock`/`java`), `set_project` |
-| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation` (groups only, one axis), `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
+| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation` (groups only, one axis), `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
 | Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
-| Paint | `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
-| Animation | `create_animation`, `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes`, `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
+| Paint | `shade_cubes` (batch: many parts, own colours, one call), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
+| Animation | `create_animation`, `set_keyframes` (batch: many bones × channels × times), `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes` (one, several or all bones), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
 | Camera | `capture_screenshot` (`time`, `max_size`), `set_camera_angle` (`screenshot:false`), `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
 | Export | `list_export_formats`, `export_model`, `export_animations` |
@@ -32,8 +32,10 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 Tool calls themselves take milliseconds; the time goes into the number of round-trips and into
 reading results. So:
 
-1. **Batch.** Build a whole hierarchy with one `create_cubes`; shade many cubes of one colour with
-   `shade_cube target=<group>`; create an animation with all bones in one `create_animation`.
+1. **Batch.** One call per step, not per element: `create_cubes` builds the hierarchy,
+   `modify_cubes` edits many cubes, `shade_cubes` textures every part with its own colour,
+   `create_animation` / `set_keyframes` write all bones at once, `get_keyframes` with no bone reads
+   them all back. Batches are all-or-nothing and one undo step each.
 2. **Read narrowly.** `get_scene_tree` with `bone_names` / `include_faces:false` / `max_depth` instead
    of the full tree on big models.
 3. **Screenshots sparingly.** Images are the most expensive thing to read. Screenshots are 800 px by
@@ -54,7 +56,8 @@ pack_uv                                                  # every cube gets its o
 validate_uv                                              # must be VALID before painting
 create_texture: name="atlas"                             # no size → uses the packed size
 apply_texture: target="root", texture="atlas"
-shade_cube: cube_id="blade", color="#b9c2cb"              # exact colours per part
+shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", edge_color:"#5f6b75", sheen:true},
+                    {cube_id:"guard", color:"#d6b13a"}, {cube_id:"grip", color:"#5b3a1d"}]   # exact colours, one call
 validate_model
 capture_screenshot
 export_model: codec_id="bedrock"   +   export_animations

@@ -99,6 +99,10 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   create_project: 20_000,
   manage_animation: 20_000,
   replace_texture: 20_000,
+  // Batches: many edits in one call.
+  set_keyframes: 20_000,
+  modify_cubes: 20_000,
+  shade_cubes: 30_000,
   // Geometry/UV packing and large canvas paints.
   pack_uv: 30_000,
   paint_pixel_matrix: 20_000,
@@ -163,6 +167,12 @@ const fail = (text: string) => ({ isError: true, content: [{ type: "text" as con
 // Non-fatal plugin warnings (`warning` or `warnings[]` on the ack) as trailing lines.
 const warningLines = (r: any): string =>
   [r?.warning, ...(r?.warnings || [])].filter(Boolean).map((w: string) => `\n⚠️  ${w}`).join("");
+// One channel's stored keyframes as "t=0 [0, 0, 0] · t=1 [4, 0, 0]", capped.
+const formatKeyframes = (kfs: any[], max = 12): string => {
+  const list = kfs || [];
+  const shown = list.slice(0, max).map((k) => `t=${k.time} [${(k.values || []).join(", ")}]`).join(" · ");
+  return shown ? shown + (list.length > max ? ` … (+${list.length - max} more)` : "") : "(no keyframes)";
+};
 // Turn a data: URL into MCP image content (falls back to text if not a data URL).
 const image = (dataUrl: string) => {
   const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || "");
@@ -666,9 +676,10 @@ server.registerTool(
     title: "Manage Keyframes",
     description:
       "Create, delete, edit, or select keyframes for one bone and channel in an animation. " +
-      "The bone group must exist and the animation must exist (or be selected). After writing, confirm " +
-      "with get_keyframes (catches silent write failures). Rotation sign can differ between the BB UI " +
-      "and exported GeckoLib JSON — calibrate once with get_bone_pose instead of assuming a direction.",
+      "The bone group must exist and the animation must exist (or be selected). The reply lists the " +
+      "channel's stored keyframes, so no separate get_keyframes is needed. For several bones/channels at " +
+      "once use set_keyframes. Rotation sign can differ between the BB UI and exported GeckoLib JSON — " +
+      "calibrate once with get_bone_pose instead of assuming a direction.",
     inputSchema: {
       animation_id: animationIdOptional,
       action: z.enum(["create", "delete", "edit", "select"]).describe("Action to perform."),
@@ -681,15 +692,52 @@ server.registerTool(
     forward("manage_keyframes", args, (r) => {
       // The plugin reads the channel back after every write; show it, so a no-op
       // or wrong value is visible now instead of several rounds later.
-      const stored: any[] = r.stored || [];
-      const shown = stored.slice(0, 12).map((k) => `t=${k.time} [${(k.values || []).join(", ")}]`).join(" · ");
-      const more = stored.length > 12 ? ` … (+${stored.length - 12} more)` : "";
       const miss = r.affected === 0
         ? (r.action === "create"
           ? `\n⚠️  No keyframe was created on ${r.bone}.${r.channel}.`
           : `\n⚠️  No keyframe matched the given time(s) on ${r.bone}.${r.channel} (±0.001 s) — nothing changed.`)
         : "";
-      return `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.${miss}\nStored now: ${shown ? shown + more : "(no keyframes on this channel)"}`;
+      return `${r.action}: ${r.affected} keyframe(s) on ${r.bone}.${r.channel}.${miss}\nStored now: ${formatKeyframes(r.stored)}`;
+    })
+);
+
+server.registerTool(
+  "set_keyframes",
+  {
+    title: "Set Keyframes (batch)",
+    description:
+      "Write keyframes for MANY bones, channels and times in ONE call and ONE undo step — the fast way to key " +
+      "or fix a whole pose or animation. Upsert: a keyframe already at that time (±0.001 s) is overwritten, " +
+      "otherwise it is created. All entries are validated first; nothing is written if one is invalid. " +
+      "`clear_first:true` empties each listed bone/channel before writing (rewrite a curve). Values are the " +
+      "STORED values — the same convention as manage_keyframes / get_keyframes (create_animation's input has X " +
+      "negated) — and rotations ADD to the bone's rest rotation. The reply lists every touched channel as stored.",
+    inputSchema: {
+      animation_id: animationIdOptional,
+      keyframes: z
+        .array(
+          z.object({
+            bone: z.string().describe("Bone/group name."),
+            channel: animationChannelEnum.describe("rotation / position / scale."),
+            time: z.number().min(0).describe("Seconds."),
+            values: z.union([vec3, z.number()]).describe("[x,y,z] (degrees for rotation), or one number for uniform scale."),
+            interpolation: interpolationEnum.optional().describe("Default linear."),
+          })
+        )
+        .min(1)
+        .describe("Keyframes to write, any order, any mix of bones and channels."),
+      clear_first: z.boolean().optional().describe("Remove the existing keyframes of each listed bone/channel first."),
+    },
+  },
+  async (args) =>
+    forward("set_keyframes", args, (r) => {
+      const channels = Object.entries(r.stored || {});
+      const lines = channels.slice(0, 40).map(([key, kfs]) => `  ${key}: ${formatKeyframes(kfs as any[])}`);
+      if (channels.length > 40) lines.push(`  … (+${channels.length - 40} more channels)`);
+      return (
+        `Set ${r.created + r.updated} keyframe(s) on ${r.animation}: ${r.created} created, ${r.updated} updated` +
+        `${r.cleared ? `, ${r.cleared} cleared first` : ""}.\nStored now:\n${lines.join("\n")}`
+      );
     })
 );
 
@@ -865,11 +913,14 @@ server.registerTool(
   {
     title: "Get Keyframes (read-back)",
     description:
-      "Read back the ACTUALLY-STORED keyframe values for a bone — the values, not what you intended. ALWAYS " +
-      "call this right after manage_keyframes / animation_copy_paste to confirm the write landed (silent " +
-      "write failures cost whole sessions otherwise). Returns per-channel [{time, values:[x,y,z], interpolation}].",
+      "Read back the ACTUALLY-STORED keyframe values — the values, not what you intended. One bone " +
+      "(`bone_name`), several (`bone_names`), or omit both for EVERY animated bone in one call. Use it after " +
+      "animation_copy_paste / create_animation, or to inspect an existing animation before editing it " +
+      "(manage_keyframes and set_keyframes already echo what they stored). Returns per-channel " +
+      "[{time, values:[x,y,z], interpolation}].",
     inputSchema: {
-      bone_name: z.string().describe("Bone/group name."),
+      bone_name: z.string().optional().describe("One bone/group name."),
+      bone_names: z.array(z.string()).optional().describe("Several bone names; omit both for every animated bone."),
       animation_id: z.string().optional().describe("Animation UUID or name. Default: the selected animation."),
       channel: z.enum(["rotation", "position", "scale"]).optional().describe("One channel, or omit for all three."),
     },
@@ -878,7 +929,11 @@ server.registerTool(
     let r: any;
     try { r = await sendToBlockbench("get_keyframes", args); } catch (e: any) { return fail(e?.message || String(e)); }
     if (r && r.ok === false) return fail(`get_keyframes failed: ${r.error}`);
-    return ok(JSON.stringify({ animation: r.animation, bone: r.bone, has_animator: r.has_animator, channels: r.channels }, null, 2));
+    return ok(
+      r.bones
+        ? JSON.stringify({ animation: r.animation, bones: r.bones, ...(r.not_found ? { not_found: r.not_found } : {}) }, null, 2)
+        : JSON.stringify({ animation: r.animation, bone: r.bone, has_animator: r.has_animator, channels: r.channels }, null, 2)
+    );
   }
 );
 
@@ -925,6 +980,29 @@ server.registerTool(
   },
   async (args) =>
     forward("modify_cube", { ...args, id: args.id ?? args.cube_name }, (r) => `Modified cube "${r.name}" (from [${r.from}] to [${r.to}]).${warningLines(r)}`)
+);
+
+server.registerTool(
+  "modify_cubes",
+  {
+    title: "Modify Cubes (batch)",
+    description:
+      "Edit MANY cubes in ONE call and ONE undo step — e.g. give every cube its own uv_offset, or resize a set " +
+      "of parts. Each entry takes the same fields as modify_cube (`id` plus what to change). All entries are " +
+      "validated first (existing cubes, unique names, valid vectors); if one is invalid nothing changes. " +
+      "Rotation is not accepted (group-only).",
+    inputSchema: {
+      cubes: z
+        .array(z.object(modifyCubeInputSchema))
+        .min(1)
+        .describe("One entry per cube: id + the fields to change (from/to/origin/name/uv_offset/autouv/…)."),
+    },
+  },
+  async (args) =>
+    forward("modify_cubes", { cubes: (args.cubes || []).map((c: any) => ({ ...c, id: c.id ?? c.cube_name })) }, (r) => {
+      const names = (r.cubes || []).map((c: any) => c.name);
+      return `Modified ${names.length} cube(s): ${names.slice(0, 30).join(", ")}${names.length > 30 ? ", …" : ""}.${warningLines(r)}`;
+    })
 );
 
 server.registerTool(
@@ -1908,6 +1986,40 @@ server.registerTool(
   async (args) =>
     forward("shade_cube", args, (r) =>
       `Shaded ${r.cubes} cube(s) (${r.painted}px) on "${r.texture}"${r.layer ? ` (layer ${r.layer})` : ""}. Ramp: ${(r.ramp || []).join(" ")}`
+    )
+);
+
+server.registerTool(
+  "shade_cubes",
+  {
+    title: "Shade Cubes (batch, exact colours)",
+    description:
+      "Texture a whole model in ONE call: a list of parts, each with its own exact colour, painted with the same " +
+      "clean directional shading as shade_cube, in a single texture edit and undo step. Each item: `cube_id` or " +
+      "`target` (group) + `color` (one hex) or `colors` (5 hex), optional `edge_color` / `sheen`. Items are " +
+      "validated first (nothing is painted if one is invalid) and painted in order. Run pack_uv + validate_uv first.",
+    inputSchema: {
+      items: z
+        .array(
+          z.object({
+            cube_id: z.string().optional().describe("One cube name/uuid."),
+            target: z.string().optional().describe("Group name → all its descendant cubes."),
+            color: z.string().optional().describe("One hex → clean hue-shifted ramp."),
+            colors: z.array(z.string()).min(5).max(5).optional().describe("5 hex [shadow → highlight]; overrides color."),
+            edge_color: z.string().optional().describe("Hex for the thin east/west faces (e.g. a blade edge)."),
+            sheen: z.boolean().optional().describe("Brighter centre stripe on the broad north/south faces."),
+          })
+        )
+        .min(1)
+        .describe("Parts to shade, in paint order."),
+      texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
+      layer: z.string().optional().describe("TextureLayer name to paint into (non-destructive; created if missing)."),
+    },
+  },
+  async (args) =>
+    forward("shade_cubes", args, (r) =>
+      `Shaded ${r.items} part(s) / ${r.cubes} cube(s) (${r.painted}px) on "${r.texture}"${r.layer ? ` (layer ${r.layer})` : ""}:\n` +
+      (r.results || []).map((x: any) => `  ${x.target}: ${x.cubes} cube(s), ${x.painted}px${x.painted ? "" : "  ⚠️ nothing painted — no UV region?"}`).join("\n")
     )
 );
 

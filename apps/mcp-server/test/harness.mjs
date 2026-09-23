@@ -97,6 +97,37 @@ export function createMockScene() {
       if (!input.data) return { ok: false, error: "data required" };
       return { ok: true, name: t.name, uuid: t.uuid, source: String(input.data).startsWith("data:image/") ? "data_url" : "path" };
     },
+    set_keyframes(input) {
+      const entries = input.keyframes || [];
+      if (!entries.length) return { ok: false, error: "keyframes[] is required" };
+      for (let i = 0; i < entries.length; i++) if (!findGroup(entries[i].bone)) return { ok: false, error: `keyframes[${i}]: bone "${entries[i].bone}" not found` };
+      let created = 0, updated = 0, cleared = 0;
+      if (input.clear_first) for (const key of new Set(entries.map((e) => `${e.bone}.${e.channel}`))) { cleared += (keyframes[key] || []).length; keyframes[key] = []; }
+      const touched = new Set();
+      for (const e of entries) {
+        const key = `${e.bone}.${e.channel}`;
+        const ch = (keyframes[key] ??= []);
+        const k = ch.find((x) => Math.abs(x.time - e.time) < 0.001);
+        if (k) { k.values = e.values; updated++; } else { ch.push({ time: e.time, values: e.values, interpolation: e.interpolation || "linear" }); created++; }
+        ch.sort((a, b) => a.time - b.time);
+        touched.add(key);
+      }
+      const stored = {};
+      for (const key of touched) stored[key] = keyframes[key].map((k) => ({ ...k }));
+      return { ok: true, animation: "animation.mock", created, updated, cleared, stored };
+    },
+    get_keyframes(input) {
+      const chans = input.channel ? [input.channel] : ["rotation", "position", "scale"];
+      const read = (bone) => Object.fromEntries(chans.map((c) => [c, (keyframes[`${bone}.${c}`] || []).map((k) => ({ ...k }))]));
+      if (input.bone_name && !input.bone_names) {
+        if (!findGroup(input.bone_name)) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+        return { ok: true, animation: "animation.mock", bone: input.bone_name, has_animator: true, channels: read(input.bone_name) };
+      }
+      const names = input.bone_names || [...new Set(Object.keys(keyframes).filter((k) => keyframes[k].length).map((k) => k.split(".")[0]))];
+      const bones = {}, not_found = [];
+      for (const n of names) { if (!findGroup(n)) not_found.push(n); else bones[n] = read(n); }
+      return { ok: true, animation: "animation.mock", bones, ...(not_found.length ? { not_found } : {}) };
+    },
     manage_keyframes(input) {
       if (!findGroup(input.bone_name)) return { ok: false, error: `Bone "${input.bone_name}" not found` };
       const ch = (keyframes[`${input.bone_name}.${input.channel}`] ??= []);
@@ -200,6 +231,27 @@ export function createMockScene() {
       if (input.name) c.name = input.name;
       if (input.origin) c.origin = input.origin;
       return { ok: true, name: c.name, from: c.from, to: c.to };
+    },
+    modify_cubes(input) {
+      const entries = input.cubes || [];
+      if (!entries.length) return { ok: false, error: "cubes[] is required" };
+      const seen = new Set();
+      for (let i = 0; i < entries.length; i++) {
+        const c = findCube(entries[i].id);
+        if (!c) return { ok: false, error: `cubes[${i}]: Cube "${entries[i].id}" not found` };
+        if (seen.has(c.uuid)) return { ok: false, error: `cubes[${i}]: cube "${c.name}" appears twice in the batch` };
+        seen.add(c.uuid);
+      }
+      const out = entries.map((e) => {
+        const c = findCube(e.id);
+        const from = e.from ?? c.from, to = e.to ?? c.to;
+        c.from = [0, 1, 2].map((i) => Math.min(from[i], to[i]));
+        c.to = [0, 1, 2].map((i) => Math.max(from[i], to[i]));
+        if (e.uv_offset) c.uv_offset = e.uv_offset;
+        if (e.name) c.name = e.name;
+        return { name: c.name, from: c.from, to: c.to, uv_offset: c.uv_offset };
+      });
+      return { ok: true, cubes: out };
     },
     delete_element(input) {
       const removeFrom = (nodes) => {
@@ -516,6 +568,21 @@ export function createMockScene() {
       let painted = 0; cubes.forEach((c) => { painted += Object.keys(c.faces || {}).length * 8; });
       const ramp = input.colors ? input.colors.slice(0, 5) : [input.color, input.color, input.color, input.color, input.color];
       return { ok: true, cubes: cubes.length, painted, texture: input.texture_id || "atlas", ramp, layer: input.layer || null };
+    },
+    shade_cubes(input) {
+      const items = input.items || [];
+      if (!items.length) return { ok: false, error: "items[] is required" };
+      const resolved = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        let cubes = [];
+        if (it.cube_id) { const c = findCube(it.cube_id); if (!c) return { ok: false, error: `items[${i}]: Cube "${it.cube_id}" not found.` }; cubes = [c]; }
+        else if (it.target) { const g = findGroup(it.target); if (!g) return { ok: false, error: `items[${i}]: "${it.target}" is not a group.` }; walk(g.children, (n) => { if (n.type === "cube") cubes.push(n); }); }
+        else return { ok: false, error: `items[${i}]: cube_id or target required` };
+        if (!it.color && !it.colors) return { ok: false, error: `items[${i}]: color or colors required` };
+        resolved.push({ target: it.cube_id || it.target, cubes: cubes.length, painted: cubes.length * 48 });
+      }
+      return { ok: true, items: resolved.length, cubes: resolved.reduce((a, r) => a + r.cubes, 0), painted: resolved.reduce((a, r) => a + r.painted, 0), texture: input.texture_id || "atlas", layer: input.layer || null, results: resolved };
     },
     get_bone_pose(input) {
       const g = findGroup(input.bone_name);

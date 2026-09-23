@@ -1072,6 +1072,93 @@ const options: PluginOptions = {
       }
     };
 
+    // Batch keyframe writer: many bones × channels × times in ONE call and ONE
+    // undo step. Upsert — a keyframe already at that time (±0.001 s) is
+    // overwritten, otherwise one is created. Values are the STORED (Blockbench-
+    // internal) values, the same convention as manage_keyframes / get_keyframes.
+    // Everything is validated first; a failure mid-write rolls the batch back.
+    const KEYFRAME_CHANNELS = ['rotation', 'position', 'scale'];
+    const isKeyframeValue = (v: any): boolean =>
+      (typeof v === 'number' && isFinite(v)) || typeof v === 'string' ||
+      (Array.isArray(v) && v.length >= 1 && v.length <= 3 && v.every((n) => (typeof n === 'number' && isFinite(n)) || typeof n === 'string'));
+    const setKeyframes = (input: any): any => {
+      try {
+        if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
+        ensureAnimationMode();
+        const animation = findAnimation(input.animation_id);
+        if (!animation) return { ok: false, error: 'No animation found or selected. Pass animation_id.' };
+        const entries: any[] = Array.isArray(input.keyframes) ? input.keyframes : [];
+        if (!entries.length) return { ok: false, error: 'keyframes[] is required (each: bone, channel, time, values).' };
+
+        const groups = new Map<string, any>();
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i] || {};
+          if (!e.bone) return { ok: false, error: `keyframes[${i}]: bone is required.` };
+          if (!KEYFRAME_CHANNELS.includes(e.channel)) return { ok: false, error: `keyframes[${i}]: channel must be rotation, position or scale.` };
+          if (typeof e.time !== 'number' || !isFinite(e.time) || e.time < 0) return { ok: false, error: `keyframes[${i}]: time must be a number >= 0 (seconds).` };
+          if (!isKeyframeValue(e.values)) return { ok: false, error: `keyframes[${i}]: values must be [x,y,z] (or one number for uniform scale).` };
+          if (!groups.has(e.bone)) {
+            const g = findGroupByName(e.bone);
+            if (!g) return { ok: false, error: `keyframes[${i}]: bone "${e.bone}" not found (get_scene_tree).` };
+            groups.set(e.bone, g);
+          }
+        }
+
+        const animatorFor = (bone: string): any => {
+          const g = groups.get(bone);
+          let an = animation.animators[g.uuid];
+          if (!an) { an = new BoneAnimator(g.uuid, animation, bone); animation.animators[g.uuid] = an; }
+          return an;
+        };
+
+        let created = 0, updated = 0, cleared = 0;
+        const touched = new Map<string, { animator: any; channel: string }>();
+        let failure: string | null = null;
+        Undo.initEdit({ animations: [animation], keyframes: [] } as any);
+        try {
+          if (input.clear_first) {
+            // Rewrite mode: empty every bone/channel pair named in the batch first.
+            const pairs = new Map<string, { bone: string; channel: string }>();
+            for (const e of entries) pairs.set(`${e.bone}.${e.channel}`, { bone: e.bone, channel: e.channel });
+            for (const { bone, channel } of pairs.values()) {
+              const an = animatorFor(bone);
+              for (const k of [...(an[channel] || [])]) { k.remove(); cleared++; }
+            }
+          }
+          for (const e of entries) {
+            const an = animatorFor(e.bone);
+            let kf = (an[e.channel] || []).find((k: any) => Math.abs(k.time - e.time) < 0.001);
+            if (kf) updated++;
+            else {
+              kf = an.createKeyframe(undefined, e.time, e.channel, false);
+              if (!kf) throw new Error(`could not create a keyframe at ${e.bone}.${e.channel} t=${e.time}`);
+              created++;
+            }
+            setKeyframeValues(kf, e.values); // explicit — createKeyframe ignores `.values`
+            if (e.interpolation) kf.interpolation = e.interpolation;
+            touched.set(`${e.bone}.${e.channel}`, { animator: an, channel: e.channel });
+          }
+        } catch (err: any) {
+          failure = err?.message || String(err);
+        }
+        if (failure) {
+          if (typeof (Undo as any).cancelEdit === 'function') (Undo as any).cancelEdit();
+          else Undo.finishEdit('Set keyframes via MCP (failed)');
+          return { ok: false, error: `Batch failed and was rolled back (nothing changed): ${failure}` };
+        }
+        Undo.finishEdit('Set keyframes via MCP');
+        Animator.preview();
+
+        const stored: Record<string, any[]> = {};
+        for (const [key, t] of touched) stored[key] = readChannel(t.animator, t.channel);
+        logToHistory(`set_keyframes: ${created} created, ${updated} updated, ${cleared} cleared on "${animation.name}"`);
+        return { ok: true, animation: animation.name, created, updated, cleared, stored };
+      } catch (err: any) {
+        console.error('[MCP Plugin] setKeyframes failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
     // Curve/easing control over existing keyframes.
     const animationGraphEditor = (input: any): any => {
       try {
@@ -1466,18 +1553,46 @@ const options: PluginOptions = {
 
     // Read back the ACTUAL stored keyframe values for a bone (verify writes, don't
     // guess). Returns per-channel [{time, values:[x,y,z], interpolation}].
+    // Read back stored keyframes: one bone (bone_name), several (bone_names), or —
+    // with neither — every bone that has keyframes in the animation. The multi
+    // form replaces the per-bone loop / risky_eval dumps.
     const getKeyframes = (input: any): any => {
       try {
         if (!animationsSupported()) return { ok: false, error: 'Current format does not support animations.' };
         const animation = findAnimation(input.animation_id);
         if (!animation) return { ok: false, error: 'No animation found or selected.' };
-        const group = findGroupByName(input.bone_name);
-        if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
-        const animator = animation.animators[group.uuid];
-        const chans = input.channel ? [input.channel] : ['rotation', 'position', 'scale'];
-        const channels: any = {};
-        for (const ch of chans) channels[ch] = animator ? readChannel(animator, ch) : [];
-        return { ok: true, animation: animation.name, bone: input.bone_name, has_animator: !!animator, channels };
+        const chans = input.channel ? [input.channel] : KEYFRAME_CHANNELS;
+
+        if (input.bone_name && !Array.isArray(input.bone_names)) {
+          const group = findGroupByName(input.bone_name);
+          if (!group) return { ok: false, error: `Bone/group "${input.bone_name}" not found.` };
+          const animator = animation.animators[group.uuid];
+          const channels: any = {};
+          for (const ch of chans) channels[ch] = animator ? readChannel(animator, ch) : [];
+          return { ok: true, animation: animation.name, bone: input.bone_name, has_animator: !!animator, channels };
+        }
+
+        const bones: Record<string, any> = {};
+        const notFound: string[] = [];
+        if (Array.isArray(input.bone_names)) {
+          for (const name of input.bone_names) {
+            const group = findGroupByName(name);
+            if (!group) { notFound.push(name); continue; }
+            const animator = animation.animators[group.uuid];
+            const channels: any = {};
+            for (const ch of chans) channels[ch] = animator ? readChannel(animator, ch) : [];
+            bones[name] = channels;
+          }
+        } else {
+          // Every animated bone; only channels that actually hold keyframes.
+          for (const an of Object.values(animation.animators || {}) as any[]) {
+            if (!an || !an.name || (an.constructor && an.constructor.name === 'EffectAnimator')) continue;
+            const channels: any = {};
+            for (const ch of chans) { const kfs = readChannel(an, ch); if (kfs.length) channels[ch] = kfs; }
+            if (Object.keys(channels).length) bones[an.name] = channels;
+          }
+        }
+        return { ok: true, animation: animation.name, bones, ...(notFound.length ? { not_found: notFound } : {}) };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -1546,38 +1661,39 @@ const options: PluginOptions = {
     const findGroupByNameOrUuid = (id: string): any =>
       allGroups().find((g: any) => g.uuid === id || g.name === id);
 
-    // Modify an existing cube. Rotation is deliberately NOT accepted — rotation
-    // stays group-only (rule #1); use a parent bone instead.
-    const modifyCube = (input: any): any => {
-      try {
-        if (!hasProject()) return { ok: false, error: 'No project open.' };
-        const id = input.id || input.cube_name;
-        if (!id) return { ok: false, error: 'id (cube name or uuid) is required. Deprecated alias cube_name is also accepted.' };
-        const cube = findCubeByNameOrUuid(id);
-        if (!cube) return { ok: false, error: `Cube "${id}" not found. Use get_scene_tree to inspect.` };
+    // Validate one cube edit and compute the properties to apply, WITHOUT touching
+    // the model — shared by modify_cube and the all-or-nothing modify_cubes batch.
+    // Rotation is deliberately NOT accepted — rotation stays group-only (rule #1).
+    const planCubeModification = (input: any): { error: string } | { cube: any; props: any; warning: string | null } => {
+      const id = input.id || input.cube_name;
+      if (!id) return { error: 'id (cube name or uuid) is required. Deprecated alias cube_name is also accepted.' };
+      const cube = findCubeByNameOrUuid(id);
+      if (!cube) return { error: `Cube "${id}" not found. Use get_scene_tree to inspect.` };
 
-        for (const key of ['from', 'to', 'origin'] as const) {
-          if (input[key] !== undefined && !isVec3(input[key])) {
-            return { ok: false, error: `'${key}' must be 3 finite numbers [x,y,z] (rule #5).` };
-          }
+      for (const key of ['from', 'to', 'origin'] as const) {
+        if (input[key] !== undefined && !isVec3(input[key])) {
+          return { error: `'${key}' must be 3 finite numbers [x,y,z] (rule #5).` };
         }
-        if (input.name && input.name !== cube.name && nameTaken(input.name)) {
-          return { ok: false, error: `Name "${input.name}" already exists (rule #4).` };
-        }
+      }
+      if (input.uv_offset !== undefined && !isVec2(input.uv_offset)) return { error: "'uv_offset' must be 2 finite numbers [u,v]." };
+      if (input.name && input.name !== cube.name && nameTaken(input.name)) {
+        return { error: `Name "${input.name}" already exists (rule #4).` };
+      }
 
-        // Normalize corners if either is being changed (rule #5: never inverted).
-        let from = input.from !== undefined ? input.from : [...cube.from];
-        let to = input.to !== undefined ? input.to : [...cube.to];
-        const nFrom = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
-        const nTo = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
-        // Only warn when the geometry is being changed — not on every UV/name edit
-        // of an existing flat cube.
-        const sizeWarning = (input.from !== undefined || input.to !== undefined)
-          ? thinCubeWarning(nFrom, nTo, `Cube "${cube.name}"`) : null;
+      // Normalize corners if either is being changed (rule #5: never inverted).
+      const from = input.from !== undefined ? input.from : [...cube.from];
+      const to = input.to !== undefined ? input.to : [...cube.to];
+      const nFrom = [Math.min(from[0], to[0]), Math.min(from[1], to[1]), Math.min(from[2], to[2])];
+      const nTo = [Math.max(from[0], to[0]), Math.max(from[1], to[1]), Math.max(from[2], to[2])];
+      // Only warn when the geometry is being changed — not on every UV/name edit
+      // of an existing flat cube.
+      const warning = (input.from !== undefined || input.to !== undefined)
+        ? thinCubeWarning(nFrom, nTo, `Cube "${cube.name}"`) : null;
 
-        Undo.initEdit({ elements: [cube], outliner: true });
-
-        cube.extend({
+      return {
+        cube,
+        warning,
+        props: {
           name: input.name ?? cube.name,
           from: nFrom,
           to: nTo,
@@ -1591,15 +1707,69 @@ const options: PluginOptions = {
           autouv: input.autouv !== undefined ? (Number(input.autouv) as 0 | 1 | 2) : (input.uv_offset !== undefined ? 0 : cube.autouv),
           mirror_uv: input.mirror_uv ?? cube.mirror_uv,
           uv_offset: input.uv_offset ?? cube.uv_offset,
-        });
+        },
+      };
+    };
 
+    const modifyCube = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const plan = planCubeModification(input);
+        if ('error' in plan) return { ok: false, error: plan.error };
+        const { cube, props, warning } = plan;
+
+        Undo.initEdit({ elements: [cube], outliner: true });
+        cube.extend(props);
         Undo.finishEdit('Modify cube via MCP', { elements: [cube] });
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`modified cube "${cube.name}"`);
-        return { ok: true, name: cube.name, from: [...cube.from], to: [...cube.to], ...(sizeWarning ? { warning: sizeWarning } : {}) };
+        return { ok: true, name: cube.name, from: [...cube.from], to: [...cube.to], ...(warning ? { warning } : {}) };
       } catch (err: any) {
         console.error('[MCP Plugin] modifyCube failed:', err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    };
+
+    // Edit many cubes in ONE call and ONE undo step (e.g. assign every cube's
+    // uv_offset, or resize a set of parts). All entries are validated first, so a
+    // bad entry changes nothing.
+    const modifyCubes = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const entries: any[] = Array.isArray(input.cubes) ? input.cubes : [];
+        if (!entries.length) return { ok: false, error: 'cubes[] is required (each entry: id + the fields to change).' };
+
+        const plans: Array<{ cube: any; props: any; warning: string | null }> = [];
+        const seenCubes = new Set<string>();
+        const newNames = new Set<string>();
+        for (let i = 0; i < entries.length; i++) {
+          const plan = planCubeModification(entries[i] || {});
+          if ('error' in plan) return { ok: false, error: `cubes[${i}]: ${plan.error}` };
+          if (seenCubes.has(plan.cube.uuid)) return { ok: false, error: `cubes[${i}]: cube "${plan.cube.name}" appears twice in the batch.` };
+          seenCubes.add(plan.cube.uuid);
+          if (plan.props.name !== plan.cube.name) {
+            if (newNames.has(plan.props.name)) return { ok: false, error: `cubes[${i}]: new name "${plan.props.name}" is used twice in the batch (rule #4).` };
+            newNames.add(plan.props.name);
+          }
+          plans.push(plan);
+        }
+
+        const cubes = plans.map((p) => p.cube);
+        Undo.initEdit({ elements: cubes, outliner: true } as any);
+        for (const p of plans) p.cube.extend(p.props);
+        Undo.finishEdit('Modify cubes via MCP', { elements: cubes } as any);
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        const warnings = plans.map((p) => p.warning).filter(Boolean) as string[];
+        logToHistory(`modified ${cubes.length} cube(s) in one batch`);
+        return {
+          ok: true,
+          cubes: plans.map((p) => ({ name: p.cube.name, from: [...p.cube.from], to: [...p.cube.to], uv_offset: p.cube.uv_offset ? [...p.cube.uv_offset] : undefined })),
+          ...(warnings.length ? { warnings } : {}),
+        };
+      } catch (err: any) {
+        console.error('[MCP Plugin] modifyCubes failed:', err);
         return { ok: false, error: err?.message || String(err) };
       }
     };
@@ -4092,61 +4262,115 @@ const options: PluginOptions = {
     // optional dark cutting-edge colour and a centre sheen on broad faces. Reads
     // each face's packed UV rect, so run pack_uv + validate_uv first.
     // ---------------------------------------------------------------------
+    type ShadeSpec = { cubes: any[]; ramp: string[]; edgeColor: string | null; sheen: boolean; label: string };
+
+    // Resolve one shade request (cube_id or group target + colour) without painting.
+    const resolveShadeSpec = (input: any): { error: string } | ShadeSpec => {
+      let cubes: any[] = [];
+      let label: string;
+      if (input.cube_id) {
+        const c = findCubeByNameOrUuid(input.cube_id);
+        if (!c) return { error: `Cube "${input.cube_id}" not found.` };
+        cubes = [c]; label = c.name;
+      } else if (input.target) {
+        const g = findGroupByName(input.target); if (!g) return { error: `"${input.target}" is not a group.` };
+        const collect = (grp: any) => { for (const ch of grp.children || []) { if (typeof Cube !== 'undefined' && ch instanceof Cube) cubes.push(ch); else if (typeof Group !== 'undefined' && ch instanceof Group) collect(ch); } };
+        collect(g); if (!cubes.length) return { error: `Group "${input.target}" has no descendant cubes.` };
+        label = input.target;
+      } else return { error: 'Provide cube_id (one cube) or target (a group of cubes).' };
+
+      let ramp: string[];
+      if (Array.isArray(input.colors) && input.colors.length >= 5) ramp = input.colors.slice(0, 5).map((c: any) => String(c));
+      else if (input.color) ramp = rampFromBase(String(input.color));
+      else return { error: 'Provide color (one hex → auto ramp) or colors (5 hex shadow→highlight).' };
+      return { cubes, ramp, edgeColor: input.edge_color ? String(input.edge_color) : null, sheen: !!input.sheen, label };
+    };
+
+    // Paint one spec's cubes into an open texture canvas; returns pixels painted.
+    const paintShadeSpec = (ctx: any, TW: number, TH: number, spec: ShadeSpec): number => {
+      const { cubes, ramp, edgeColor, sheen } = spec;
+      let painted = 0;
+      for (const cube of cubes) {
+        for (const fk of Object.keys(cube.faces || {})) {
+          const uv = cube.faces[fk] && cube.faces[fk].uv;
+          if (!uv || uv.length < 4) continue;
+          const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
+          const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
+          const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
+          const isEdge = (fk === 'east' || fk === 'west');
+          const isBroad = (fk === 'north' || fk === 'south');
+          for (let ly = 0; ly < h; ly++) for (let lx = 0; lx < w; lx++) {
+            const px = x0 + lx, py = y0 + ly; if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
+            if (isEdge && edgeColor) { ctx.fillStyle = edgeColor; ctx.fillRect(px, py, 1, 1); painted++; continue; }
+            let idx: number;
+            if (fk === 'up') idx = 4;
+            else if (fk === 'down') idx = 0;
+            else {
+              const t = h > 1 ? ly / (h - 1) : 0;          // 0 top → 1 bottom
+              idx = t < 0.30 ? 3 : t < 0.72 ? 2 : 1;       // clean bands, NO noise
+              if (isEdge) idx = Math.max(0, idx - 1);      // thin edges a touch darker
+              if (sheen && isBroad && w >= 3 && Math.abs(lx - (w - 1) / 2) < 0.6) idx = Math.min(4, idx + 1);
+            }
+            ctx.fillStyle = ramp[idx]; ctx.fillRect(px, py, 1, 1); painted++;
+          }
+        }
+      }
+      return painted;
+    };
+
     const shadeCube = (input: any): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
-        let cubes: any[] = [];
-        if (input.cube_id) { const c = findCubeByNameOrUuid(input.cube_id); if (!c) return { ok: false, error: `Cube "${input.cube_id}" not found.` }; cubes = [c]; }
-        else if (input.target) {
-          const g = findGroupByName(input.target); if (!g) return { ok: false, error: `"${input.target}" is not a group.` };
-          const collect = (grp: any) => { for (const ch of grp.children || []) { if (typeof Cube !== 'undefined' && ch instanceof Cube) cubes.push(ch); else if (typeof Group !== 'undefined' && ch instanceof Group) collect(ch); } };
-          collect(g); if (!cubes.length) return { ok: false, error: `Group "${input.target}" has no descendant cubes.` };
-        } else return { ok: false, error: 'Provide cube_id (one cube) or target (a group of cubes).' };
-
-        let ramp: string[];
-        if (Array.isArray(input.colors) && input.colors.length >= 5) ramp = input.colors.slice(0, 5).map((c: any) => String(c));
-        else if (input.color) ramp = rampFromBase(String(input.color));
-        else return { ok: false, error: 'Provide color (one hex → auto ramp) or colors (5 hex shadow→highlight).' };
-        const edgeColor = input.edge_color ? String(input.edge_color) : null;
-        const sheen = !!input.sheen;
+        const spec = resolveShadeSpec(input);
+        if ('error' in spec) return { ok: false, error: spec.error };
 
         const texture = getAndActivateTexture(input.texture_id);
         const layer = resolveTextureLayer(texture, input.layer);
         let painted = 0;
         Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
-          const ctx = canvas.getContext('2d');
-          const TW = canvas.width, TH = canvas.height;
-          for (const cube of cubes) {
-            for (const fk of Object.keys(cube.faces || {})) {
-              const uv = cube.faces[fk] && cube.faces[fk].uv;
-              if (!uv || uv.length < 4) continue;
-              const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
-              const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
-              const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
-              const isEdge = (fk === 'east' || fk === 'west');
-              const isBroad = (fk === 'north' || fk === 'south');
-              for (let ly = 0; ly < h; ly++) for (let lx = 0; lx < w; lx++) {
-                const px = x0 + lx, py = y0 + ly; if (px < 0 || py < 0 || px >= TW || py >= TH) continue;
-                if (isEdge && edgeColor) { ctx.fillStyle = edgeColor; ctx.fillRect(px, py, 1, 1); painted++; continue; }
-                let idx: number;
-                if (fk === 'up') idx = 4;
-                else if (fk === 'down') idx = 0;
-                else {
-                  const t = h > 1 ? ly / (h - 1) : 0;          // 0 top → 1 bottom
-                  idx = t < 0.30 ? 3 : t < 0.72 ? 2 : 1;       // clean bands, NO noise
-                  if (isEdge) idx = Math.max(0, idx - 1);      // thin edges a touch darker
-                  if (sheen && isBroad && w >= 3 && Math.abs(lx - (w - 1) / 2) < 0.6) idx = Math.min(4, idx + 1);
-                }
-                ctx.fillStyle = ramp[idx]; ctx.fillRect(px, py, 1, 1); painted++;
-              }
-            }
-          }
+          painted = paintShadeSpec(canvas.getContext('2d'), canvas.width, canvas.height, spec);
         }, { edit_name: 'Shade cube' });
         Undo.finishEdit('Shade cube via MCP');
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-        logToHistory(`shaded ${cubes.length} cube(s), ${painted}px on "${texture.name}"`);
-        return { ok: true, cubes: cubes.length, painted, texture: texture.name, ramp, layer: layer ? layer.name : null };
+        logToHistory(`shaded ${spec.cubes.length} cube(s), ${painted}px on "${texture.name}"`);
+        return { ok: true, cubes: spec.cubes.length, painted, texture: texture.name, ramp: spec.ramp, layer: layer ? layer.name : null };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // Texture a whole model in ONE call: many parts, each with its own colour,
+    // painted in a single texture edit and undo step. Items are validated first
+    // (all-or-nothing) and painted in order, so a later item wins where two overlap.
+    const shadeCubes = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const items: any[] = Array.isArray(input.items) ? input.items : [];
+        if (!items.length) return { ok: false, error: 'items[] is required (each: cube_id or target, plus color or colors).' };
+        const specs: ShadeSpec[] = [];
+        for (let i = 0; i < items.length; i++) {
+          const spec = resolveShadeSpec(items[i] || {});
+          if ('error' in spec) return { ok: false, error: `items[${i}]: ${spec.error}` };
+          specs.push(spec);
+        }
+
+        const texture = getAndActivateTexture(input.texture_id);
+        const layer = resolveTextureLayer(texture, input.layer);
+        const perItem: number[] = [];
+        Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
+        texture.edit((canvas: any) => {
+          const ctx = canvas.getContext('2d');
+          for (const spec of specs) perItem.push(paintShadeSpec(ctx, canvas.width, canvas.height, spec));
+        }, { edit_name: 'Shade cubes' });
+        Undo.finishEdit('Shade cubes via MCP');
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+
+        const cubeCount = specs.reduce((a, s) => a + s.cubes.length, 0);
+        const painted = perItem.reduce((a, n) => a + n, 0);
+        logToHistory(`shaded ${specs.length} item(s) / ${cubeCount} cube(s), ${painted}px on "${texture.name}"`);
+        return {
+          ok: true, items: specs.length, cubes: cubeCount, painted, texture: texture.name, layer: layer ? layer.name : null,
+          results: specs.map((s, i) => ({ target: s.label, cubes: s.cubes.length, painted: perItem[i] })),
+        };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -4186,9 +4410,11 @@ const options: PluginOptions = {
         animation_copy_paste: animationCopyPaste,
         list_animations: listAnimations,
         manage_animation: manageAnimation,
+        set_keyframes: setKeyframes,
         get_keyframes: getKeyframes,
         get_bone_pose: getBonePose,
         modify_cube: modifyCube,
+        modify_cubes: modifyCubes,
         delete_element: deleteElement,
         reparent_element: reparentElement,
         list_export_formats: listExportFormats,
@@ -4280,6 +4506,7 @@ const options: PluginOptions = {
         pack_uv: packUv,
         validate_uv: validateUv,
         shade_cube: shadeCube,
+        shade_cubes: shadeCubes,
       };
       pluginToolCount = Object.keys(handlers).length;
 

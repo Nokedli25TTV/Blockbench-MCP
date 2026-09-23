@@ -15,9 +15,11 @@ export type ToolType =
   | "animation_copy_paste"
   | "list_animations"
   | "manage_animation"
+  | "set_keyframes"
   | "get_keyframes"
   | "get_bone_pose"
   | "modify_cube"
+  | "modify_cubes"
   | "delete_element"
   | "reparent_element"
   | "list_export_formats"
@@ -109,6 +111,7 @@ export type ToolType =
   | "pack_uv"
   | "validate_uv"
   | "shade_cube"
+  | "shade_cubes"
   | "list_palettes"
   | "get_palette";
 

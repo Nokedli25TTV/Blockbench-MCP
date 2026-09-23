@@ -128,6 +128,31 @@ try {
   const repBad = await h.call("replace_texture", { texture: "missing_tex", data: "C:/x.png" });
   check("replace_texture on an unknown texture fails with a code", repBad.isError && /^\[NOT_FOUND\]/.test(repBad.text), repBad.text);
 
+  console.log("\n--- Round 2: batch tools ---");
+  const sk = await h.call("set_keyframes", { keyframes: [
+    { bone: "crystal_x", channel: "rotation", time: 0, values: [0, 0, 0] },
+    { bone: "crystal_x", channel: "rotation", time: 1, values: [10, 0, 0] },
+    { bone: "crystal_y", channel: "position", time: 0.5, values: [0, 2, 0] },
+  ] });
+  check("set_keyframes writes several bones/channels in one call", !sk.isError && /crystal_x\.rotation: t=0 \[0, 0, 0\] · t=1 \[10, 0, 0\]/.test(sk.text) && /crystal_y\.position: t=0\.5 \[0, 2, 0\]/.test(sk.text), sk.text);
+  check("set_keyframes upserts by time (1 created, 2 updated)", /1 created, 2 updated/.test(sk.text), sk.text);
+  const skBad = await h.call("set_keyframes", { keyframes: [
+    { bone: "crystal_x", channel: "rotation", time: 2, values: [1, 0, 0] },
+    { bone: "no_such_bone", channel: "rotation", time: 0, values: [0, 0, 0] },
+  ] });
+  const afterBad = JSON.parse((await h.call("get_keyframes", { bone_name: "crystal_x", channel: "rotation" })).text);
+  check("set_keyframes is all-or-nothing (a bad bone writes nothing)", skBad.isError && afterBad.channels.rotation.length === 2, skBad.text);
+  const gkAll = JSON.parse((await h.call("get_keyframes", {})).text);
+  check("get_keyframes with no bone returns every animated bone", !!gkAll.bones?.crystal_x && !!gkAll.bones?.crystal_y, JSON.stringify(Object.keys(gkAll.bones || {})));
+  const mc = await h.call("modify_cubes", { cubes: [{ id: "grip", uv_offset: [0, 0] }, { id: "pommel", uv_offset: [8, 4] }] });
+  check("modify_cubes edits several cubes in one call", !mc.isError && /Modified 2 cube/.test(mc.text) && h.mock.findCube("pommel").uv_offset[1] === 4, mc.text);
+  const mcBad = await h.call("modify_cubes", { cubes: [{ id: "grip", uv_offset: [4, 4] }, { id: "missing_cube" }] });
+  check("modify_cubes is all-or-nothing", mcBad.isError && h.mock.findCube("grip").uv_offset[0] === 0, mcBad.text);
+  const sc = await h.call("shade_cubes", { items: [{ cube_id: "grip", color: "#5b3a1d" }, { target: "handle_root", color: "#d6b13a" }] });
+  check("shade_cubes paints several parts in one call", !sc.isError && /2 part\(s\)/.test(sc.text) && /grip: 1 cube/.test(sc.text), sc.text);
+  const scBad = await h.call("shade_cubes", { items: [{ cube_id: "grip", color: "#ffffff" }, { cube_id: "ghost", color: "#000000" }] });
+  check("shade_cubes rejects the whole batch on a bad item", scBad.isError && /items\[1\]/.test(scBad.text), scBad.text);
+
   console.log("\n--- Validation (expected PASS) ---");
   const v1 = await h.call("validate_model");
   console.log(v1.text);
@@ -158,7 +183,7 @@ try {
     const defs = await g.listToolDefs();
     const names = defs.map((t) => t.name);
     console.log(`   full: ${tools.length} tools, geckolib: ${names.length} tools`);
-    check("geckolib profile keeps the core tools", ["create_cubes", "get_scene_tree", "pack_uv", "manage_animation", "create_project", "replace_texture"].every((t) => names.includes(t)));
+    check("geckolib profile keeps the core tools", ["create_cubes", "get_scene_tree", "pack_uv", "manage_animation", "create_project", "replace_texture", "set_keyframes", "modify_cubes", "shade_cubes"].every((t) => names.includes(t)));
     check("geckolib profile drops mesh/armature/PBR/brush tools", !["create_sphere", "add_armature", "create_pbr_material", "paint_with_brush"].some((t) => names.includes(t)));
     check("geckolib profile loads exactly 50 fewer tools than full", tools.length - names.length === 50, `${tools.length} - ${names.length}`);
     const ann = (n) => defs.find((t) => t.name === n)?.annotations || {};
