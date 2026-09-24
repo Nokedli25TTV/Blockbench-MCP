@@ -10,9 +10,10 @@ directional light, ambient occlusion, and texture noise. This is a HARD workflow
 by the tools.
 
 **Base first, details by hand.** `shade_cubes` bakes the base in one call from your EXACT colours:
-hue-shifted 7-shade ramps, light from above, dithered gradients (no flat bands), lit edges, contact
-shadow and a per-part `material` pattern (fur, skin, leather, cloth, wood, planks, stone, metal,
-gem, plant). Then HAND-PAINT what makes the model readable — eyes, mouth, belts, trims, scratches,
+even hue-shifted palettes, light from above, soft gradients (no flat bands, no noise), lit edges,
+contact shadow and a per-part `material` that paints structure (e.g. `dungeon_stone`, `crystal`,
+`monster_fur`, `ancient_metal`, `wavy_wood`, `magma`, `moss`, `water`, `leather`, `ice`; see the
+texturing skill for the full list). `smoothing` 0–1 trades grain for clean clusters. Then HAND-PAINT what makes the model readable — eyes, mouth, belts, trims, scratches,
 glowing runes — with `paint_pixel_matrix` (and `draw_shape_tool` / `paint_fill_tool`), following
 the recipes below. Workflow: `pack_uv` → `validate_uv` → `shade_cubes` → know each cube's UV
 region → paint the details → screenshot.

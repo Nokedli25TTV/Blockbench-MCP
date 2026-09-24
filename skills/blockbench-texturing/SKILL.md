@@ -21,13 +21,17 @@ Create and paint textures for 3D models using Blockbench MCP tools.
    `layers: true` for non-destructive base/shade/highlight passes.
 5. **`apply_texture`** on a cube, mesh, or a whole **group** (textures every descendant in one call).
 6. **Texture each part — `shade_cubes` / `shade_cube`.** From your EXACT colour they paint shaded pixel
-   art: a 7-shade hue-shifted ramp (your colour in the middle), light from above (top face bright,
-   sides a smooth dithered top→bottom gradient, bottom in shade), lit top edges and a contact shadow at
-   the bottom, and a **`material`** pattern so neighbouring pixels vary: `generic` (default), `fur`,
-   `skin`, `leather`, `cloth`, `wood` (grain along the long axis), `planks`, `stone`, `metal` (specular
-   streak), `gem` (facets), `plant`. `detail` (0–2) sets the pattern strength (0 = gradient only),
-   `lighting` (0–2) the light/shadow strength. Each cube gets its own seed, so repeated parts don't
-   look stamped. Use `target` (a group) to shade all its cubes, `edge_color` for a dark cutting edge,
+   art: an even, hue-shifted palette built around your colour (OKLab), light from above (top bright,
+   sides a soft top→bottom gradient, lit rim, contact shadow) and a **`material`** that paints real
+   structure: `generic` (default), `fur`, `skin`, `leather` (stitches, worn edges), `cloth`, `wood`,
+   `planks`, `stone`, `metal`, `gem`, `plant`, `dungeon_stone` (blocks, bevels, cracks), `crystal`
+   (glowing core, sharp facets), `monster_fur` (clear locks), `ancient_metal` (scratches, rust at the
+   edges), `wavy_wood` (flowing grain, growth rings on end faces), `magma` (heat + dark crust),
+   `moss` (big saturated patches, tufts), `water` (depth gradient, waves), `ice` (fractures, glints).
+   **`smoothing`** (0–1) runs from grainy dithered pixel art (0) to clean colour clusters and soft
+   gradients (1); every material has a sensible default (~0.6), so leave it out unless asked.
+   `detail` (0–2) sets the pattern strength, `lighting` (0–2) the light/shadow strength. Each cube
+   gets its own seed, so repeated parts don't look stamped. Use `target` (a group) to shade all its cubes, `edge_color` for a dark cutting edge,
    `sheen` for a blade highlight, `colors` (3–9 hex, dark → light) for a hand-picked ramp.
    **Texture the whole model in ONE call with `shade_cubes`** — `items=[{cube_id|target, color,
    material?, …}, …]` paints every part in one texture edit and one undo step (all-or-nothing; items
@@ -55,7 +59,7 @@ offset sticks; with `autouv:1` Blockbench re-collapses it to `[0,0]`).
 | `apply_texture` | Apply texture to a cube/mesh/group (`apply_mode`: blank/all/none) |
 | `pack_uv` | Pack each cube's UV into its own region + fit the texture (run before painting) |
 | `validate_uv` | Check UVs (overlap/oob) before painting |
-| `shade_cube` | **Shade a cube's faces from ONE exact hex** — dithered gradients, lit edges, a `material` pattern (fur, stone, wood…) |
+| `shade_cube` | **Shade a cube's faces from ONE exact hex** — soft gradients, lit edges, a `material` (fur, stone, dungeon_stone, crystal, magma…), `smoothing` |
 | `shade_cubes` | **Batch `shade_cube`** — many parts, each its own colour, one call / one undo step |
 | `modify_cubes` | Batch cube edits, e.g. every cube's `uv_offset` in one call |
 

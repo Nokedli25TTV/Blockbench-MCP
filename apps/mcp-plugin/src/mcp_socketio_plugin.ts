@@ -4441,8 +4441,13 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     // packed UV rect, so run pack_uv + validate_uv first.
     // ---------------------------------------------------------------------
     type ShadeSpec = {
-      cubes: any[]; ramp: string[]; edgeRamp: string[] | null; sheen: boolean; label: string;
-      material: Material; detail: number; lighting: number;
+      cubes: any[]; label: string;
+      /** The exact colour (the painter builds the material's palettes from it) … */
+      color: string | null;
+      /** … or a hand-picked palette, dark → light. `ramp` is what the reply reports. */
+      given: string[] | null; ramp: string[];
+      edgeColor: string | null; sheen: boolean;
+      material: Material; detail: number; lighting: number; smoothing: number | undefined;
     };
 
     // Resolve one shade request (cube_id or group target + colour) without painting.
@@ -4460,21 +4465,23 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         label = input.target;
       } else return { error: 'Provide cube_id (one cube) or target (a group of cubes).' };
 
-      let ramp: string[];
-      if (Array.isArray(input.colors) && input.colors.length >= 3) ramp = input.colors.slice(0, 9).map((c: any) => String(c));
-      else if (input.color) ramp = rampFromBase7(String(input.color));
-      else return { error: 'Provide color (one hex → auto ramp) or colors (3–9 hex, dark → light).' };
+      let given: string[] | null = null;
+      if (Array.isArray(input.colors) && input.colors.length >= 3) given = input.colors.slice(0, 9).map((c: any) => String(c));
+      else if (!input.color) return { error: 'Provide color (one hex → auto palette) or colors (3–9 hex, dark → light).' };
       if (input.material !== undefined && !(MATERIALS as readonly string[]).includes(input.material)) {
         return { error: `Unknown material "${input.material}". Use one of: ${MATERIALS.join(', ')}.` };
       }
       const level = (v: any, fallback: number) => (typeof v === 'number' && isFinite(v) ? Math.max(0, Math.min(2, v)) : fallback);
+      const color = given ? null : String(input.color);
       return {
-        cubes, ramp, label,
-        edgeRamp: input.edge_color ? rampFromBase7(String(input.edge_color)) : null,
+        cubes, label, color, given,
+        ramp: given || rampFromBase7(color!),
+        edgeColor: input.edge_color ? String(input.edge_color) : null,
         sheen: !!input.sheen,
         material: (input.material || 'generic') as Material,
         detail: level(input.detail, 1),
         lighting: level(input.lighting, 1),
+        smoothing: typeof input.smoothing === 'number' && isFinite(input.smoothing) ? Math.max(0, Math.min(1, input.smoothing)) : undefined,
       };
     };
 
@@ -4490,13 +4497,14 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
           const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
           const face = fk as FaceKey;
-          const thinSide = spec.edgeRamp && (face === 'east' || face === 'west');
+          const thinSide = !!spec.edgeColor && (face === 'east' || face === 'west');
           const rows = paintFace(face, w, h, {
-            ramp: thinSide ? spec.edgeRamp! : spec.ramp,
+            ...(thinSide ? { color: spec.edgeColor! } : spec.given ? { ramp: spec.given } : { color: spec.color! }),
             material: spec.material,
             seed,
             detail: spec.detail,
             lighting: spec.lighting,
+            smoothing: spec.smoothing,
             sheen: spec.sheen,
           });
           // A flipped UV rect (mirrored face) must get the painted face flipped too, so

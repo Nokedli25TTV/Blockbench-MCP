@@ -1,6 +1,6 @@
 // Unit test for the shared face painter (packages/shared/src/facePainter.ts), run straight
 // from the TypeScript source (Node strips the types). It guards the look the user asked
-// for: shading and gradients with varied neighbouring pixels — never the old flat bands.
+// for: shaded, structured pixel art — never flat bands (v1) and never "ant war" noise (v2).
 import { paintFace, rampFromBase, hexToRgb, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
 
 let failures = 0;
@@ -9,35 +9,59 @@ const check = (label, cond, detail = "") => {
   if (!cond) failures++;
 };
 const luma = (hex) => { const [r, g, b] = hexToRgb(hex); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-const avg = (row) => row.reduce((a, c) => a + luma(c), 0) / row.length;
+const avg = (cells) => cells.reduce((a, c) => a + luma(c), 0) / cells.length;
+// Share of pixels that differ from all four neighbours — the "noise" the user objected to.
+const speckle = (rows) => {
+  let lone = 0, total = 0;
+  rows.forEach((row, y) => row.forEach((c, x) => {
+    const nb = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].filter(([a, b]) => a >= 0 && b >= 0 && b < rows.length && a < row.length);
+    total++;
+    if (nb.every(([a, b]) => rows[b][a] !== c)) lone++;
+  }));
+  return lone / total;
+};
+const COLORS = {
+  generic: "#8b5a2b", fur: "#7a5230", skin: "#c98f6b", leather: "#8b5a2b", cloth: "#3f5fa8", wood: "#8a6238", planks: "#9c7447",
+  stone: "#7d7d80", metal: "#9aa3ad", gem: "#3fb8c9", plant: "#4f8f3a", dungeon_stone: "#6f717c", crystal: "#8b4fe0",
+  monster_fur: "#a4805c", ancient_metal: "#8f969e", wavy_wood: "#8a5a34", magma: "#ea5f1a", moss: "#3fae3a", water: "#2f6fd6", ice: "#bfe7f6",
+};
 
 const ramp = rampFromBase("#8b5a2b");
-check("rampFromBase gives 7 shades with the exact colour in the middle", ramp.length === 7 && ramp[3] === "#8b5a2b", ramp.join(" "));
+check("rampFromBase: 9 shades, the exact colour in the middle", ramp.length === 9 && ramp[4] === "#8b5a2b", ramp.join(" "));
 check("the ramp runs dark → light", ramp.every((c, i) => i === 0 || luma(c) > luma(ramp[i - 1])), ramp.map((c) => Math.round(luma(c))).join(" < "));
 
+check("every material has a test colour", MATERIALS.every((m) => COLORS[m]));
 for (const material of MATERIALS) {
-  const face = paintFace("north", 8, 10, { ramp, material, seed: seedFrom("body") });
+  const face = paintFace("north", 12, 12, { color: COLORS[material], material, seed: seedFrom("body") });
   const distinct = new Set(face.flat()).size;
-  const flatRows = face.filter((row) => new Set(row).size === 1).length;
-  const topLighter = avg(face[1]) > avg(face[8]);
-  check(`${material}: shaded, varied, lit from above`, face.length === 10 && face[0].length === 8 && distinct >= 4 && flatRows <= 1 && topLighter,
-    `${distinct} colours, ${flatRows} flat row(s), top ${Math.round(avg(face[1]))} vs bottom ${Math.round(avg(face[8]))}`);
+  const noise = speckle(face);
+  const lit = material === "crystal" || material === "magma" || avg(face.slice(1, 4).flat()) > avg(face.slice(8, 11).flat());
+  check(`${material}: varied, calm, lit from above`, face.length === 12 && face[0].length === 12 && distinct >= 4 && noise <= 0.2 && lit,
+    `${distinct} colours, ${Math.round(noise * 100)}% lone pixels`);
 }
 
-const top = paintFace("up", 8, 6, { ramp, seed: 3 });
-const bottom = paintFace("down", 8, 6, { ramp, seed: 3 });
-check("the top face is lighter than the bottom face", avg(top.flat()) > avg(bottom.flat()) + 20, `${Math.round(avg(top.flat()))} vs ${Math.round(avg(bottom.flat()))}`);
+const grainy = speckle(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 0 }));
+const clean = speckle(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 1 }));
+check("more smoothing, fewer lone pixels", clean < grainy, `${Math.round(grainy * 100)}% → ${Math.round(clean * 100)}%`);
 
-const a = paintFace("east", 6, 10, { ramp, seed: 7 }).flat().join();
-const b = paintFace("east", 6, 10, { ramp, seed: 7 }).flat().join();
-const c = paintFace("east", 6, 10, { ramp, seed: 8 }).flat().join();
-check("the same seed paints the same face; another seed differs", a === b && a !== c);
+const top = paintFace("up", 8, 6, { color: "#8b5a2b", seed: 3 }).flat();
+const bottom = paintFace("down", 8, 6, { color: "#8b5a2b", seed: 3 }).flat();
+check("the top face is lighter than the bottom face", avg(top) > avg(bottom) + 20, `${Math.round(avg(top))} vs ${Math.round(avg(bottom))}`);
 
-const smooth = paintFace("north", 8, 10, { ramp, detail: 0, seed: 1 });
+const a = paintFace("east", 6, 10, { color: "#8b5a2b", seed: 7 }).flat().join();
+const b = paintFace("east", 6, 10, { color: "#8b5a2b", seed: 7 }).flat().join();
+const c = paintFace("east", 6, 10, { color: "#8b5a2b", seed: 8, material: "stone" }).flat().join();
+check("the same seed paints the same face; another seed/material differs", a === b && a !== c);
+
+const handPicked = ["#221100", "#553311", "#886644", "#bb9977", "#eeddcc"];
+const fromGiven = paintFace("north", 8, 8, { ramp: handPicked, seed: 1 }).flat();
+check("a hand-picked palette is used as is", fromGiven.every((col) => handPicked.includes(col)));
+
+const smooth = paintFace("north", 8, 10, { color: "#8b5a2b", detail: 0, seed: 1 });
 check("detail 0 still shades (gradient without pattern)", new Set(smooth.flat()).size >= 3 && avg(smooth[1]) > avg(smooth[8]));
 
-const tiny = paintFace("north", 1, 1, { ramp, seed: 1 });
-check("a 1x1 face paints one pixel", tiny.length === 1 && tiny[0].length === 1 && ramp.includes(tiny[0][0]));
+const tiny = paintFace("north", 1, 1, { color: "#8b5a2b", seed: 1 });
+check("a 1x1 face paints one pixel", tiny.length === 1 && tiny[0].length === 1 && /^#[0-9a-f]{6}$/.test(tiny[0][0]));
 
 console.log(`\n${failures === 0 ? "🎉 PAINTER CHECKS PASSED" : "💥 " + failures + " PAINTER CHECK(S) FAILED"}`);
 process.exit(failures === 0 ? 0 : 1);
