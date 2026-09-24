@@ -54,6 +54,30 @@ for (const material of MATERIALS) {
     `${distinct} colours, ${Math.round(noise * 100)}% lone pixels (max ${Math.round(maxLone * 100)}%)`);
 }
 
+// The user's material notes (2026-09-24), each guarded by one measurable property.
+const face16 = (material, seed = "body") => paintFace("north", 16, 16, { color: COLORS[material], material, seed: seedFrom(seed) });
+const leatherDarkest = Math.min(...face16("leather").flat().map(luma));
+check("leather: stitch holes are warm brown, never the darkest shade", leatherDarkest > luma(rampFromBase(COLORS.leather)[0]) + 10,
+  `darkest pixel ${Math.round(leatherDarkest)} vs ramp ${Math.round(luma(rampFromBase(COLORS.leather)[0]))}`);
+const crystal = face16("crystal").flat();
+const crystalTop = Math.max(...crystal.map(luma));
+check("crystal: facet edges drawn in the lightest colour (lines, not dots)", crystal.filter((c) => luma(c) === crystalTop).length >= 12,
+  `${crystal.filter((c) => luma(c) === crystalTop).length} px of the lightest colour`);
+const rustDepth = (rows) => {
+  let deepest = -1;
+  rows.forEach((row, y) => row.forEach((c, x) => {
+    const [r, , b] = hexToRgb(c);
+    if (r - b > 25) deepest = Math.max(deepest, Math.min(x, y, row.length - 1 - x, rows.length - 1 - y));
+  }));
+  return deepest;
+};
+const rustBig = rustDepth(face16("ancient_metal"));
+const rustThin = rustDepth(paintFace("up", 16, 6, { color: COLORS.ancient_metal, material: "ancient_metal", seed: seedFrom("body") }));
+check("ancient_metal: rust only at the rims (the outer ring on a thin face)", rustBig >= 0 && rustBig <= 2 && rustThin === 0,
+  `16x16: ${rustBig} px in from the rim, 16x6: ${rustThin}`);
+const ice = face16("ice");
+check("ice: deepens toward the bottom (thickness)", avg(ice[1]) - avg(ice[14]) > 70, `${Math.round(avg(ice[1]))} → ${Math.round(avg(ice[14]))}`);
+
 const strong = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 0 }));
 const calm = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 1 }));
 const byDefault = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5 }));

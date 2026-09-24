@@ -60,14 +60,17 @@ section into the new version (see README → Releasing).
 
 ### Added
 - `material`, `detail`, `lighting` and `smoothing` on `shade_cube(s)`. Materials: generic, fur, skin,
-  leather (stitches, worn edges), cloth, wood, planks, stone, metal, gem, plant, dungeon_stone (running-
-  bond blocks, soft mortar, worn bevels, cool-tinted shadows, cracks), crystal (glowing core, sharp
-  facets), monster_fur (locks), ancient_metal (scratches, rust), wavy_wood (flowing grain, growth
-  rings), magma (dark crust plates with glowing red rims, orange flow bands, yellow cores and hairline
-  cracks), moss, water (depth gradient, waves) and ice (fractures, glints). `smoothing` runs from
-  strong clustered texture (0) to a calm surface (1); each material has its own default. The painter
-  is a pure module (`packages/shared/src/facePainter.ts`) with its own test (`test:painter`, part of
-  `pnpm test`) that fails on flat bands, on surfaces smoothed flat and on lone dots.
+  leather (padded middle, stitched seams: warm dark holes with a light thread pixel), cloth, wood,
+  planks, stone, metal, gem, plant, dungeon_stone (running-bond blocks, soft mortar, worn bevels,
+  cool-tinted shadows, cracks), crystal (3–4 large flat Voronoi facets with bright ridge edges),
+  monster_fur (hanging V-shaped locks: dark roots, light tips), ancient_metal (sharp diagonal
+  highlight, rust in small clusters at the rims), wavy_wood (flowing grain, growth rings), magma (dark
+  crust plates with glowing red rims, orange flow bands, yellow cores and hairline cracks), moss, water
+  (depth gradient, waves) and ice (geometric 0°/45°/90° fractures with almost white edges, deep blue
+  toward the bottom). `smoothing` runs from strong clustered texture (0) to a calm surface (1); each
+  material has its own default. The painter is a pure module (`packages/shared/src/facePainter.ts`)
+  with its own test (`test:painter`, part of `pnpm test`) that fails on flat bands, on surfaces
+  smoothed flat, on lone dots and when a material loses its defining look.
 - `rotation` on `create_cube`, `create_cubes` (groups and cubes), `create_group` and `modify_cube(s)`;
   `set_rotation` takes a group or a cube, `set_origin` also a cube where cubes rotate.
 - `get_project_info` → `rules`: where rotation may go and the coordinate range, for the open project.

@@ -102,6 +102,8 @@ export interface RampStyle {
   chroma?: number;
   /** Hue the shadows lean toward (default 265, cool blue; e.g. 165 for a mossy tint). */
   shadowHue?: number;
+  /** How far (degrees) the darkest shade turns toward `shadowHue` (default 16). */
+  shadowShift?: number;
   /** Minimum chroma of the darkest shade, so greys get a tint instead of dead grey (default 0.02). */
   shadowTint?: number;
   /** Minimum chroma of the lightest shade, a warm tint (default 0.012). */
@@ -118,7 +120,8 @@ export function rampFromBase(hex: string, steps = 9, style: RampStyle = {}): str
   const base = normHex(hex);
   const [L0, C0, H0] = toOklch(hexToRgb(base));
   const contrast = style.contrast ?? 1, chroma = style.chroma ?? 1;
-  const shadowHue = style.shadowHue ?? 265, shadowTint = style.shadowTint ?? 0.02, lightTint = style.lightTint ?? 0.012;
+  const shadowHue = style.shadowHue ?? 265, shadowShift = style.shadowShift ?? 16;
+  const shadowTint = style.shadowTint ?? 0.02, lightTint = style.lightTint ?? 0.012;
   const grey = C0 < 0.03;
   const mid = (steps - 1) / 2;
   const darkL = Math.max(0.08, L0 - L0 * 0.6 * contrast);
@@ -129,7 +132,7 @@ export function rampFromBase(hex: string, steps = 9, style: RampStyle = {}): str
     if (Math.abs(k) < 1e-9) { out.push(base); continue; }
     const a = Math.abs(k);
     out.push(k < 0
-      ? oklchHex(L0 + (darkL - L0) * a, Math.max(C0 * chroma * (1 + 0.12 * a), shadowTint * a), grey ? shadowHue : hueToward(H0, shadowHue, 16 * a))
+      ? oklchHex(L0 + (darkL - L0) * a, Math.max(C0 * chroma * (1 + 0.12 * a), shadowTint * a), grey ? shadowHue : hueToward(H0, shadowHue, shadowShift * a))
       : oklchHex(L0 + (lightL - L0) * a, Math.max(C0 * chroma * (1 - 0.45 * a), lightTint * a), grey ? 85 : hueToward(H0, 95, 14 * a)));
   }
   return out;
@@ -298,22 +301,29 @@ const SPECS: Record<Material, MaterialSpec> = {
     }),
   },
 
-  // Worked leather: smooth warm surface, worn edges in short light runs, a stitch line.
+  // Worked leather: a padded surface (the middle one shade lighter), fine pores, scuffed
+  // rims, and seams of warm dark stitch holes, each with a light thread pixel beside it.
   leather: {
-    smoothing: 0.55,
+    smoothing: 0.5, lighting: 0.55,
     paint: (f) => {
+      const cx = (f.w - 1) / 2, cy = (f.h - 1) / 2;
       each(f, (x, y, c) => {
-        c.v = f.detail * (0.12 * N(f, x, y, 4, 4, 0) + 0.06 * T(f, x, y));
+        const r = Math.min(1, Math.hypot((x - cx) / Math.max(1, f.w / 2), (y - cy) / Math.max(1, f.h / 2)));
+        c.v = 0.3 * (1 - r * r) - 0.1 + f.detail * (0.08 * N(f, x, y, 4, 4, 0) + 0.2 * T(f, x, y));
         const edge = Math.min(x, y, f.w - 1 - x, f.h - 1 - y);
         const along = y === 0 || y === f.h - 1 ? x : y + 97;
-        if (edge === 0 && valueNoise(along, 0, 2.5, 1, f.seed + 5) > 0.45) c.v += 0.24;
-        else if (edge === 1 && valueNoise(along, 1, 2.5, 1, f.seed + 6) > 0.7) c.v += 0.1;
+        if (edge === 0 && valueNoise(along, 0, 2.5, 1, f.seed + 5) > 0.6) c.v += 0.2;
       });
       if (f.w >= 6 && f.h >= 5) {
+        // The hole sits 1–2 shades below the base, the thread above it: the seam stands out in relief.
+        const stitch = (x: number, y: number, tx: number, ty: number) => {
+          put(f, x, y, -0.45, { hard: true });
+          put(f, tx, ty, 0.38, { hard: true });
+        };
         if (f.w >= f.h) {
-          for (const sy of f.h >= 8 ? [2, f.h - 3] : [1, f.h - 2]) for (let x = 2; x <= f.w - 3; x++) if ((x + sy) % 2 === 0) put(f, x, sy, -0.95, { hard: true });
+          for (const sy of f.h >= 8 ? [2, f.h - 3] : [1, f.h - 2]) for (let x = 2; x + 1 <= f.w - 3; x += 3) stitch(x, sy, x + 1, sy);
         } else {
-          for (const sx of f.w >= 8 ? [2, f.w - 3] : [1, f.w - 2]) for (let y = 2; y <= f.h - 3; y++) if ((y + sx) % 2 === 0) put(f, sx, y, -0.95, { hard: true });
+          for (const sx of f.w >= 8 ? [2, f.w - 3] : [1, f.w - 2]) for (let y = 2; y + 1 <= f.h - 3; y += 3) stitch(sx, y, sx, y + 1);
         }
       }
     },
@@ -349,86 +359,117 @@ const SPECS: Record<Material, MaterialSpec> = {
     },
   },
 
-  // Mana crystal: flat, sharp facets, a glowing core fading to dark edges, bright glassy
-  // facet edges and at most two sparkles.
+  // Mana crystal: three or four large flat facets with straight borders (a Voronoi split
+  // of well-spaced points), shaded as planes from light (top-left) to dark. Each facet edge
+  // is a ridge: a line in the lightest colour with a darker line right after it.
   crystal: {
-    smoothing: 0.6, lighting: 0.35,
-    palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 1.45, chroma: 1.2 })],
+    smoothing: 0.6, lighting: 0.3,
+    palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 1.35, chroma: 1.15 })],
     paint: (f) => {
-      const k = Math.max(3, Math.min(8, Math.round((f.w * f.h) / 18)));
-      const pts = Array.from({ length: k }, (_, i) => [H(f, i, 0, 31) * (f.w - 1), H(f, i, 1, 32) * (f.h - 1)]);
-      const shade = pts.map(([px, py], i) => 0.42 * centred(H(f, i, 2, 33)) + 0.45 * (0.5 - (px / Math.max(1, f.w - 1) + py / Math.max(1, f.h - 1)) / 2));
-      const cx = (f.w - 1) / 2, cy = (f.h - 1) / 2;
-      each(f, (x, y, c) => {
-        const d = pts.map(([px, py]) => Math.hypot(x - px, y - py));
-        const order = d.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]);
-        const r = Math.hypot((x - cx) / Math.max(1, f.w / 2), (y - cy) / Math.max(1, f.h / 2)) / Math.SQRT2;
-        c.v = 0.95 * Math.pow(Math.max(0, 1 - r), 1.4) - 0.45 + shade[order[0][1]];
-        if (order.length > 1 && order[1][0] - order[0][0] < 0.75) c.v = Math.max(c.v, shade[order[1][1]]) + 0.35; // glassy facet edge
-        c.hard = true;
+      const k = f.w * f.h >= 40 ? 3 + (H(f, 0, 0, 30) < 0.5 ? 1 : 0) : 2;
+      const pts: [number, number][] = [];
+      for (let i = 0; i < 80 && pts.length < k; i++) {
+        const px = H(f, i, 0, 31) * (f.w - 1), py = H(f, i, 1, 32) * (f.h - 1);
+        if (pts.every(([qx, qy]) => Math.hypot(px - qx, py - qy) >= 0.45 * Math.min(f.w, f.h))) pts.push([px, py]);
+      }
+      const diag = ([px, py]: [number, number]) => px / Math.max(1, f.w - 1) + py / Math.max(1, f.h - 1);
+      const order = pts.map((_, i) => i).sort((a, b) => diag(pts[a]) - diag(pts[b]));
+      const LADDER = [0.35, 0.05, -0.2, -0.45];
+      const shade: number[] = [];
+      order.forEach((i, rank) => {
+        shade[i] = LADDER[Math.round((rank * (LADDER.length - 1)) / Math.max(1, order.length - 1))] + 0.08 * centred(H(f, i, 2, 33));
       });
-      glints(f, f.w * f.h >= 36 ? 2 : 1, 34, (x, y) => put(f, x, y, 1, { hard: true }));
+      const id: number[] = new Array(f.w * f.h).fill(0);
+      each(f, (x, y) => {
+        let best = 0, bd = Infinity;
+        pts.forEach(([px, py], i) => { const d = (x - px) ** 2 + (y - py) ** 2; if (d < bd) { bd = d; best = i; } });
+        id[y * f.w + x] = best;
+      });
+      const other = (x: number, y: number, own: number) => inside(f, x, y) && id[y * f.w + x] !== own;
+      const edge = (x: number, y: number) => other(x + 1, y, id[y * f.w + x]) || other(x, y + 1, id[y * f.w + x]);
+      each(f, (x, y, c) => {
+        const own = id[y * f.w + x];
+        c.hard = true;
+        if (edge(x, y)) { c.v = 1; c.lit = 0; return; }
+        const behind = (inside(f, x - 1, y) && id[y * f.w + x - 1] !== own && edge(x - 1, y)) || (inside(f, x, y - 1) && id[(y - 1) * f.w + x] !== own && edge(x, y - 1));
+        c.v = shade[own] - (behind ? 0.25 : 0);
+      });
     },
   },
 
-  // Monster fur: overlapping locks — light at the root, darker at the tip — over dark
-  // underfur, lower locks covering the tips above them.
+  // Monster fur: strands of locks hanging down side by side, each strand shifted a little
+  // so no rows form. A lock is dark at its root, lightens downward and ends in a light
+  // V-shaped tip over the root of the next lock, whose root stays in shadow beside the tip.
   monster_fur: {
     smoothing: 0.4,
     paint: (f) => {
-      each(f, (x, y, c) => { c.v = -0.55 + 0.05 * N(f, x, y, 3, 3, 0); });
-      const sx = 4, sy = 5;
-      for (let r = -1; r <= Math.ceil(f.h / sy) + 1; r++) for (let col = -1; col <= Math.ceil(f.w / sx); col++) {
-        const tx = col * sx + (r % 2 ? 2 : 0) + Math.round((H(f, col, r, 41) - 0.5) * 1.4);
-        const ty = r * sy - 1 + Math.round((H(f, col, r, 42) - 0.5) * 2);
-        const len = 6 + Math.floor(H(f, col, r, 43) * 3);
-        const lean = H(f, col, r, 44) < 0.5 ? -1 : 1;
-        const tone = 0.08 * centred(H(f, col, r, 45));
-        for (let i = 0; i < len; i++) {
-          const t = i / len;
-          const width = Math.max(1, Math.round(3 * (1 - t) + 0.4));
-          const cx = tx + (t > 0.6 ? lean : 0);
-          const x0 = cx - Math.floor(width / 2);
-          for (let k = 0; k < width; k++) {
-            const edgeRight = k === width - 1 && width > 2;
-            put(f, x0 + k, ty + i, tone + f.detail * (0.46 - 0.6 * t - (edgeRight ? 0.2 : 0)));
-          }
+      const lw = f.w >= 8 ? 4 : 3, step = f.h >= 8 ? 4 : 3;
+      const tone = (col: number, r: number) => 0.08 * centred(H(f, col, r, 44));
+      each(f, (x, y, c) => {
+        const col = Math.floor(x / lw), lx = x - col * lw;
+        const yy = y + Math.floor(H(f, col, 0, 40) * step); // each strand has its own phase
+        const r = Math.floor(yy / step), ly = yy - r * step;
+        const lean = 1 + (lw >= 4 && H(f, col, r - 1, 43) < 0.5 ? 1 : 0);
+        const long = H(f, col, r - 1, 42) < 0.35;
+        if ((ly === 0 && lx >= 1 && lx <= lw - 2) || ((ly === 1 || (ly === 2 && long)) && lx === lean)) {
+          c.v = tone(col, r - 1) + f.detail * (0.45 + 0.08 * ly); // the tip of the lock above
+          return;
         }
-        put(f, tx + lean, ty + len, -0.42); // soft shadow under the tip
-      }
+        let v = -0.45 + (0.75 * ly) / Math.max(1, step - 1) + (lx === 0 ? 0.08 : lx === lw - 1 ? -0.15 : 0);
+        if (ly <= (long ? 2 : 1) && Math.abs(lx - lean) === 1) v = Math.min(v, -0.4); // root beside the tip
+        if (ly === (long ? 3 : 2) && lx === lean) v = Math.min(v, -0.35);            // under the tip
+        c.v = tone(col, r) + f.detail * v;
+      });
     },
   },
 
-  // Worn ancient metal: brushed base, a lit top edge and specular band, scratch lines
-  // with a dark groove, and rust creeping in from the edges.
+  // Ancient metal: high-contrast steel — a sharp diagonal highlight with a dark reflection
+  // band beside it, a lit top edge, a few scratches — and rust only at the rims, in small
+  // dense clusters that end sharply at the clean metal.
   ancient_metal: {
     smoothing: 0.45, lighting: 1.05,
     palettes: (base, given) => {
       const [L0] = toOklch(hexToRgb(base));
-      return [given || rampFromBase(base, 9), rampFromBase(shadeOf(base, Math.min(0.55, L0 * 0.8), 0.11, 48), 7)];
+      return [given || rampFromBase(base, 9, { contrast: 1.3 }), rampFromBase(shadeOf(base, Math.min(0.55, L0 * 0.8), 0.11, 48), 7)];
     },
     paint: (f) => {
+      const slope = (f.w - 1) / Math.max(1, f.h - 1), k0 = Math.round(0.55 * (f.w - 1));
       each(f, (x, y, c) => {
         const [u, t] = f.along === "y" ? [x, y] : [y, x];
-        c.v = f.detail * (0.06 * N(f, u, t, 1, 6, 0) + 0.08 * T(f, x, y));
+        c.v = f.detail * (0.08 * N(f, u, t, 1, 6, 0) + 0.1 * T(f, x, y));
+        const k = Math.round(x + y * slope) - k0; // diagonals across the highlight
+        if (k === 0 || k === 1) c.v = 0.85;
+        else if (k === -1) c.v += 0.35;
+        else if (k >= 2 && k <= 4) c.v -= 0.32;
         if (f.side && y === 0) { c.v += 0.45; c.hard = true; }
-        if (Math.abs(x / Math.max(1, f.w) - y / Math.max(1, f.h) - 0.1) < 0.12) c.v += 0.22;
       });
-      const count = 1 + Math.floor(H(f, 0, 0, 51) * Math.min(4, 1 + (f.w * f.h) / 60));
+      const count = Math.floor(H(f, 0, 0, 51) * Math.min(3, 1 + (f.w * f.h) / 80));
       for (let i = 0; i < count; i++) {
         const x0 = Math.floor(H(f, i, 1, 52) * f.w), y0 = Math.floor(H(f, i, 2, 53) * f.h);
-        const len = 3 + Math.floor(H(f, i, 3, 54) * Math.min(6, f.w));
-        const slope = (H(f, i, 4, 55) - 0.5) * 1.2;
-        line(x0, y0, x0 + len, Math.round(y0 + len * slope), (x, y) => {
+        const len = 3 + Math.floor(H(f, i, 3, 54) * Math.min(5, f.w));
+        const slope2 = (H(f, i, 4, 55) - 0.5) * 1.2;
+        line(x0, y0, x0 + len, Math.round(y0 + len * slope2), (x, y) => {
           put(f, x, y, 0.55, { hard: true });
           if (inside(f, x, y + 1) && cellAt(f, x, y + 1).v < 0.5) put(f, x, y + 1, -0.3, { hard: true });
         });
       }
+      // Rust: denser the closer to the rim (a narrower rim on small faces), clusters of
+      // 2–3 px, never a lone rust pixel.
+      const small = Math.min(f.w, f.h);
+      const needs = [0.38, 0.55, 0.72].slice(0, small >= 12 ? 3 : small >= 7 ? 2 : 1);
+      const rust: boolean[] = new Array(f.w * f.h).fill(false);
+      each(f, (x, y) => {
+        const need = needs[Math.min(x, y, f.w - 1 - x, f.h - 1 - y)];
+        if (need !== undefined && valueNoise(x, y, 1.7, 1.7, f.seed + 60) > need) rust[y * f.w + x] = true;
+      });
+      const kept = rust.map((on, i) => {
+        const x = i % f.w, y = Math.floor(i / f.w);
+        return on && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => inside(f, x + dx, y + dy) && rust[(y + dy) * f.w + x + dx]);
+      });
       each(f, (x, y, c) => {
-        const edge = Math.max(0, 1 - Math.min(x, y, f.w - 1 - x, f.h - 1 - y) / 2.5);
-        if (0.7 * valueNoise(x, y, 2.5, 2.5, f.seed + 60) + 0.45 * edge > 0.78) {
-          c.pal = 1; c.v = 0.25 * N(f, x, y, 1.8, 1.8, 61) - 0.05; c.hard = false;
-        }
+        if (!kept[y * f.w + x]) return;
+        c.pal = 1; c.hard = false;
+        c.v = 0.3 * N(f, x, y, 1.5, 1.5, 61) - 0.05 - (Math.min(x, y, f.w - 1 - x, f.h - 1 - y) === 0 ? 0.1 : 0);
       });
     },
   },
@@ -538,31 +579,42 @@ const SPECS: Record<Material, MaterialSpec> = {
     },
   },
 
-  // Glacier ice: pale smooth surface, dark fracture lines deep inside with a bright
-  // refraction beside them, and one or two glints.
+  // Glacier ice: a frosted pale top deepening to deep blue toward the bottom (thickness),
+  // geometric inner fractures — straight runs at 0°, 45° and 90° that turn and branch —
+  // each dark pixel with an almost white lit edge beside it, and one or two glints.
   ice: {
-    smoothing: 0.55, lighting: 0.6,
-    palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 0.95 })],
+    smoothing: 0.55, lighting: 0.5,
+    palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 1.1, chroma: 1.5, shadowShift: 40 })],
     paint: (f) => {
       each(f, (x, y, c) => {
         const t = f.h > 1 ? y / (f.h - 1) : 0.5;
-        c.v = 0.2 - 0.25 * t + f.detail * (0.22 * T(f, x, y) + 0.1 * N(f, x, y, 5, 3, 0));
+        const depth = f.side ? 0.9 * smooth(t) : f.face === "down" ? 0.6 : 0.1 * t;
+        c.v = 0.32 - depth + f.detail * (0.18 * T(f, x, y) + 0.1 * N(f, x, y, 5, 3, 0));
       });
-      // Refraction first, beside the line (below a flat crack, right of a steep one), then
-      // every crack on top — so no highlight ever breaks a crack into dots.
-      const cracks = 1 + Math.floor(H(f, 0, 0, 81) * (f.w * f.h >= 64 ? 3 : 2));
-      const crack: [number, number][] = [];
+      const base = f.cells.map((c) => c.v);
+      const DIRS: [number, number][] = [[1, 0], [1, 1], [0, 1], [-1, 1]]; // 0°, 45°, 90°, 135°
+      const crack: [number, number, number][] = [];
+      const run = (x: number, y: number, d: number, len: number, k: number, branch: boolean) => {
+        let seg = 0, segLen = 3 + Math.floor(H(f, x, y, k) * 4);
+        for (let s = 0; s < len && inside(f, x, y); s++) {
+          crack.push([x, y, d]);
+          if (branch && s === Math.floor(len / 2)) run(x, y, (d + 2) % 4, 3 + Math.floor(H(f, x, y, k + 3) * 3), k + 7, false); // 90° branch
+          if (++seg >= segLen) { // turn by 45°
+            seg = 0; segLen = 3 + Math.floor(H(f, x, y, k + 1) * 4);
+            d = (d + (H(f, x, y, k + 2) < 0.5 ? 1 : 3)) % 4;
+          }
+          x += DIRS[d][0]; y += DIRS[d][1];
+        }
+      };
+      const cracks = f.w * f.h >= 144 ? 2 : 1;
       for (let i = 0; i < cracks; i++) {
-        const x0 = Math.floor(H(f, i, 1, 82) * f.w), y0 = Math.floor(H(f, i, 2, 83) * f.h);
-        const x1 = Math.floor(H(f, i, 3, 84) * f.w), y1 = Math.floor(H(f, i, 4, 85) * f.h);
-        const flat = Math.abs(x1 - x0) > Math.abs(y1 - y0);
-        line(x0, y0, x1, y1, (x, y, j) => {
-          crack.push([x, y]);
-          if (j % 3 !== 2) put(f, flat ? x : x + 1, flat ? y + 1 : y, 0.38, { hard: true });
-        });
+        run(Math.floor(f.w * (0.2 + 0.6 * H(f, i, 1, 82))), Math.floor(f.h * 0.4 * H(f, i, 2, 83)), Math.floor(H(f, i, 3, 84) * 4),
+          Math.round(Math.max(f.w, f.h) * (0.6 + 0.4 * H(f, i, 4, 85))), 86 + i * 11, f.w * f.h >= 64);
       }
-      for (const [x, y] of crack) put(f, x, y, -0.48, { hard: true });
-      glints(f, f.w * f.h >= 36 ? 2 : 1, 86, (x, y) => put(f, x, y, 1, { hard: true }));
+      // The lit edge first (below a flat or diagonal run, right of a vertical one), then the dark line on top.
+      for (const [x, y, d] of crack) put(f, d === 2 ? x + 1 : x, d === 2 ? y : y + 1, 0.95, { hard: true, lit: 0 });
+      for (const [x, y] of crack) put(f, x, y, Math.min(base[y * f.w + x] - 0.45, -0.1), { hard: true });
+      glints(f, f.w * f.h >= 36 ? 2 : 1, 89, (x, y) => put(f, x, y, 1, { hard: true, lit: 0 }));
     },
   },
 };
