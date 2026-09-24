@@ -632,8 +632,11 @@ const SPECS: Record<Material, MaterialSpec> = {
           x += DIRS[d][0]; y += DIRS[d][1];
         }
       }
-      // The lit edge first (below a flat or diagonal run, right of a vertical one), then the dark line on top.
-      for (const [x, y, d] of crack) put(f, d === 2 ? x + 1 : x, d === 2 ? y : y + 1, 0.95, { hard: true, lit: 0 });
+      // The lit edge first, then the dark line on top: below a flat run, right of a vertical one,
+      // and a parallel line on the lower side of a diagonal one (right under it, the two would
+      // interleave into a checker chain).
+      const EDGE: [number, number][] = [[0, 1], [-1, 1], [1, 0], [1, 1]];
+      for (const [x, y, d] of crack) put(f, x + EDGE[d][0], y + EDGE[d][1], 0.95, { hard: true, lit: 0 });
       for (const [x, y] of crack) put(f, x, y, Math.min(base[y * f.w + x] - 0.4, -0.1), { hard: true });
     },
   },
