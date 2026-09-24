@@ -25,11 +25,12 @@ Create and paint textures for 3D models using Blockbench MCP tools.
    sides a soft top→bottom gradient, lit rim, contact shadow) and a **`material`** that paints real
    structure: `generic` (default), `fur`, `skin`, `leather` (padded middle, stitched seams), `cloth`,
    `wood`, `planks`, `stone`, `metal`, `gem`, `plant`, `dungeon_stone` (blocks, soft mortar, worn
-   bevels, cracks), `crystal` (3–4 large flat facets with bright edges), `monster_fur` (hanging
-   V-shaped locks, dark roots, light tips), `ancient_metal` (sharp diagonal highlight, rust clusters
-   at the rims), `wavy_wood` (flowing grain, growth rings on end faces), `magma` (dark crust plates,
-   glowing rims, flow bands, hairline cracks), `moss` (big saturated patches, tufts), `water` (depth
-   gradient, waves), `ice` (geometric fractures with bright edges, deep blue toward the bottom).
+   bevels, cracks), `crystal` (cut facets around a glowing core, bright ridge edges), `monster_fur`
+   (hanging V-shaped locks, dark roots, light tips), `ancient_metal` (sharp diagonal highlight,
+   three-tone rust with stained metal at the rims), `wavy_wood` (flowing grain, growth rings on end
+   faces), `magma` (hot yellow-white middle, flow streaks, crust plates, hairline cracks), `moss` (big
+   saturated patches, tufts), `water` (depth gradient, waves), `ice` (glassy streaks, one straight
+   fracture with a bright edge, deep blue toward the bottom).
    **`smoothing`** (0–1) runs from a strong texture of small colour clusters (0) to a calm surface
    with soft gradients (1); no level leaves lone dots. Every material has a sensible default
    (0.35–0.6), so leave it out unless asked.

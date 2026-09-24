@@ -2297,10 +2297,10 @@ server.registerTool(
       "colour, light from above (top bright, sides a soft top→bottom gradient, bottom in shade, lit rim, contact " +
       "shadow) and a material that paints real structure — generic, fur, skin, leather (padded, stitched " +
       "seams), cloth, wood, planks, stone, metal, gem, plant, dungeon_stone (blocks, soft mortar, worn bevels, " +
-      "cracks), crystal (large flat facets, bright edges), monster_fur (hanging V-shaped locks), ancient_metal " +
-      "(sharp highlight, rust at the rims), wavy_wood (flowing grain, rings), magma (crust plates, glowing " +
-      "rims, flow, hairline cracks), moss, water (depth gradient, waves), ice (geometric fractures, deep-blue " +
-      "depth). `smoothing` 0–1 goes from strong clustered texture to a calm surface, never dotted (each " +
+      "cracks), crystal (cut facets around a glowing core), monster_fur (hanging V-shaped locks), ancient_metal " +
+      "(sharp highlight, rust at the rims), wavy_wood (flowing grain, rings), magma (hot glowing middle, flow " +
+      "streaks, crust plates), moss, water (depth gradient, waves), ice (glassy streaks, a straight fracture, " +
+      "deep-blue depth). `smoothing` 0–1 goes from strong clustered texture to a calm surface, never dotted (each " +
       "material has a sensible default). Give `cube_id` or " +
       "`target` (a group) plus `color` (one hex) or `colors` (3–9 hex, dark → light). Run pack_uv + " +
       "validate_uv FIRST so each cube has its own UV region.",

@@ -359,26 +359,27 @@ const SPECS: Record<Material, MaterialSpec> = {
     },
   },
 
-  // Mana crystal: three or four large flat facets with straight borders (a Voronoi split
-  // of well-spaced points), shaded as planes from light (top-left) to dark. Each facet edge
-  // is a ridge: a line in the lightest colour with a darker line right after it.
+  // Mana crystal seen head-on: a central facet around a glowing core, ringed by 3–4 side
+  // facets (a Voronoi split, so every border is straight). Each facet is a tilted plane:
+  // its own shade from how it faces the light, lighter toward the core, darker outward;
+  // the edges are ridges — a line of the lightest colour with a darker line behind.
   crystal: {
     smoothing: 0.6, lighting: 0.3,
     palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 1.35, chroma: 1.15 })],
     paint: (f) => {
-      const k = f.w * f.h >= 40 ? 3 + (H(f, 0, 0, 30) < 0.5 ? 1 : 0) : 2;
-      const pts: [number, number][] = [];
-      for (let i = 0; i < 80 && pts.length < k; i++) {
-        const px = H(f, i, 0, 31) * (f.w - 1), py = H(f, i, 1, 32) * (f.h - 1);
-        if (pts.every(([qx, qy]) => Math.hypot(px - qx, py - qy) >= 0.45 * Math.min(f.w, f.h))) pts.push([px, py]);
+      const small = Math.min(f.w, f.h);
+      const cx = (f.w - 1) * (0.42 + 0.16 * H(f, 0, 0, 30)), cy = (f.h - 1) * (0.42 + 0.16 * H(f, 0, 1, 30));
+      const k = f.w * f.h >= 40 ? 3 + (H(f, 0, 2, 30) < 0.5 ? 1 : 0) : 2;
+      const a0 = H(f, 0, 3, 31) * Math.PI * 2;
+      const pts: [number, number][] = [[cx, cy]];
+      const tilt: number[] = [0.2];
+      for (let i = 0; i < k; i++) {
+        const a = a0 + (i + 0.3 * centred(H(f, i, 4, 31))) * ((Math.PI * 2) / k);
+        const r = 0.62 * small * (0.85 + 0.3 * H(f, i, 5, 31));
+        pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+        // light from the top-left: facets tilted that way are bright, the others dark
+        tilt.push(0.42 * (-Math.cos(a) - Math.sin(a)) / Math.SQRT2 + 0.06 * centred(H(f, i, 6, 31)));
       }
-      const diag = ([px, py]: [number, number]) => px / Math.max(1, f.w - 1) + py / Math.max(1, f.h - 1);
-      const order = pts.map((_, i) => i).sort((a, b) => diag(pts[a]) - diag(pts[b]));
-      const LADDER = [0.35, 0.05, -0.2, -0.45];
-      const shade: number[] = [];
-      order.forEach((i, rank) => {
-        shade[i] = LADDER[Math.round((rank * (LADDER.length - 1)) / Math.max(1, order.length - 1))] + 0.08 * centred(H(f, i, 2, 33));
-      });
       const id: number[] = new Array(f.w * f.h).fill(0);
       each(f, (x, y) => {
         let best = 0, bd = Infinity;
@@ -389,10 +390,12 @@ const SPECS: Record<Material, MaterialSpec> = {
       const edge = (x: number, y: number) => other(x + 1, y, id[y * f.w + x]) || other(x, y + 1, id[y * f.w + x]);
       each(f, (x, y, c) => {
         const own = id[y * f.w + x];
-        c.hard = true;
-        if (edge(x, y)) { c.v = 1; c.lit = 0; return; }
+        const r = Math.hypot(x - cx, y - cy) / Math.max(1, small * 0.75);
+        if (edge(x, y)) { c.v = 1 - 0.2 * Math.min(1, (x / Math.max(1, f.w - 1) + y / Math.max(1, f.h - 1)) / 2); c.lit = 0; c.hard = true; return; }
         const behind = (inside(f, x - 1, y) && id[y * f.w + x - 1] !== own && edge(x - 1, y)) || (inside(f, x, y - 1) && id[(y - 1) * f.w + x] !== own && edge(x, y - 1));
-        c.v = shade[own] - (behind ? 0.25 : 0);
+        const glow = own === 0 ? 0.45 * Math.pow(Math.max(0, 1 - r * 1.6), 1.2) : 0; // the core
+        c.v = tilt[own] + glow + (own === 0 ? 0 : 0.22 - 0.44 * Math.min(1, r)) - (behind ? 0.25 : 0);
+        if (behind) c.hard = true;
       });
     },
   },
@@ -424,13 +427,17 @@ const SPECS: Record<Material, MaterialSpec> = {
   },
 
   // Ancient metal: high-contrast steel — a sharp diagonal highlight with a dark reflection
-  // band beside it, a lit top edge, a few scratches — and rust only at the rims, in small
-  // dense clusters that end sharply at the clean metal.
+  // band beside it, a lit top edge, one or two scratches — corroding at the rims: rust in
+  // three tones (dark pits, orange, ochre) inside a thin halo of stained metal.
   ancient_metal: {
     smoothing: 0.45, lighting: 1.05,
     palettes: (base, given) => {
       const [L0] = toOklch(hexToRgb(base));
-      return [given || rampFromBase(base, 9, { contrast: 1.3 }), rampFromBase(shadeOf(base, Math.min(0.55, L0 * 0.8), 0.11, 48), 7)];
+      return [
+        given || rampFromBase(base, 9, { contrast: 1.3 }),
+        rampFromBase(shadeOf(base, Math.min(0.55, L0 * 0.8), 0.12, 48), 9, { contrast: 1.35 }),
+        rampFromBase(shadeOf(base, L0 * 0.82, 0.045, 60), 7, { contrast: 0.9 }),
+      ];
     },
     paint: (f) => {
       const slope = (f.w - 1) / Math.max(1, f.h - 1), k0 = Math.round(0.55 * (f.w - 1));
@@ -443,9 +450,9 @@ const SPECS: Record<Material, MaterialSpec> = {
         else if (k >= 2 && k <= 4) c.v -= 0.32;
         if (f.side && y === 0) { c.v += 0.45; c.hard = true; }
       });
-      const count = Math.floor(H(f, 0, 0, 51) * Math.min(3, 1 + (f.w * f.h) / 80));
+      const count = f.w * f.h >= 64 ? 1 + Math.floor(H(f, 0, 0, 51) * 2) : Math.floor(H(f, 0, 0, 51) * 2);
       for (let i = 0; i < count; i++) {
-        const x0 = Math.floor(H(f, i, 1, 52) * f.w), y0 = Math.floor(H(f, i, 2, 53) * f.h);
+        const x0 = Math.floor(f.w * (0.1 + 0.5 * H(f, i, 1, 52))), y0 = Math.floor(f.h * (0.2 + 0.6 * H(f, i, 2, 53)));
         const len = 3 + Math.floor(H(f, i, 3, 54) * Math.min(5, f.w));
         const slope2 = (H(f, i, 4, 55) - 0.5) * 1.2;
         line(x0, y0, x0 + len, Math.round(y0 + len * slope2), (x, y) => {
@@ -456,20 +463,30 @@ const SPECS: Record<Material, MaterialSpec> = {
       // Rust: denser the closer to the rim (a narrower rim on small faces), clusters of
       // 2–3 px, never a lone rust pixel.
       const small = Math.min(f.w, f.h);
-      const needs = [0.38, 0.55, 0.72].slice(0, small >= 12 ? 3 : small >= 7 ? 2 : 1);
+      const needs = [0.45, 0.6, 0.75].slice(0, small >= 12 ? 3 : small >= 7 ? 2 : 1);
       const rust: boolean[] = new Array(f.w * f.h).fill(false);
       each(f, (x, y) => {
         const need = needs[Math.min(x, y, f.w - 1 - x, f.h - 1 - y)];
         if (need !== undefined && valueNoise(x, y, 1.7, 1.7, f.seed + 60) > need) rust[y * f.w + x] = true;
       });
+      const at = (x: number, y: number) => inside(f, x, y) && rust[y * f.w + x];
       const kept = rust.map((on, i) => {
         const x = i % f.w, y = Math.floor(i / f.w);
-        return on && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => inside(f, x + dx, y + dy) && rust[(y + dy) * f.w + x + dx]);
+        return on && (at(x + 1, y) || at(x - 1, y) || at(x, y + 1) || at(x, y - 1));
       });
+      const isRust = (x: number, y: number) => inside(f, x, y) && kept[y * f.w + x];
+      const halo = (x: number, y: number) => inside(f, x, y) && !isRust(x, y) && !cellAt(f, x, y).hard &&
+        (isRust(x + 1, y) || isRust(x - 1, y) || isRust(x, y + 1) || isRust(x, y - 1));
+      const stained = (x: number, y: number) => halo(x, y) && (halo(x + 1, y) || halo(x - 1, y) || halo(x, y + 1) || halo(x, y - 1));
       each(f, (x, y, c) => {
-        if (!kept[y * f.w + x]) return;
-        c.pal = 1; c.hard = false;
-        c.v = 0.3 * N(f, x, y, 1.5, 1.5, 61) - 0.05 - (Math.min(x, y, f.w - 1 - x, f.h - 1 - y) === 0 ? 0.1 : 0);
+        if (isRust(x, y)) {
+          // dark pits, orange, ochre: two scales of noise, darker at the very rim
+          c.pal = 1; c.hard = false;
+          c.v = 0.32 * N(f, x, y, 1.6, 1.6, 61) + 0.2 * N(f, x, y, 3.5, 3.5, 62) - (Math.min(x, y, f.w - 1 - x, f.h - 1 - y) === 0 ? 0.15 : 0);
+          if (valueNoise(x, y, 1.3, 1.3, f.seed + 63) > 0.8) c.v = -0.7;
+        } else if (stained(x, y)) {
+          c.pal = 2; c.v = Math.min(c.v, 0.3) - 0.05; // stained metal around the rust
+        }
       });
     },
   },
@@ -498,15 +515,17 @@ const SPECS: Record<Material, MaterialSpec> = {
     },
   },
 
-  // Magma: dark crust plates with glowing hairline cracks, ringed by a thin dark-red glow
-  // that warms to orange away from the crust; only the middle of the widest open melt
-  // turns bright yellow. Soft flow bands run along the face.
+  // Magma: molten rock flowing down the sides (diagonally across the top) under a few
+  // crust plates stretched along the flow. The melt is hottest in the middle — yellow to
+  // almost white — orange in the flow streaks, dark red only in a thin glow band around the
+  // plates; hairline cracks glow through the crust.
   magma: {
-    smoothing: 0.4, lighting: 0.8,
-    palettes: (base) => [heatRamp(base), rampFromBase(shadeOf(base, 0.24, 0.035), 5, { contrast: 0.55, shadowHue: 30, shadowTint: 0.015 })],
+    smoothing: 0.4, lighting: 0.6,
+    palettes: (base) => [heatRamp(base), rampFromBase(shadeOf(base, 0.26, 0.04), 5, { contrast: 0.55, shadowHue: 30, shadowTint: 0.015 })],
     paint: (f) => {
+      const flow = (x: number, y: number): [number, number] => (f.side ? [x, y] : [(x - y) * 0.7071, (x + y) * 0.7071]); // [across, along]
       const crust: boolean[] = [];
-      each(f, (x, y) => { crust[y * f.w + x] = valueNoise(x, y, 3.2, 3.2, f.seed + 50) > 0.66; });
+      each(f, (x, y) => { const [a, l] = flow(x, y); crust[y * f.w + x] = valueNoise(a + 40, l + 40, 2.6, 5, f.seed + 50) > 0.7; });
       const isCrust = (x: number, y: number) => inside(f, x, y) && crust[y * f.w + x];
       // Distance (in steps) from each molten cell to the nearest crust.
       const dist = new Array(f.w * f.h).fill(Infinity);
@@ -519,24 +538,27 @@ const SPECS: Record<Material, MaterialSpec> = {
           if (inside(f, nx, ny) && dist[j] > dist[i] + 1) { dist[j] = dist[i] + 1; queue.push(j); }
         }
       }
+      const cx = (f.w - 1) / 2, cy = (f.h - 1) / 2, small = Math.min(f.w, f.h);
       each(f, (x, y, c) => {
         if (isCrust(x, y)) {
           c.pal = 1; c.hard = true; c.lit = 0.5;
           c.v = -0.15 + f.detail * 0.14 * T(f, x, y) + (!isCrust(x, y - 1) ? 0.12 : 0);
           return;
         }
-        const [across, t] = f.along === "y" ? [x, y] : [y, x];
         const d = dist[y * f.w + x];
-        const glow = d === Infinity ? 0.55 : Math.min(0.78, -0.58 + 0.34 * (d - 1)); // dark red rim → red → orange → yellow core
-        const flow = 0.16 * Math.sin(t * 0.55 + across * 1.6 + 2 * N(f, x, y, 4, 2, 52));
-        c.v = glow + f.detail * (flow + 0.1 * N(f, x, y, 4, 2.4, 53));
+        const rim = d === 1 ? -0.35 : d === 2 ? -0.05 : d === 3 ? 0.18 : 0.32; // glow band → orange
+        const r = Math.hypot(x - cx, y - cy) / Math.max(1, small * 0.5);
+        const core = 0.55 * Math.pow(Math.max(0, 1 - r / 0.8), 1.3); // the hot middle
+        const [a, l] = flow(x, y);
+        const streak = 0.2 * centred(valueNoise(a + 40, l + 40, 1.5, 5, f.seed + 52)); // along the flow
+        c.v = rim + core + f.detail * (streak + 0.06 * N(f, x, y, 3, 3, 53));
         c.lit = 0.15;
       });
       // Hairline cracks glowing through the crust.
       each(f, (x, y) => {
         if (!isCrust(x, y) || H(f, x, y, 54) < 0.86) return;
-        walk(f, x, y, 3 + Math.floor(H(f, x, y, 55) * 3), 56, (cx, cy) => {
-          if (isCrust(cx, cy)) put(f, cx, cy, -0.2, { pal: 0, hard: true, lit: 0.15 });
+        walk(f, x, y, 3 + Math.floor(H(f, x, y, 55) * 3), 56, (px, py) => {
+          if (isCrust(px, py)) put(f, px, py, -0.1, { pal: 0, hard: true, lit: 0.15 });
         });
       });
     },
@@ -579,42 +601,40 @@ const SPECS: Record<Material, MaterialSpec> = {
     },
   },
 
-  // Glacier ice: a frosted pale top deepening to deep blue toward the bottom (thickness),
-  // geometric inner fractures — straight runs at 0°, 45° and 90° that turn and branch —
-  // each dark pixel with an almost white lit edge beside it, and one or two glints.
+  // Glacier ice, glassy: a smooth fall from pale frost at the top to deep blue at the bottom
+  // (thickness), a pair of diagonal light streaks, and one or two long straight fracture
+  // planes (0°, 45° or 90°) — dark, with an almost white lit edge beside every pixel.
   ice: {
     smoothing: 0.55, lighting: 0.5,
     palettes: (base, given) => [given || rampFromBase(base, 9, { contrast: 1.1, chroma: 1.5, shadowShift: 40 })],
     paint: (f) => {
+      const c1 = Math.round((f.w + f.h) * (0.18 + 0.14 * H(f, 0, 0, 80)));
       each(f, (x, y, c) => {
         const t = f.h > 1 ? y / (f.h - 1) : 0.5;
-        const depth = f.side ? 0.9 * smooth(t) : f.face === "down" ? 0.6 : 0.1 * t;
-        c.v = 0.32 - depth + f.detail * (0.18 * T(f, x, y) + 0.1 * N(f, x, y, 5, 3, 0));
+        const depth = f.side ? 0.95 * smooth(t) : f.face === "down" ? 0.6 : 0.15 * t;
+        c.v = 0.35 - depth + f.detail * 0.07 * N(f, x, y, 5, 3, 0);
+        const s = x + y - c1; // the glassy streaks: a wide one and a narrow one
+        if (s === 0 || s === 1) c.v += 0.3 * (1 - 0.5 * t);
+        else if (s === 4 || s === 5) c.v += 0.16 * (1 - 0.5 * t);
       });
       const base = f.cells.map((c) => c.v);
       const DIRS: [number, number][] = [[1, 0], [1, 1], [0, 1], [-1, 1]]; // 0°, 45°, 90°, 135°
       const crack: [number, number, number][] = [];
-      const run = (x: number, y: number, d: number, len: number, k: number, branch: boolean) => {
-        let seg = 0, segLen = 3 + Math.floor(H(f, x, y, k) * 4);
+      if (f.side && f.w * f.h >= 24) {
+        let d = Math.floor(H(f, 0, 3, 84) * 4);
+        let x = Math.floor(f.w * (0.2 + 0.6 * H(f, 0, 1, 82))), y = Math.floor(f.h * (0.1 + 0.3 * H(f, 0, 2, 83)));
+        if (d === 3 && x < f.w / 2) x += Math.floor(f.w / 3); // a down-left run starts on the right
+        const len = Math.round(Math.max(f.w, f.h) * (0.55 + 0.25 * H(f, 0, 4, 85)));
+        const kink = Math.round(len * (0.4 + 0.2 * H(f, 0, 5, 86)));
         for (let s = 0; s < len && inside(f, x, y); s++) {
           crack.push([x, y, d]);
-          if (branch && s === Math.floor(len / 2)) run(x, y, (d + 2) % 4, 3 + Math.floor(H(f, x, y, k + 3) * 3), k + 7, false); // 90° branch
-          if (++seg >= segLen) { // turn by 45°
-            seg = 0; segLen = 3 + Math.floor(H(f, x, y, k + 1) * 4);
-            d = (d + (H(f, x, y, k + 2) < 0.5 ? 1 : 3)) % 4;
-          }
+          if (s === kink) d = (d + (H(f, 0, 6, 87) < 0.5 ? 1 : 3)) % 4; // one 45° turn
           x += DIRS[d][0]; y += DIRS[d][1];
         }
-      };
-      const cracks = f.w * f.h >= 144 ? 2 : 1;
-      for (let i = 0; i < cracks; i++) {
-        run(Math.floor(f.w * (0.2 + 0.6 * H(f, i, 1, 82))), Math.floor(f.h * 0.4 * H(f, i, 2, 83)), Math.floor(H(f, i, 3, 84) * 4),
-          Math.round(Math.max(f.w, f.h) * (0.6 + 0.4 * H(f, i, 4, 85))), 86 + i * 11, f.w * f.h >= 64);
       }
       // The lit edge first (below a flat or diagonal run, right of a vertical one), then the dark line on top.
       for (const [x, y, d] of crack) put(f, d === 2 ? x + 1 : x, d === 2 ? y : y + 1, 0.95, { hard: true, lit: 0 });
-      for (const [x, y] of crack) put(f, x, y, Math.min(base[y * f.w + x] - 0.45, -0.1), { hard: true });
-      glints(f, f.w * f.h >= 36 ? 2 : 1, 89, (x, y) => put(f, x, y, 1, { hard: true, lit: 0 }));
+      for (const [x, y] of crack) put(f, x, y, Math.min(base[y * f.w + x] - 0.4, -0.1), { hard: true });
     },
   },
 };

@@ -67,7 +67,7 @@ const rustDepth = (rows) => {
   let deepest = -1;
   rows.forEach((row, y) => row.forEach((c, x) => {
     const [r, , b] = hexToRgb(c);
-    if (r - b > 25) deepest = Math.max(deepest, Math.min(x, y, row.length - 1 - x, rows.length - 1 - y));
+    if (r - b > 60) deepest = Math.max(deepest, Math.min(x, y, row.length - 1 - x, rows.length - 1 - y)); // orange rust, not the brownish stain
   }));
   return deepest;
 };
@@ -77,6 +77,10 @@ check("ancient_metal: rust only at the rims (the outer ring on a thin face)", ru
   `16x16: ${rustBig} px in from the rim, 16x6: ${rustThin}`);
 const ice = face16("ice");
 check("ice: deepens toward the bottom (thickness)", avg(ice[1]) - avg(ice[14]) > 70, `${Math.round(avg(ice[1]))} → ${Math.round(avg(ice[14]))}`);
+const magma = face16("magma", "magma").flat();
+const magmaHot = magma.filter((c) => luma(c) >= 180).length;
+check("magma: glows — bright overall with a yellow-white hot middle", avg(magma) >= 100 && magmaHot >= 20,
+  `average ${Math.round(avg(magma))}, ${magmaHot} yellow-white px`);
 
 const strong = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 0 }));
 const calm = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 1 }));
