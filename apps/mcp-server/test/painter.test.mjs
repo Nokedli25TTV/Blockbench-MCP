@@ -1,6 +1,7 @@
 // Unit test for the shared face painter (packages/shared/src/facePainter.ts), run straight
 // from the TypeScript source (Node strips the types). It guards the look the user asked
-// for: shaded, structured pixel art — never flat bands (v1) and never "ant war" noise (v2).
+// for: shaded, structured pixel art with clustered texture — never flat bands (v1), never
+// "ant war" noise (v2), never too smooth (v3) and never lone dots except deliberate structure.
 import { paintFace, rampFromBase, hexToRgb, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
 
 let failures = 0;
@@ -20,6 +21,18 @@ const speckle = (rows) => {
   }));
   return lone / total;
 };
+// Share of neighbouring pixel pairs that differ — how much texture a surface shows.
+const busy = (rows) => {
+  let diff = 0, total = 0;
+  rows.forEach((row, y) => row.forEach((c, x) => {
+    if (x + 1 < row.length) { total++; if (row[x + 1] !== c) diff++; }
+    if (y + 1 < rows.length) { total++; if (rows[y + 1][x] !== c) diff++; }
+  }));
+  return diff / total;
+};
+// Materials whose structure is made of single pixels on purpose (stitches, facet edges,
+// cracks, scratches, glints); everything else must have (almost) no lone pixels.
+const DOTTED = new Set(["leather", "crystal", "ice", "ancient_metal"]);
 const COLORS = {
   generic: "#8b5a2b", fur: "#7a5230", skin: "#c98f6b", leather: "#8b5a2b", cloth: "#3f5fa8", wood: "#8a6238", planks: "#9c7447",
   stone: "#7d7d80", metal: "#9aa3ad", gem: "#3fb8c9", plant: "#4f8f3a", dungeon_stone: "#6f717c", crystal: "#8b4fe0",
@@ -36,13 +49,20 @@ for (const material of MATERIALS) {
   const distinct = new Set(face.flat()).size;
   const noise = speckle(face);
   const lit = material === "crystal" || material === "magma" || avg(face.slice(1, 4).flat()) > avg(face.slice(8, 11).flat());
-  check(`${material}: varied, calm, lit from above`, face.length === 12 && face[0].length === 12 && distinct >= 4 && noise <= 0.2 && lit,
-    `${distinct} colours, ${Math.round(noise * 100)}% lone pixels`);
+  const maxLone = DOTTED.has(material) ? 0.12 : 0.05;
+  check(`${material}: varied, no dotting, lit from above`, face.length === 12 && face[0].length === 12 && distinct >= 4 && noise <= maxLone && lit,
+    `${distinct} colours, ${Math.round(noise * 100)}% lone pixels (max ${Math.round(maxLone * 100)}%)`);
 }
 
-const grainy = speckle(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 0 }));
-const clean = speckle(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 1 }));
-check("more smoothing, fewer lone pixels", clean < grainy, `${Math.round(grainy * 100)}% → ${Math.round(clean * 100)}%`);
+const strong = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 0 }));
+const calm = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5, smoothing: 1 }));
+const byDefault = busy(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 5 }));
+check("more smoothing, calmer surface", calm < strong, `${Math.round(strong * 100)}% → ${Math.round(calm * 100)}% changing neighbours`);
+check("the default keeps a visible texture (not flat)", byDefault >= 0.2, `${Math.round(byDefault * 100)}% changing neighbours`);
+for (const s of [0, 0.5, 1]) {
+  const lone = speckle(paintFace("north", 12, 12, { color: "#8b5a2b", seed: 9, smoothing: s }));
+  check(`no dotting at smoothing ${s}`, lone <= 0.03, `${Math.round(lone * 100)}% lone pixels`);
+}
 
 const top = paintFace("up", 8, 6, { color: "#8b5a2b", seed: 3 }).flat();
 const bottom = paintFace("down", 8, 6, { color: "#8b5a2b", seed: 3 }).flat();

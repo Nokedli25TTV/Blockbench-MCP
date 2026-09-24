@@ -24,12 +24,14 @@ Create and paint textures for 3D models using Blockbench MCP tools.
    art: an even, hue-shifted palette built around your colour (OKLab), light from above (top bright,
    sides a soft top→bottom gradient, lit rim, contact shadow) and a **`material`** that paints real
    structure: `generic` (default), `fur`, `skin`, `leather` (stitches, worn edges), `cloth`, `wood`,
-   `planks`, `stone`, `metal`, `gem`, `plant`, `dungeon_stone` (blocks, bevels, cracks), `crystal`
+   `planks`, `stone`, `metal`, `gem`, `plant`, `dungeon_stone` (blocks, soft mortar, worn bevels, cracks), `crystal`
    (glowing core, sharp facets), `monster_fur` (clear locks), `ancient_metal` (scratches, rust at the
-   edges), `wavy_wood` (flowing grain, growth rings on end faces), `magma` (heat + dark crust),
+   edges), `wavy_wood` (flowing grain, growth rings on end faces), `magma` (dark crust plates, glowing rims, flow bands,
+   hairline cracks),
    `moss` (big saturated patches, tufts), `water` (depth gradient, waves), `ice` (fractures, glints).
-   **`smoothing`** (0–1) runs from grainy dithered pixel art (0) to clean colour clusters and soft
-   gradients (1); every material has a sensible default (~0.6), so leave it out unless asked.
+   **`smoothing`** (0–1) runs from a strong texture of small colour clusters (0) to a calm surface
+   with soft gradients (1); no level leaves lone dots. Every material has a sensible default
+   (0.35–0.6), so leave it out unless asked.
    `detail` (0–2) sets the pattern strength, `lighting` (0–2) the light/shadow strength. Each cube
    gets its own seed, so repeated parts don't look stamped. Use `target` (a group) to shade all its cubes, `edge_color` for a dark cutting edge,
    `sheen` for a blade highlight, `colors` (3–9 hex, dark → light) for a hand-picked ramp.

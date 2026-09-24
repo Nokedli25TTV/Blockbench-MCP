@@ -5,7 +5,7 @@ import { ToolType } from "@blockbench-mcp/shared/types";
 import { getPalette } from "../../../packages/shared/src/palettes";
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor, javaVersionLabel } from "../../../packages/shared/src/formatRules";
 import type { FormatInfo, FormatRules } from "../../../packages/shared/src/formatRules";
-import { paintFace, rampFromBase as rampFromBase7, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter";
+import { paintFace, rampFromBase, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter";
 import type { FaceKey, Material } from "../../../packages/shared/src/facePainter";
 
 // Global variable declarations
@@ -4434,9 +4434,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
 
     // ---------------------------------------------------------------------
     // shade_cube(s): paint cube faces from ONE exact colour with the shared face
-    // painter (packages/shared/src/facePainter.ts): a 7-shade hue-shifted ramp, face
-    // light (top bright, bottom dark), a smooth dithered gradient on the sides, lit and
-    // shaded edges, and a material pattern (fur, stone, wood grain, …) — so the result
+    // painter (packages/shared/src/facePainter.ts): a 9-shade hue-shifted palette, face
+    // light (top bright, bottom dark), a soft gradient on the sides, lit and shaded
+    // edges, and a material pattern (fur, stone, wood grain, …) — so the result
     // reads like hand-made pixel art instead of the old flat bands. Reads each face's
     // packed UV rect, so run pack_uv + validate_uv first.
     // ---------------------------------------------------------------------
@@ -4475,7 +4475,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       const color = given ? null : String(input.color);
       return {
         cubes, label, color, given,
-        ramp: given || rampFromBase7(color!),
+        ramp: given || rampFromBase(color!),
         edgeColor: input.edge_color ? String(input.edge_color) : null,
         sheen: !!input.sheen,
         material: (input.material || 'generic') as Material,

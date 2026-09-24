@@ -2296,21 +2296,21 @@ server.registerTool(
       "Texture a cube from ONE exact colour as shaded pixel art: an even, hue-shifted palette built around your " +
       "colour, light from above (top bright, sides a soft top→bottom gradient, bottom in shade, lit rim, contact " +
       "shadow) and a material that paints real structure — generic, fur, skin, leather (stitches, worn edges), " +
-      "cloth, wood, planks, stone, metal, gem, plant, dungeon_stone (blocks, bevels, cracks), crystal (glowing " +
+      "cloth, wood, planks, stone, metal, gem, plant, dungeon_stone (blocks, soft mortar, worn bevels, cracks), crystal (glowing " +
       "facets), monster_fur (locks), ancient_metal (scratches, rust), wavy_wood (flowing grain, rings), magma " +
-      "(heat + crust), moss, water (depth gradient, waves), ice (fractures, glints). `smoothing` 0–1 goes from " +
-      "grainy dithered to clean colour clusters (each material has a sensible default). Give `cube_id` or " +
+      "(crust plates, glowing rims, flow, hairline cracks), moss, water (depth gradient, waves), ice (fractures, glints). `smoothing` 0–1 goes from " +
+      "strong clustered texture to a calm surface, never dotted (each material has a sensible default). Give `cube_id` or " +
       "`target` (a group) plus `color` (one hex) or `colors` (3–9 hex, dark → light). Run pack_uv + " +
       "validate_uv FIRST so each cube has its own UV region.",
     inputSchema: {
       cube_id: z.string().optional().describe("One cube name/uuid to shade."),
       target: z.string().optional().describe("Group name → shade all its descendant cubes the same colour (use instead of cube_id)."),
-      color: z.string().optional().describe("⭐ One hex (e.g. '#cc2233') → hue-shifted 7-shade ramp, your colour in the middle. The normal way to hit a reference colour."),
+      color: z.string().optional().describe("⭐ One hex (e.g. '#cc2233') → hue-shifted 9-shade palette, your colour in the middle. The normal way to hit a reference colour."),
       colors: z.array(z.string()).min(3).max(9).optional().describe("Full control: 3–9 hex, dark → light (the middle one is the base). Overrides color."),
       material: z.enum(MATERIALS).optional().describe("Surface material (default generic) — see the description for what each paints."),
       detail: z.number().min(0).max(2).optional().describe("Pattern strength 0–2 (default 1; 0 = smooth shading only)."),
       lighting: z.number().min(0).max(2).optional().describe("Light/shadow strength 0–2 (default 1)."),
-      smoothing: z.number().min(0).max(1).optional().describe("0 = grainy dithered pixel art … 1 = clean colour clusters and soft gradients. Default depends on the material (~0.6)."),
+      smoothing: z.number().min(0).max(1).optional().describe("0 = strong texture of small colour clusters … 1 = calm surface with soft gradients; no level leaves lone dots. Default depends on the material (0.35–0.6)."),
       edge_color: z.string().optional().describe("Optional hex for the thin east/west faces (e.g. a dark blade outline / cutting edge)."),
       sheen: z.boolean().optional().describe("Add a brighter centre stripe on the broad north/south faces (blade sheen / blood-groove look)."),
       texture_id: z.string().optional().describe("Texture name/uuid; default the active texture."),
@@ -2339,12 +2339,12 @@ server.registerTool(
           z.object({
             cube_id: z.string().optional().describe("One cube name/uuid."),
             target: z.string().optional().describe("Group name → all its descendant cubes."),
-            color: z.string().optional().describe("One hex → hue-shifted 7-shade ramp."),
+            color: z.string().optional().describe("One hex → hue-shifted 9-shade palette."),
             colors: z.array(z.string()).min(3).max(9).optional().describe("3–9 hex, dark → light; overrides color."),
             material: z.enum(MATERIALS).optional().describe("Surface material (default generic) — see shade_cube."),
             detail: z.number().min(0).max(2).optional().describe("Pattern strength 0–2 (default 1)."),
             lighting: z.number().min(0).max(2).optional().describe("Light/shadow strength 0–2 (default 1)."),
-            smoothing: z.number().min(0).max(1).optional().describe("0 grainy … 1 clean clusters (default per material)."),
+            smoothing: z.number().min(0).max(1).optional().describe("0 strong clustered texture … 1 calm (default per material)."),
             edge_color: z.string().optional().describe("Hex for the thin east/west faces (e.g. a blade edge)."),
             sheen: z.boolean().optional().describe("Brighter centre stripe on the broad north/south faces."),
           })

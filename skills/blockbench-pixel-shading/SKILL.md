@@ -13,7 +13,7 @@ by the tools.
 even hue-shifted palettes, light from above, soft gradients (no flat bands, no noise), lit edges,
 contact shadow and a per-part `material` that paints structure (e.g. `dungeon_stone`, `crystal`,
 `monster_fur`, `ancient_metal`, `wavy_wood`, `magma`, `moss`, `water`, `leather`, `ice`; see the
-texturing skill for the full list). `smoothing` 0–1 trades grain for clean clusters. Then HAND-PAINT what makes the model readable — eyes, mouth, belts, trims, scratches,
+texturing skill for the full list). `smoothing` 0–1 runs from strong clustered texture to calm (never dotted). Then HAND-PAINT what makes the model readable — eyes, mouth, belts, trims, scratches,
 glowing runes — with `paint_pixel_matrix` (and `draw_shape_tool` / `paint_fill_tool`), following
 the recipes below. Workflow: `pack_uv` → `validate_uv` → `shade_cubes` → know each cube's UV
 region → paint the details → screenshot.
@@ -41,15 +41,17 @@ region → paint the details → screenshot.
   (index 4 / 3). Bottom and right edges get shadow (index 1 / 0).
 - **Ambient occlusion (index 0).** Concave seams and the UV edges where a cube meets another
   cube (e.g. limb→torso, head bottom) must use index 0 (deep shadow).
-- **Per-pixel noise / dithering (organic only).** Vary between two adjacent indices (e.g. 2↔3)
-  to fake material texture. NEVER leave a solid contiguous block larger than 3×3 of the same
-  index on organic surfaces. Dithering (checkerboard of two indices) simulates a blend.
+- **Clustered texture (organic only).** Vary between two adjacent indices (e.g. 2↔3) in small
+  clusters of 2–3 px to fake material texture. NEVER leave a solid contiguous block larger than
+  3×3 of the same index on organic surfaces — and never scatter lone single pixels or a
+  checkerboard dither: they read as dots/noise. Single pixels only for deliberate details
+  (stitches, cracks, a glint).
 - **No anti-aliasing.** Outlines/edges must jump straight between form and background — do NOT
   put index 1 or 2 as a soft transition into transparency.
 - **Contrast.** Use the full 0-4 range on every part; don't paint everything at index 2-3.
 
 ## Recipe A — organic MOBS / entities (skin, cloth, fur, scales)
-Palettes: leather, cloth_blue, green, bone. Heavy per-pixel noise. Strong AO (index 0) at the
+Palettes: leather, cloth_blue, green, bone. Strong clustered texture (2–3 px clusters, no lone dots). Strong AO (index 0) at the
 TOP of leg UVs, INNER sides of arm UVs, and BOTTOM of head UVs where they meet the torso. Keep
 the FACE (front UV) relatively clean/low-noise so eyes & mouth stay readable. Remember limbs are
 often mirrored (one texture region drives left & right) — keep them symmetric.
