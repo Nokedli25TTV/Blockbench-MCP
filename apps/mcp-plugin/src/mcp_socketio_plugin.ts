@@ -7,6 +7,9 @@ import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor, javaVersionL
 import type { FormatInfo, FormatRules } from "../../../packages/shared/src/formatRules";
 import { paintFace, rampFromBase, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter";
 import type { FaceKey, Material } from "../../../packages/shared/src/facePainter";
+import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
+import type { GeoNode, Frame, Box, Side, Align, Anchor } from "../../../packages/shared/src/placement";
+import type { Vec3 } from "../../../packages/shared/src/types";
 
 // Global variable declarations
 let mcpPanel: Panel;
@@ -638,32 +641,54 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
 
     // Set the pivot/origin of a GROUP — or of a CUBE where the format rotates cubes
     // (Java block/item rotation lives on the cube) — rule #1: pivot-first.
-    const setOrigin = (input: { target?: string; origin?: [number, number, number] }): any => {
+    // Set a pivot by value, or by `anchor`: the centre (or a side's centre) of the part's own
+    // geometry, measured before its own rotation — "the shoulder is the top of the arm".
+    const setOrigin = (input: { target?: string; origin?: [number, number, number]; anchor?: string }): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         if (!input.target) return { ok: false, error: 'target (group name) is required.' };
-        if (!isVec3(input.origin)) return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1)." };
+        const anchor = input.anchor as Anchor | undefined;
+        if (anchor !== undefined && input.origin !== undefined) return { ok: false, error: "Give 'origin' [x,y,z] or 'anchor', not both." };
+        if (anchor !== undefined && !(ANCHORS as readonly string[]).includes(anchor)) return { ok: false, error: `anchor must be one of ${ANCHORS.join(', ')}.` };
+        if (anchor === undefined && !isVec3(input.origin)) return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1) — or give 'anchor' (e.g. 'top') to put the pivot on the part's own geometry." };
+        const pivotFor = (n: any): Vec3 | string => {
+          if (anchor === undefined) return v3(input.origin);
+          const g = toGeoNode(n);
+          const points = !g ? [] : g.kind === 'group' ? (g.children || []).flatMap((c) => worldPoints(c, [])) : worldPoints({ ...g, rotation: [0, 0, 0] }, []);
+          const box = boxOf(points);
+          return box ? anchorPoint(box, anchor) : `"${n.name}" has no geometry to anchor a pivot to — give 'origin' instead.`;
+        };
         const cubeTarget = findCubeByName(input.target);
         if (cubeTarget) {
           const rules = currentRules();
           if (!rules.cube.allowed) return { ok: false, error: `"${input.target}" is a cube, and cubes don't rotate in this format — set the pivot of its group instead.` };
+          const origin = pivotFor(cubeTarget);
+          if (typeof origin === 'string') return { ok: false, error: origin };
           Undo.initEdit({ elements: [cubeTarget] });
-          cubeTarget.origin = [input.origin[0], input.origin[1], input.origin[2]];
+          cubeTarget.origin = origin;
           Undo.finishEdit('Set origin via MCP', { elements: [cubeTarget] });
           if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
           logToHistory(`set origin of cube "${cubeTarget.name}"`);
-          return { ok: true, name: cubeTarget.name, origin: cubeTarget.origin, type: 'cube' };
+          return { ok: true, name: cubeTarget.name, origin: cubeTarget.origin, type: 'cube', ...(anchor ? { anchor } : {}) };
         }
         const group = findGroupByName(input.target);
         if (!group) return { ok: false, error: `Group "${input.target}" not found.` };
+        const origin = pivotFor(group);
+        if (typeof origin === 'string') return { ok: false, error: origin };
+        const moved = !isVec3(group.origin) || [0, 1, 2].some((i) => Math.abs(group.origin[i] - origin[i]) > 1e-6);
 
         Undo.initEdit({ outliner: true, elements: [] });
-        group.origin = [input.origin[0], input.origin[1], input.origin[2]];
+        group.origin = origin;
         Undo.finishEdit('Set origin via MCP', { outliner: true });
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`set origin of "${group.name}"`);
-        return { ok: true, name: group.name, origin: group.origin };
+        return {
+          ok: true, name: group.name, origin: group.origin, ...(anchor ? { anchor } : {}),
+          warning: moved && nonZeroAxes(v3(group.rotation)) > 0
+            ? 'this group is already rotated, so a new pivot swings the part somewhere else — set pivots before rotating (rule #1).'
+            : undefined,
+        };
       } catch (err: any) {
         console.error('[MCP Plugin] setOrigin failed:', err);
         logToHistory('error: ' + (err?.message || String(err)));
@@ -2919,12 +2944,147 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
+    // ---------------------------------------------------------------------
+    // Placement: a part's world bounds, moving a whole part (a group with everything
+    // inside, pivots included) in one undo step, placing it against another part, and
+    // mirrored copies. The math is packages/shared/src/placement.ts — unit-tested, and
+    // the test mock runs the same functions.
+    // ---------------------------------------------------------------------
+    const isGroupEl = (n: any): boolean => typeof Group !== 'undefined' && n instanceof Group;
+    const v3 = (v: any): Vec3 => (isVec3(v) ? [v[0], v[1], v[2]] : [0, 0, 0]);
+    const toGeoNode = (n: any): GeoNode | null => {
+      if (isGroupEl(n)) {
+        return {
+          name: n.name, kind: 'group', origin: v3(n.origin), rotation: v3(n.rotation),
+          children: (n.children || []).map(toGeoNode).filter((c: GeoNode | null): c is GeoNode => !!c),
+        };
+      }
+      if (isVec3(n.from) && isVec3(n.to)) {
+        return { name: n.name, kind: 'cube', origin: v3(n.origin), rotation: v3(n.rotation), from: v3(n.from), to: v3(n.to), inflate: typeof n.inflate === 'number' ? n.inflate : 0 };
+      }
+      if (typeof Mesh !== 'undefined' && n instanceof Mesh) {
+        const o = v3(n.origin); // mesh vertices are relative to its origin
+        const points = Object.values((n as any).vertices || {}).map((p: any) => [p[0] + o[0], p[1] + o[1], p[2] + o[2]] as Vec3);
+        return { name: n.name, kind: 'point', origin: o, rotation: v3(n.rotation), points };
+      }
+      if (isVec3(n.position)) return { name: n.name, kind: 'point', origin: v3(n.position), rotation: [0, 0, 0], points: [v3(n.position)] };
+      return null;
+    };
+    // The rotations above a node, nearest group first.
+    const chainAbove = (n: any): Frame[] => {
+      const chain: Frame[] = [];
+      for (let p = n.parent; p && isGroupEl(p); p = p.parent) chain.push({ origin: v3(p.origin), rotation: v3(p.rotation) });
+      return chain;
+    };
+    const worldBoxOf = (n: any): Box | null => {
+      const g = toGeoNode(n);
+      return g ? boxOf(worldPoints(g, chainAbove(n))) : null;
+    };
+    const subtreeOf = (n: any): any[] => [n, ...(n.children || []).flatMap(subtreeOf)];
+    const shiftNode = (n: any, d: Vec3) => {
+      const add = (v: any) => { if (isVec3(v)) for (let i = 0; i < 3; i++) v[i] = Math.round((v[i] + d[i]) * 1e4) / 1e4; };
+      if (isGroupEl(n)) add(n.origin);
+      else if (isVec3(n.from) && isVec3(n.to)) { add(n.from); add(n.to); add(n.origin); }
+      else if (isVec3(n.position)) add(n.position);
+      else add(n.origin); // meshes: the vertices are relative to the origin
+    };
+    // Every cube of a part must stay inside the format's coordinate range after a move.
+    const moveRangeError = (nodes: any[], d: Vec3): string | null => {
+      const rules = currentRules();
+      for (const n of nodes) {
+        if (!isVec3(n.from) || !isVec3(n.to)) continue;
+        const err = checkBounds(rules, n.from.map((v: number, i: number) => v + d[i]) as Vec3, n.to.map((v: number, i: number) => v + d[i]) as Vec3, `Cube "${n.name}"`);
+        if (err) return err;
+      }
+      return null;
+    };
+    const commitShift = (nodes: any[], d: Vec3, label: string) => {
+      const groups = nodes.filter(isGroupEl), elements = nodes.filter((n) => !isGroupEl(n));
+      const aspects: any = { elements, groups, outliner: groups.length > 0 };
+      Undo.initEdit(aspects);
+      nodes.forEach((n) => shiftNode(n, d));
+      Undo.finishEdit(label, aspects);
+      if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+    };
+    // A move by a fraction of a unit (e.g. centring 3 wide on 4) leaves the part between whole pixels.
+    const gridNote = (worldDelta: Vec3) => worldDelta.some((v) => Math.abs(v - Math.round(v)) > 1e-4)
+      ? 'it moved by a fraction of a unit, so it now sits between whole pixels — fine for geometry, but pixel textures line up best on whole units (nudge with offset).'
+      : undefined;
+
+    // Move a whole part by a world offset, or put its pivot at a world point.
+    const moveElement = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const part = input.target ? findElementAny(String(input.target)) : null;
+        if (!part) return { ok: false, error: `Element or group "${input.target}" not found.` };
+        if (isVec3(input.offset) === isVec3(input.to)) return { ok: false, error: "Give exactly one of 'offset' [x,y,z] (move by) or 'to' [x,y,z] (where the pivot goes) — both must be 3 finite numbers." };
+        const chain = chainAbove(part);
+        const pivot = throughChain(v3(isVec3(part.origin) ? part.origin : part.position), chain);
+        const world: Vec3 = isVec3(input.offset) ? v3(input.offset) : roundVec([0, 1, 2].map((i) => input.to[i] - pivot[i]));
+        const d = toModelDelta(world, chain);
+        const nodes = subtreeOf(part);
+        const rangeError = moveRangeError(nodes, d);
+        if (rangeError) return { ok: false, error: rangeError };
+        const before = worldBoxOf(part);
+        const after = before && shiftBox(before, world);
+        if (input.dry_run) return { ok: true, dry_run: true, name: part.name, delta: world, moved: nodes.length, box: after };
+        commitShift(nodes, d, 'Move element via MCP');
+        logToHistory(`moved "${part.name}" by [${world.join(', ')}]`);
+        return { ok: true, name: part.name, delta: world, moved: nodes.length, box: worldBoxOf(part), warning: gridNote(world) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // Put a part against a side of another ("the head on top of the body, centred").
+    const placeRelative = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const part = input.target ? findElementAny(String(input.target)) : null;
+        if (!part) return { ok: false, error: `Element or group "${input.target}" not found.` };
+        const ref = input.ref ? findElementAny(String(input.ref)) : null;
+        if (!ref) return { ok: false, error: `Reference "${input.ref}" not found.` };
+        if (part === ref || isDescendantOf(ref, part)) return { ok: false, error: `"${ref.name}" is inside "${part.name}" and would move with it — place against a part outside it.` };
+        if (!(SIDES as readonly string[]).includes(input.side)) return { ok: false, error: `side must be one of ${SIDES.join(', ')}.` };
+        const align = input.align ?? 'center';
+        if (!(ALIGNS as readonly string[]).includes(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(', ')}.` };
+        const gap = typeof input.gap === 'number' && isFinite(input.gap) ? input.gap : 0;
+        const box = worldBoxOf(part), refBox = worldBoxOf(ref);
+        if (!box) return { ok: false, error: `"${part.name}" has no geometry to place.` };
+        if (!refBox) return { ok: false, error: `Reference "${ref.name}" has no geometry to place against.` };
+        const world = placementDelta(box, refBox, input.side as Side, { gap, align: align as Align, offset: isVec3(input.offset) ? v3(input.offset) : undefined });
+        const d = toModelDelta(world, chainAbove(part));
+        const nodes = subtreeOf(part);
+        const rangeError = moveRangeError(nodes, d);
+        if (rangeError) return { ok: false, error: rangeError };
+        const after = shiftBox(box, world);
+        const result = { name: part.name, ref: ref.name, side: input.side, delta: world, ref_box: refBox };
+        if (input.dry_run) return { ok: true, dry_run: true, ...result, box: after };
+        commitShift(nodes, d, 'Place element via MCP');
+        logToHistory(`placed "${part.name}" ${input.side} "${ref.name}"`);
+        return { ok: true, ...result, box: worldBoxOf(part), warning: gridNote(world) };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
+    // Mirror a copied node across the plane `center` on `axis` (as Blockbench's Flip does):
+    // coordinates mirrored, the other two rotation axes turned around, box UV mirrored.
+    const mirrorNode = (n: any, axis: number, center: number) => {
+      if (isGroupEl(n)) {
+        n.origin[axis] = mirrorCoord(n.origin[axis], center);
+        for (let i = 0; i < 3; i++) if (i !== axis && n.rotation) n.rotation[i] = -n.rotation[i] + 0;
+      } else if (typeof n.flip === 'function') {
+        n.flip(axis, center, false); // cubes: coordinates, rotation, UV / mirror_uv
+      } else if (isVec3(n.position)) {
+        n.position[axis] = mirrorCoord(n.position[axis], center);
+      }
+    };
+
     // Uses Blockbench's own duplicate(), which copies every property (per-face UV,
     // textures, …) and every child type (cubes, meshes, locators, groups). The old
     // hand-written clone lost face data, offset meshes twice (their vertices are
     // relative to the origin), gave newName to every child (duplicate names), and
     // put groups in the Undo "elements" aspect, which throws in Blockbench 5
     // after the copy was already made (all seen live on 5.2.1).
+    // `mirror` makes the copy the mirror image across a plane (left arm → right arm,
+    // names swapped); `count` makes a row of copies, each `offset` further on.
     const duplicateElement = (input: any): any => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
@@ -2932,8 +3092,22 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         const element = findElementAny(input.id);
         if (!element) return { ok: false, error: `Element "${input.id}" not found.` };
         if (typeof (element as any).duplicate !== 'function') return { ok: false, error: `"${element.name}" cannot be duplicated.` };
-        if (input.newName && nameTaken(input.newName)) return { ok: false, error: `Name "${input.newName}" already exists. Names must be unique (rule #4).` };
         const offset: number[] = isVec3(input.offset) ? input.offset : [0, 0, 0];
+        const count = input.count === undefined ? 1 : Number(input.count);
+        if (!Number.isInteger(count) || count < 1 || count > 64) return { ok: false, error: 'count must be a whole number from 1 to 64.' };
+        const axis = input.mirror === undefined ? null : ['x', 'y', 'z'].indexOf(String(input.mirror));
+        if (axis === -1) return { ok: false, error: "mirror must be 'x', 'y' or 'z'." };
+        const center = typeof input.mirror_center === 'number' && isFinite(input.mirror_center)
+          ? input.mirror_center : ((Format as any)?.centered_grid ? 0 : 8);
+        const topName = (k: number): string | null => {
+          if (!input.newName) return null;
+          return count > 1 ? String(input.newName).replace('{i}', String(k)) : String(input.newName);
+        };
+        if (input.newName && count > 1 && !String(input.newName).includes('{i}')) return { ok: false, error: "With count > 1, newName needs '{i}' for the copy number (e.g. 'spike_{i}') so every name is unique." };
+        for (let k = 1; k <= count; k++) {
+          const n = topName(k);
+          if (n && nameTaken(n)) return { ok: false, error: `Name "${n}" already exists. Names must be unique (rule #4).` };
+        }
 
         const uniqueCopyName = (base: string): string => {
           let n = `${base}_copy`;
@@ -2941,40 +3115,57 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           while (nameTaken(n)) n = `${base}_copy${i++}`;
           return n;
         };
-        const shift = (v: any) => { if (isVec3(v)) for (let i = 0; i < 3; i++) v[i] += offset[i]; };
+        // A mirrored copy takes the other side's name ("left_arm" → "right_arm") when free.
+        const pickName = (src: any, top: boolean, k: number): string => {
+          const given = top ? topName(k) : null;
+          if (given) return given;
+          if (axis !== null) {
+            const flipped = mirroredName(src.name, axis);
+            if (flipped !== src.name && !nameTaken(flipped)) return flipped;
+          }
+          return uniqueCopyName(src.name);
+        };
         const copies: any[] = [];
         // Walk source and copy side by side (duplicate() keeps the child order).
-        const adjust = (src: any, cp: any, top: boolean) => {
+        const adjust = (src: any, cp: any, top: boolean, k: number) => {
           copies.push(cp);
-          cp.name = top && input.newName ? input.newName : uniqueCopyName(src.name);
-          if (isVec3(cp.from) && isVec3(cp.to)) { shift(cp.from); shift(cp.to); shift(cp.origin); } // cube
-          else if (isVec3(cp.position)) shift(cp.position); // locator / null object
-          else shift(cp.origin); // group, mesh (mesh vertices are relative to the origin)
-          (src.children || []).forEach((child: any, i: number) => { if (cp.children?.[i]) adjust(child, cp.children[i], false); });
+          // Pick the name first: Blockbench's flip() renames the copy itself (left → right),
+          // which would make that name look taken.
+          const name = pickName(src, top, k);
+          if (axis !== null) mirrorNode(cp, axis, center);
+          cp.name = name;
+          shiftNode(cp, offset.map((v) => v * k) as Vec3);
+          (src.children || []).forEach((child: any, i: number) => { if (cp.children?.[i]) adjust(child, cp.children[i], false, k); });
         };
 
         // Same aspects as Blockbench's own "Duplicate group": new groups go in "groups",
         // everything else in "elements" — with outliner alone, undo left new groups behind.
         Undo.initEdit({ elements: [], groups: [], outliner: true, selection: true } as any);
-        let copy: any = null;
+        const made: any[] = [];
         try {
-          copy = (element as any).duplicate();
-          adjust(element, copy, true);
+          for (let k = 1; k <= count; k++) {
+            const copy = (element as any).duplicate();
+            made.push(copy);
+            adjust(element, copy, true, k);
+          }
         } catch (e: any) {
-          try { if (copy) copy.remove(); } catch { /* best effort */ }
+          for (const copy of made) { try { copy.remove(); } catch { /* best effort */ } }
           Undo.cancelEdit(false);
           return { ok: false, error: `duplicate_element failed, nothing was kept: ${e?.message || String(e)}` };
         }
-        const isGroup = (n: any) => typeof Group !== 'undefined' && n instanceof Group;
         Undo.finishEdit('Duplicate element via MCP', {
-          elements: copies.filter((n) => !isGroup(n)),
-          groups: copies.filter(isGroup),
+          elements: copies.filter((n) => !isGroupEl(n)),
+          groups: copies.filter(isGroupEl),
           outliner: true,
           selection: true,
         } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-        logToHistory(`duplicated "${element.name}" → "${copy.name}" (${copies.length} element(s))`);
-        return { ok: true, source: element.name, name: copy.name, uuid: copy.uuid, count: copies.length, names: copies.map((n) => n.name) };
+        logToHistory(`duplicated "${element.name}" → ${made.map((c) => `"${c.name}"`).join(', ')} (${copies.length} element(s))`);
+        return {
+          ok: true, source: element.name, name: made[0].name, uuid: made[0].uuid, count: copies.length,
+          copies: made.map((c) => c.name), names: copies.map((n) => n.name),
+          ...(axis !== null ? { mirrored: { axis: ['x', 'y', 'z'][axis], center } } : {}),
+        };
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
@@ -4644,6 +4835,8 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         get_undo_stack: getUndoStack,
         save_checkpoint: saveCheckpoint,
         duplicate_element: duplicateElement,
+        move_element: moveElement,
+        place_relative: placeRelative,
         rename_element: renameElement,
         find_elements_by_criteria: findElementsByCriteria,
         select_all_of_type: selectAllOfType,

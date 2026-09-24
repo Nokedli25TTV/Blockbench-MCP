@@ -48,6 +48,8 @@ export type ToolType =
   | "get_undo_stack"
   | "save_checkpoint"
   | "duplicate_element"
+  | "move_element"
+  | "place_relative"
   | "rename_element"
   | "find_elements_by_criteria"
   | "select_all_of_type"

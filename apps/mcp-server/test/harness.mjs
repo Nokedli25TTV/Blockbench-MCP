@@ -13,6 +13,7 @@ import path from "node:path";
 // The same rotation/coordinate rules the plugin enforces (Node strips the TS types).
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor } from "../../../packages/shared/src/formatRules.ts";
 import { rampFromBase, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
+import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement.ts";
 
 const require = createRequire(import.meta.url);
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -36,6 +37,38 @@ export function createMockScene() {
   const findGroup = (name) => { let r = null; walk(scene.roots, (n) => { if (n.type === "group" && n.name === name) r = n; }); return r; };
   const findCube = (name) => { let r = null; walk(scene.roots, (n) => { if (n.type === "cube" && n.name === name) r = n; }); return r; };
   const taken = (name) => !!(findGroup(name) || findCube(name));
+  // Placement helpers — the plugin's, over the mock scene (packages/shared/src/placement.ts).
+  const isV3 = (v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+  const geo = (n) => n.type === "group"
+    ? { name: n.name, kind: "group", origin: n.origin || [0, 0, 0], rotation: n.rotation || [0, 0, 0], children: (n.children || []).map(geo) }
+    : { name: n.name, kind: "cube", origin: n.origin || [0, 0, 0], rotation: n.rotation || [0, 0, 0], from: n.from, to: n.to };
+  const groupsAbove = (target) => {
+    const find = (nodes, trail) => {
+      for (const n of nodes) {
+        if (n === target) return trail;
+        if (n.type === "group") { const r = find(n.children || [], [n, ...trail]); if (r) return r; }
+      }
+      return null;
+    };
+    return find(scene.roots, []) || [];
+  };
+  const chainOf = (n) => groupsAbove(n).map((g) => ({ origin: g.origin || [0, 0, 0], rotation: g.rotation || [0, 0, 0] }));
+  const worldBox = (n) => boxOf(worldPoints(geo(n), chainOf(n)));
+  const subtree = (n) => [n, ...(n.type === "group" ? (n.children || []).flatMap(subtree) : [])];
+  const shiftNode = (n, d) => {
+    const add = (v) => v && v.map((x, i) => Math.round((x + d[i]) * 1e4) / 1e4);
+    if (n.type === "group") n.origin = add(n.origin);
+    else { n.from = add(n.from); n.to = add(n.to); n.origin = add(n.origin); }
+  };
+  const moveRangeError = (nodes, d) => {
+    for (const n of nodes) {
+      if (n.type !== "cube") continue;
+      const err = boundsError(n.from.map((v, i) => v + d[i]), n.to.map((v, i) => v + d[i]), `Cube "${n.name}"`);
+      if (err) return err;
+    }
+    return null;
+  };
+  const findAny = (id) => findCube(id) || findGroup(id);
   // Mirrors the plugin: sub-1-unit cubes are allowed but reported as a warning.
   const thinWarning = (from, to, label) => {
     const d = [0, 1, 2].map((i) => Math.abs(to[i] - from[i]));
@@ -232,13 +265,26 @@ export function createMockScene() {
       return { ok: true, groups: createdGroups, cubes: createdCubes, ...(warnings.length ? { warnings } : {}) };
     },
     set_origin(input) {
+      const anchor = input.anchor;
+      if (anchor !== undefined && input.origin !== undefined) return { ok: false, error: "Give 'origin' [x,y,z] or 'anchor', not both." };
+      if (anchor !== undefined && !ANCHORS.includes(anchor)) return { ok: false, error: `anchor must be one of ${ANCHORS.join(", ")}.` };
+      if (anchor === undefined && !isV3(input.origin)) return { ok: false, error: "'origin' must be 3 finite numbers [x,y,z] (rule #1)." };
+      const pivotFor = (n) => {
+        if (anchor === undefined) return input.origin;
+        const g = geo(n);
+        const b = boxOf(g.kind === "group" ? g.children.flatMap((c) => worldPoints(c, [])) : worldPoints({ ...g, rotation: [0, 0, 0] }, []));
+        return b ? anchorPoint(b, anchor) : null;
+      };
+      const noGeometry = (n) => ({ ok: false, error: `"${n.name}" has no geometry to anchor a pivot to — give 'origin' instead.` });
       const cube = findCube(input.target);
       if (cube) {
         if (!rules().cube.allowed) return { ok: false, error: "target is a cube, and cubes don't rotate in this format" };
-        cube.origin = input.origin; return { ok: true, name: cube.name, origin: cube.origin, type: "cube" };
+        const o = pivotFor(cube); if (!o) return noGeometry(cube);
+        cube.origin = o; return { ok: true, name: cube.name, origin: cube.origin, type: "cube", ...(anchor ? { anchor } : {}) };
       }
       const g = findGroup(input.target); if (!g) return { ok: false, error: "group not found" };
-      g.origin = input.origin; return { ok: true, name: g.name, origin: g.origin };
+      const o = pivotFor(g); if (!o) return noGeometry(g);
+      g.origin = o; return { ok: true, name: g.name, origin: g.origin, ...(anchor ? { anchor } : {}) };
     },
     set_rotation(input) {
       const cube = findCube(input.target);
@@ -442,24 +488,87 @@ export function createMockScene() {
       return { ok: true, id: input.id, name: input.new_name };
     },
     duplicate_element(input) {
-      // Mirrors the plugin: newName for the top copy only, unique "_copy" names inside.
+      // Mirrors the plugin: newName for the top copy only ('{i}' with count), unique "_copy"
+      // names inside, and a mirrored copy takes the other side's name when it is free.
       const el = findCube(input.id) || findGroup(input.id);
       if (!el) return { ok: false, error: "not found" };
-      if (input.newName && taken(input.newName)) return { ok: false, error: `Name "${input.newName}" already exists` };
+      const count = input.count === undefined ? 1 : input.count;
+      const axis = input.mirror === undefined ? null : ["x", "y", "z"].indexOf(input.mirror);
+      const center = typeof input.mirror_center === "number" ? input.mirror_center : (scene.format?.id === "java_block" ? 8 : 0);
+      if (input.newName && count > 1 && !input.newName.includes("{i}")) return { ok: false, error: "With count > 1, newName needs '{i}' for the copy number." };
+      const topName = (k) => (input.newName ? (count > 1 ? input.newName.replace("{i}", String(k)) : input.newName) : null);
+      for (let k = 1; k <= count; k++) if (topName(k) && taken(topName(k))) return { ok: false, error: `Name "${topName(k)}" already exists` };
       const off = input.offset || [0, 0, 0];
-      const add = (v) => (v ? v.map((n, i) => n + off[i]) : v);
       const names = [];
-      const copyName = (base) => { let n = `${base}_copy`, i = 1; while (taken(n) || names.includes(n)) n = `${base}_copy${i++}`; return n; };
-      const clone = (src, top) => {
-        const name = top && input.newName ? input.newName : copyName(src.name);
+      const free = (n) => !taken(n) && !names.includes(n);
+      const copyName = (base) => { let n = `${base}_copy`, i = 1; while (!free(n)) n = `${base}_copy${i++}`; return n; };
+      const pickName = (src, top, k) => {
+        if (top && topName(k)) return topName(k);
+        if (axis !== null) { const m = mirroredName(src.name, axis); if (m !== src.name && free(m)) return m; }
+        return copyName(src.name);
+      };
+      const mirrorV = (v) => v && v.map((x, i) => (i === axis ? mirrorCoord(x, center) : x));
+      const clone = (src, top, k) => {
+        const name = pickName(src, top, k);
         names.push(name);
-        const c = { ...src, uuid: randomUUID(), name, origin: add(src.origin), from: add(src.from), to: add(src.to) };
-        if (src.type === "group") c.children = src.children.map((ch) => clone(ch, false));
+        const c = { ...src, uuid: randomUUID(), name };
+        if (axis !== null) {
+          c.origin = mirrorV(src.origin);
+          c.rotation = (src.rotation || [0, 0, 0]).map((r, i) => (i === axis ? r : -r + 0));
+          if (src.type === "cube") {
+            const f = mirrorV(src.from), t = mirrorV(src.to);
+            c.from = f.map((v, i) => Math.min(v, t[i])); c.to = f.map((v, i) => Math.max(v, t[i]));
+            if (axis === 0) c.mirror_uv = !src.mirror_uv;
+          }
+        }
+        shiftNode(c, off.map((v) => v * k));
+        if (src.type === "group") c.children = src.children.map((ch) => clone(ch, false, k));
         return c;
       };
-      const dupe = clone(el, true);
-      scene.roots.push(dupe);
-      return { ok: true, source: el.name, name: dupe.name, uuid: dupe.uuid, count: names.length, names };
+      const made = [];
+      for (let k = 1; k <= count; k++) { const dupe = clone(el, true, k); scene.roots.push(dupe); made.push(dupe); }
+      return {
+        ok: true, source: el.name, name: made[0].name, uuid: made[0].uuid, count: names.length, copies: made.map((c) => c.name), names,
+        ...(axis !== null ? { mirrored: { axis: input.mirror, center } } : {}),
+      };
+    },
+    move_element(input) {
+      const part = findAny(input.target);
+      if (!part) return { ok: false, error: `Element or group "${input.target}" not found.` };
+      if (isV3(input.offset) === isV3(input.to)) return { ok: false, error: "Give exactly one of 'offset' [x,y,z] (move by) or 'to' [x,y,z] (where the pivot goes) — both must be 3 finite numbers." };
+      const chain = chainOf(part);
+      const pivot = throughChain(part.origin || [0, 0, 0], chain);
+      const world = isV3(input.offset) ? input.offset : roundVec([0, 1, 2].map((i) => input.to[i] - pivot[i]));
+      const d = toModelDelta(world, chain);
+      const nodes = subtree(part);
+      const err = moveRangeError(nodes, d);
+      if (err) return { ok: false, error: err };
+      const before = worldBox(part);
+      if (input.dry_run) return { ok: true, dry_run: true, name: part.name, delta: world, moved: nodes.length, box: before && shiftBox(before, world) };
+      nodes.forEach((n) => shiftNode(n, d));
+      return { ok: true, name: part.name, delta: world, moved: nodes.length, box: worldBox(part) };
+    },
+    place_relative(input) {
+      const part = findAny(input.target);
+      if (!part) return { ok: false, error: `Element or group "${input.target}" not found.` };
+      const ref = findAny(input.ref);
+      if (!ref) return { ok: false, error: `Reference "${input.ref}" not found.` };
+      if (part === ref || subtree(part).includes(ref)) return { ok: false, error: `"${ref.name}" is inside "${part.name}" and would move with it — place against a part outside it.` };
+      if (!SIDES.includes(input.side)) return { ok: false, error: `side must be one of ${SIDES.join(", ")}.` };
+      const align = input.align ?? "center";
+      if (!ALIGNS.includes(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(", ")}.` };
+      const box = worldBox(part), refBox = worldBox(ref);
+      if (!box) return { ok: false, error: `"${part.name}" has no geometry to place.` };
+      if (!refBox) return { ok: false, error: `Reference "${ref.name}" has no geometry to place against.` };
+      const world = placementDelta(box, refBox, input.side, { gap: input.gap ?? 0, align, offset: isV3(input.offset) ? input.offset : undefined });
+      const d = toModelDelta(world, chainOf(part));
+      const nodes = subtree(part);
+      const err = moveRangeError(nodes, d);
+      if (err) return { ok: false, error: err };
+      const result = { name: part.name, ref: ref.name, side: input.side, delta: world, ref_box: refBox };
+      if (input.dry_run) return { ok: true, dry_run: true, ...result, box: shiftBox(box, world) };
+      nodes.forEach((n) => shiftNode(n, d));
+      return { ok: true, ...result, box: worldBox(part) };
     },
     find_elements_by_criteria(input) {
       const matches = [];

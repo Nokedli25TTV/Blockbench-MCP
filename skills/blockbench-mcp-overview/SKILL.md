@@ -17,7 +17,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Domain | Tools |
 |--------|-------|
 | Project | `get_project_info`, `create_project` (new tab in a format: `geckolib`/`bedrock`/`java`), `set_project` |
-| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation` (bones or cubes, as the format allows — `get_project_info` → `rules`), `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
+| Geometry | `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `place_relative` (put a part on top of / beside / inside another), `move_element` (move a whole group with its pivots), `set_origin` (value or `anchor` from the geometry), `set_rotation` (bones or cubes, as the format allows — `get_project_info` → `rules`), `duplicate_element` (`mirror` the other side, `count` a row), `rename_element`, `reparent_element`, `delete_element` |
 | Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch: many parts, own colours, one call), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
@@ -36,14 +36,17 @@ reading results. So:
    `modify_cubes` edits many cubes, `shade_cubes` textures every part with its own colour,
    `create_animation` / `set_keyframes` write all bones at once, `get_keyframes` with no bone reads
    them all back. Batches are all-or-nothing and one undo step each.
-2. **Read narrowly.** `get_scene_tree` with `bone_names` / `include_faces:false` / `max_depth` instead
+2. **Place, don't compute.** `place_relative` puts a part against another (on top, beside, inside),
+   `move_element` moves a whole group with its pivots, `set_origin anchor` puts a pivot on the
+   geometry (shoulder = top of the arm), `duplicate_element mirror:"x"` builds the other side.
+3. **Read narrowly.** `get_scene_tree` with `bone_names` / `include_faces:false` / `max_depth` instead
    of the full tree on big models.
-3. **Screenshots sparingly.** Images are the most expensive thing to read. Screenshots are 800 px by
+4. **Screenshots sparingly.** Images are the most expensive thing to read. Screenshots are 800 px by
    default (`max_size`); use `set_camera_angle screenshot:false` to move the camera and take ONE
    `capture_screenshot` at the end, not after every step.
-4. **Trust the reply.** Write tools echo what they stored (e.g. `manage_keyframes` lists the channel's
+5. **Trust the reply.** Write tools echo what they stored (e.g. `manage_keyframes` lists the channel's
    keyframes) — don't re-query unless the reply shows a problem.
-5. **Real tools over `risky_eval`.** They validate input and wrap Undo properly.
+6. **Real tools over `risky_eval`.** They validate input and wrap Undo properly.
 
 ## Core workflow (GeckoLib model)
 

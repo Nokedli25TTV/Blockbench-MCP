@@ -10,7 +10,8 @@
     "test:e2e": "node toolchain-e2e.mjs",
     "test:model": "node test/full-model.test.mjs",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:painter": "node test/painter.test.mjs"
+    "test:painter": "node test/painter.test.mjs",
+    "test:placement": "node test/placement.test.mjs"
   },
   "keywords": [],
   "author": "",

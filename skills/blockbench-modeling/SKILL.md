@@ -9,11 +9,18 @@ Build 3D models using cubes and meshes in Blockbench.
 
 ## Available Tools
 
-### Cube Tools
+### Cube & part tools
 | Tool | Purpose |
 |------|---------|
-| `place_cube` | Create cubes with position, size, texture |
-| `modify_cube` | Edit cube properties (position, rotation, UV, etc.) |
+| `create_cubes` | Build a hierarchy in one call — groups (bones) + cubes, one undo step |
+| `create_cube` / `create_group` | One cube / one group |
+| `modify_cube` / `modify_cubes` | Edit cubes: from/to, origin, rotation, inflate, UV |
+| `place_relative` | Put a part against another (on_top, below, left, right, front, back, inside) with a gap and alignment — no coordinate maths |
+| `move_element` | Move a cube or a whole group — everything inside, pivots included — by an offset, or put its pivot at a point |
+| `set_origin` | Set a pivot by value, or with `anchor` from the part's own geometry (top = shoulder/hip, bottom, center, a side = hinge) |
+| `set_rotation` | Rotate a bone, or a cube where the format allows (`get_project_info` → `rules`) |
+| `duplicate_element` | Copy a cube or group; `mirror: "x"` builds the other side (left↔right names swap), `count` + `offset` a row |
+| `rename_element` / `reparent_element` / `delete_element` | Organise the outliner |
 
 ### Mesh Tools
 | Tool | Purpose |
@@ -30,51 +37,61 @@ Build 3D models using cubes and meshes in Blockbench.
 | `create_mesh_face` | Create face from vertices |
 | `knife_tool` | Cut edges into faces |
 
-### Element Tools
+### Inspect
 | Tool | Purpose |
 |------|---------|
-| `add_group` | Create bone/group |
-| `list_outline` | View model hierarchy |
-| `duplicate_element` | Copy elements |
-| `rename_element` | Rename elements |
-| `remove_element` | Delete elements |
+| `get_scene_tree` | The hierarchy (narrow it with `bone_names`, `include_faces:false`, `max_depth`) |
 | `find_elements_by_criteria` | Query elements by name pattern, type, parent, size |
 | `select_all_of_type` | Bulk-select cubes, meshes, or groups |
 | `filter_by_material` | Find elements referencing a texture |
 
 ## Cube Modeling
 
-### Place a Cube
+### Build a hierarchy in one call
 
 ```
-place_cube: elements=[{
-  name: "body",
-  from: [-4, 0, -2],
-  to: [4, 12, 2]
-}], faces=true  # Auto UV
+create_cubes: groups=[{name: "body", origin: [0, 12, 0]}, {name: "head", parent: "body", origin: [0, 24, 0]}],
+  cubes=[{name: "torso", parent: "body", from: [-4, 12, -2], to: [4, 24, 2]},
+         {name: "skull", parent: "head", from: [-4, 0, -4], to: [4, 8, 4]}]
 ```
 
-### Place Multiple Cubes
+### Place parts instead of computing coordinates
 
 ```
-place_cube: elements=[
-  {name: "head", from: [-4, 12, -4], to: [4, 20, 4]},
-  {name: "arm_left", from: [4, 4, -1], to: [6, 12, 1]},
-  {name: "arm_right", from: [-6, 4, -1], to: [-4, 12, 1]}
-], group="body"
+place_relative: target="head", ref="body", side="on_top"                    # centred on top
+place_relative: target="arm_left", ref="body", side="left", align="max"     # beside it, flush with its top
+place_relative: target="tail", ref="body", side="back", gap=-1              # sunk 1 unit in
+move_element: target="arm_left", offset=[0, -1, 0]                          # nudge a whole part
 ```
 
-### Modify Cube
+Sides are world axes and the model faces north (−Z): `left` = +X (its own left), `front` = −Z.
+Groups move with everything inside and keep their pivots; bounds include rotations. Add
+`dry_run: true` to see where it would go first.
+
+### Pivots from the geometry
 
 ```
-modify_cube: id="body", rotation=[0, 45, 0], origin=[0, 6, 0]
+set_origin: target="arm_left", anchor="top"     # shoulder = centre of the arm's top side
+set_origin: target="leg_left", anchor="top"     # hip
+set_origin: target="lid", anchor="back"         # a hinge along the back side
 ```
 
-### Cube with Texture
+Set pivots before rotating (rule #1).
+
+### Build one side, mirror the other
 
 ```
-place_cube: elements=[{name: "block", from: [0,0,0], to: [16,16,16]}],
-  texture="stone", faces=true
+duplicate_element: id="arm_left", mirror="x"                                   # → arm_right, everything inside renamed
+duplicate_element: id="spike", count=5, offset=[2, 0, 0], newName="spike_{i}"  # a row of five
+```
+
+The mirror copy gets mirrored positions, pivots and rotations (across x = 0; 8 in Java block
+models) and mirrored box UV, so a shared texture still reads right.
+
+### Modify a cube
+
+```
+modify_cube: id="torso", inflate=0.25
 ```
 
 ## Mesh Modeling
@@ -140,31 +157,11 @@ knife_tool: mesh_id="cube_mesh", points=[
 
 ## Organization
 
-### Create Group Hierarchy
-
 ```
-add_group: name="root", origin=[0, 0, 0], rotation=[0, 0, 0]
-add_group: name="body", parent="root", origin=[0, 12, 0]
-add_group: name="head", parent="body", origin=[0, 24, 0]
-```
-
-### Add Cubes to Groups
-
-```
-place_cube: elements=[{name: "torso", from: [-4, 12, -2], to: [4, 24, 2]}],
-  group="body"
-```
-
-### Duplicate Element
-
-```
-duplicate_element: id="arm_left", newName="arm_right", offset=[-8, 0, 0]
-```
-
-### View Hierarchy
-
-```
-list_outline  # Returns all groups and elements
+create_group: name="root", origin=[0, 0, 0]
+create_group: name="body", parent="root", origin=[0, 12, 0]
+reparent_element: id="head", parent="body"
+get_scene_tree: bone_names=["body"], include_faces=false   # check the result
 ```
 
 ## Selection & Filtering
@@ -214,22 +211,19 @@ Useful when refactoring textures: find all users before swapping or retiring a t
 ### Minecraft Character
 
 ```
-# Create hierarchy
-add_group: name="root", origin=[0, 0, 0]
-add_group: name="body", parent="root", origin=[0, 24, 0]
-add_group: name="head", parent="body", origin=[0, 24, 0]
-add_group: name="arm_left", parent="body", origin=[5, 22, 0]
-add_group: name="arm_right", parent="body", origin=[-5, 22, 0]
-add_group: name="leg_left", parent="root", origin=[2, 12, 0]
-add_group: name="leg_right", parent="root", origin=[-2, 12, 0]
-
-# Add geometry
-place_cube: elements=[{name: "head", from: [-4, 24, -4], to: [4, 32, 4]}], group="head"
-place_cube: elements=[{name: "body", from: [-4, 12, -2], to: [4, 24, 2]}], group="body"
-place_cube: elements=[{name: "arm", from: [-1, 0, -1], to: [1, 10, 1]}], group="arm_left"
-place_cube: elements=[{name: "arm", from: [-1, 0, -1], to: [1, 10, 1]}], group="arm_right"
-place_cube: elements=[{name: "leg", from: [-2, 0, -2], to: [2, 12, 2]}], group="leg_left"
-place_cube: elements=[{name: "leg", from: [-2, 0, -2], to: [2, 12, 2]}], group="leg_right"
+create_cubes: groups=[
+    {name: "root", origin: [0, 0, 0]},
+    {name: "body", parent: "root", origin: [0, 24, 0]},
+    {name: "head", parent: "body", origin: [0, 24, 0]},
+    {name: "arm_left", parent: "body", origin: [5, 22, 0]},
+    {name: "leg_left", parent: "root", origin: [2, 12, 0]}],
+  cubes=[
+    {name: "head_cube", parent: "head", from: [-4, 24, -4], to: [4, 32, 4]},
+    {name: "body_cube", parent: "body", from: [-4, 12, -2], to: [4, 24, 2]},
+    {name: "arm_left_cube", parent: "arm_left", from: [4, 12, -2], to: [8, 24, 2]},
+    {name: "leg_left_cube", parent: "leg_left", from: [0, 0, -2], to: [4, 12, 2]}]
+duplicate_element: id="arm_left", mirror="x"   # arm_right: x −8..−4, pivot [−5, 22, 0]
+duplicate_element: id="leg_left", mirror="x"   # leg_right
 ```
 
 ### Smooth Organic Shape
@@ -244,11 +238,10 @@ move_mesh_vertices: offset=[0, 4, 0], vertices=["top_verts"]
 
 ## Tips
 
-- Use `list_outline` to see current model structure
-- Use `find_elements_by_criteria` for targeted queries instead of filtering `list_outline` results client-side
-- Set group origins at joint/pivot points for animation
-- Use `faces=true` for auto UV mapping on cubes
-- Create bone hierarchy before adding geometry
-- Use `duplicate_element` with offset for symmetrical parts
-- Mesh editing is more flexible but cubes are simpler for Minecraft-style models
-- Before reworking a model, call `save_checkpoint` (history skill) so you can roll back with `undo`
+- `get_scene_tree` shows the structure; narrow it with `bone_names` / `max_depth` on big models
+- Place parts with `place_relative` / `move_element` instead of computing from/to by hand
+- Pivots at the joints: `set_origin` with `anchor`, before rotating (rule #1)
+- Build one side, then `duplicate_element mirror:"x"` the other
+- Mesh editing is more flexible, but cubes are simpler for Minecraft-style models (and GeckoLib
+  renders cubes only)
+- Before reworking a model, call `save_checkpoint` so you can roll back with `undo`

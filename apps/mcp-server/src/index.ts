@@ -9,6 +9,7 @@ import type { ToolType, SceneTree } from "../../../packages/shared/src/types";
 import { validateScene, buildReport } from "../../../packages/shared/src/validation";
 import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../../packages/shared/src/palettes";
 import { MATERIALS } from "../../../packages/shared/src/facePainter";
+import { SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -425,6 +426,8 @@ function errorCode(text: string): string {
   return "ERROR";
 }
 const fail = (text: string) => ({ isError: true, content: [{ type: "text" as const, text: `[${errorCode(text)}] ${text}` }] });
+// A world bounding box as "[x,y,z]→[x,y,z]".
+const boxText = (b: any): string => (b && b.min && b.max ? `[${b.min.join(", ")}]→[${b.max.join(", ")}]` : "(no geometry)");
 // Non-fatal plugin warnings (`warning` or `warnings[]` on the ack) as trailing lines.
 const warningLines = (r: any): string =>
   [r?.warning, ...(r?.warnings || [])].filter(Boolean).map((w: string) => `\n⚠️  ${w}`).join("");
@@ -702,14 +705,19 @@ server.registerTool(
     title: "Set Origin (Pivot)",
     description:
       "Set the pivot/origin of a group (bone) — or of a cube, in formats where cubes rotate (e.g. Java " +
-      "block/item, where the rotation lives on the cube). Define the pivot BEFORE rotating (rule #1).",
+      "block/item, where the rotation lives on the cube). Define the pivot BEFORE rotating (rule #1). " +
+      "Give `origin` [x,y,z], or `anchor` to take it from the part's own geometry: its centre, or the " +
+      "centre of its top / bottom / left (+X) / right (−X) / front (−Z) / back (+Z) side — an arm's " +
+      "shoulder is anchor \"top\", a door's hinge a side.",
     inputSchema: {
       target: z.string().describe("Name of the group (or cube) whose pivot to set."),
-      origin: vec3.describe("Pivot point [x,y,z]."),
+      origin: vec3.optional().describe("Pivot point [x,y,z] (or use anchor)."),
+      anchor: z.enum(ANCHORS).optional().describe("Pivot from the part's own geometry: center | top | bottom | left | right | front | back."),
     },
   },
   async (args) =>
-    forward("set_origin", args, (r) => `Set origin of "${r.name}" to [${(r.origin || []).join(", ")}].`)
+    forward("set_origin", args, (r) =>
+      `Set origin of "${r.name}" to [${(r.origin || []).join(", ")}]${r.anchor ? ` (${r.anchor} of its geometry)` : ""}.` + warningLines(r))
 );
 
 server.registerTool(
@@ -1675,18 +1683,76 @@ server.registerTool(
     description:
       "Duplicate a cube, mesh, locator or a whole group (with everything inside), offset by a vector. " +
       "Keeps all data (per-face UV, textures). The copy is named newName, or '<name>_copy'; everything " +
-      "inside a copied group gets a unique '<name>_copy' name (rule #4). One undo step.",
+      "inside a copied group gets a unique '<name>_copy' name (rule #4). One undo step. " +
+      "`mirror` makes the copy the mirror image across a plane (default the model's centre, x = 0): " +
+      "positions, pivots, rotations and box UV are mirrored and side names swap (left_arm → right_arm, " +
+      "arm_L → arm_R) — build one side, mirror the other. `count` makes a row of copies, each " +
+      "`offset` further on (spikes, teeth, fence posts); newName then needs '{i}' (e.g. 'spike_{i}').",
     inputSchema: {
       id: z.string().describe("Name or uuid of the element to duplicate."),
-      offset: vec3.optional().describe("Position offset [x,y,z] for the copy. Default [0,0,0]."),
-      newName: z.string().optional().describe("Name for the top-level copy (must be unused)."),
+      offset: vec3.optional().describe("Position offset [x,y,z] for the copy (with count: between copies). Default [0,0,0]."),
+      newName: z.string().optional().describe("Name for the top-level copy (must be unused; with count use '{i}')."),
+      mirror: z.enum(["x", "y", "z"]).optional().describe("Mirror the copy across this axis' plane: x = left↔right (the usual), y = up↔down, z = front↔back."),
+      mirror_center: z.number().optional().describe("Where the mirror plane sits on that axis (default 0; 8 in Java block/item)."),
+      count: z.number().int().min(1).max(64).optional().describe("How many copies (default 1)."),
     },
   },
   async (args) =>
     forward("duplicate_element", args, (r) => {
-      const inside = Array.isArray(r.names) && r.names.length > 1 ? ` with ${r.names.length - 1} element(s) inside: ${r.names.slice(1).join(", ")}` : "";
-      return `Duplicated "${r.source}" as "${r.name}"${inside}.`;
+      const copies = Array.isArray(r.copies) && r.copies.length > 1 ? `${r.copies.length} copies: ${r.copies.join(", ")}` : `"${r.name}"`;
+      const total = Array.isArray(r.names) && r.names.length > (r.copies?.length || 1)
+        ? ` (${r.names.length} element(s) in all: ${r.names.slice(0, 24).join(", ")}${r.names.length > 24 ? ", …" : ""})` : "";
+      const mirrored = r.mirrored ? `, mirrored across ${r.mirrored.axis} = ${r.mirrored.center}` : "";
+      return `Duplicated "${r.source}" as ${copies}${mirrored}${total}.`;
     })
+);
+
+server.registerTool(
+  "move_element",
+  {
+    title: "Move Element or Part",
+    description:
+      "Move a cube, mesh or a whole group — everything inside it, pivots included — in one undo step. " +
+      "`offset` moves by [x,y,z] in world space (rotated parents are taken into account); `to` puts the " +
+      "part's pivot (origin) at a world point. `dry_run` only reports where it would go. To put a part " +
+      "against another one (on top, beside, …) use place_relative.",
+    inputSchema: {
+      target: z.string().describe("Name or uuid of the element or group to move."),
+      offset: vec3.optional().describe("Move by [x,y,z] (world units)."),
+      to: vec3.optional().describe("Or: the world point [x,y,z] its pivot/origin should end up at."),
+      dry_run: z.boolean().optional().describe("Only report the move; change nothing."),
+    },
+  },
+  async (args) =>
+    forward("move_element", args, (r) =>
+      `${r.dry_run ? "Would move" : "Moved"} "${r.name}" by [${(r.delta || []).join(", ")}] (${r.moved} node(s)); it ${r.dry_run ? "would span" : "now spans"} ${boxText(r.box)}.` + warningLines(r))
+);
+
+server.registerTool(
+  "place_relative",
+  {
+    title: "Place Relative",
+    description:
+      "Put a part against another one without computing coordinates (\"the head on top of the body, " +
+      "centred\"): `side` on_top | below | left | right | front | back | inside, `gap` between them " +
+      "(negative sinks it in), `align` on the other two axes center (default) | min | max | keep. Works " +
+      "on cubes and whole groups — moved with everything inside, pivots included — using their world " +
+      "bounds, rotations included. The model faces north (−Z): left = +X (its own left), front = −Z. " +
+      "One undo step; `dry_run` only reports.",
+    inputSchema: {
+      target: z.string().describe("The element or group to move."),
+      ref: z.string().describe("The element or group to place it against (stays where it is)."),
+      side: z.enum(SIDES).describe("on_top (+Y), below (−Y), left (+X), right (−X), front (−Z), back (+Z), inside (centred in ref)."),
+      gap: z.number().optional().describe("Space between them in units (default 0 = touching; negative = overlap)."),
+      align: z.enum(ALIGNS).optional().describe("On the other axes: center (default), min / max (flush with ref's lower / upper side), keep (don't move)."),
+      offset: vec3.optional().describe("Extra nudge [x,y,z] after placing."),
+      dry_run: z.boolean().optional().describe("Only report the move; change nothing."),
+    },
+  },
+  async (args) =>
+    forward("place_relative", args, (r) =>
+      `${r.dry_run ? "Would place" : "Placed"} "${r.name}" ${String(r.side).replace("_", " ")} "${r.ref}" (moved by [${(r.delta || []).join(", ")}]); ` +
+      `it ${r.dry_run ? "would span" : "now spans"} ${boxText(r.box)}, "${r.ref}" spans ${boxText(r.ref_box)}.` + warningLines(r))
 );
 
 server.registerTool(

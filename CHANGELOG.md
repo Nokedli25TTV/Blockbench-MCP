@@ -15,6 +15,28 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Added
+- `place_relative`: put a part against another one without computing coordinates — `side` on_top,
+  below, left, right, front, back or inside, a `gap`, `align` on the other axes (center, min, max,
+  keep), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world bounds,
+  rotations included; the model faces north, so left is +X and front is −Z.
+- `move_element`: move a cube, mesh or a whole group — everything inside it, pivots included — by a
+  world `offset` (rotated parents are accounted for), or put its pivot at a world point with `to`.
+  One undo step, `dry_run`, and the format's coordinate range is checked before anything moves.
+- `set_origin` → `anchor`: the pivot from the part's own geometry — its centre or the centre of its
+  top, bottom, left, right, front or back side (an arm's shoulder is `top`).
+- `duplicate_element` → `mirror` (x, y or z; plane at `mirror_center`, default 0, or 8 in Java
+  block/item): the copy is the mirror image — positions, pivots, rotations and box UV mirrored like
+  Blockbench's own Flip, and side names swapped (left_arm → right_arm, arm_L → arm_R). `count` makes
+  a row of copies, each `offset` further on; `newName` then takes `{i}`. Still one undo step.
+- `packages/shared/src/placement.ts`: the shared world-bounds and placement math (Euler ZYX, as
+  Blockbench renders), with its own test (`test:placement`, part of `pnpm test`); checked live against
+  Blockbench's 3D view.
+
+### Changed
+- The `blockbench-modeling` skill uses the real tool names (it still listed `place_cube`,
+  `add_group`, `list_outline`) and shows the place / pivot / mirror workflow.
+
 ## [0.4.0] - 2026-09-24
 
 ### Fixed
