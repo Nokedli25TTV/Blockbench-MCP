@@ -15,6 +15,8 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-24
+
 ### Fixed
 - `capture_screenshot` with `project` rendered whichever project came first in the tab list when the
   open one was earlier — a screenshot of another tab silently showed the wrong model. It now matches

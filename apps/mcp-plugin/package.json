@@ -1,6 +1,6 @@
 {
   "name": "mcp-plugin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A Blockbench plugin for MCP (Model Context Protocol) using Socket.IO",
   "main": "index.js",
   "scripts": {
