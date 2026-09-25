@@ -18,7 +18,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 |--------|-------|
 | Project | `get_project_info`, `create_project` (new tab in a format: `geckolib`/`bedrock`/`java`), `set_project` |
 | Geometry | `create_from_spec` (a whole rig from a part list: sizes, what rests on what, pivots, mirrored twins — one undo step), `create_cubes` (batch: groups + cubes, one undo step), `modify_cubes` (batch edits, e.g. every cube's `uv_offset`), `create_cube`, `create_group`, `modify_cube`, `place_relative` (put a part on top of / beside / inside another), `move_element` (move a whole group with its pivots), `set_origin` (value or `anchor` from the geometry), `set_rotation` (bones or cubes, as the format allows — `get_project_info` → `rules`), `duplicate_element` (`mirror` the other side, `count` a row), `rename_element`, `reparent_element`, `delete_element` |
-| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`; `format:"outline"` = one line per part), `find_elements_by_criteria`, `get_selection`, `validate_model` |
+| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`; `format:"outline"` = one line per part), `find_elements_by_criteria`, `get_selection`, `validate_model` (`for_export: true` = the whole export preflight with a verdict) |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch: many parts, own colours, one call), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
 | Animation | `create_animation`, `set_keyframes` (batch: many bones × channels × times), `check_animation` (lint + floor check), `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes` (one, several or all bones), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
@@ -65,9 +65,9 @@ create_texture: name="atlas"                             # no size → uses the 
 apply_texture: target="root", texture="atlas"
 shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", material:"metal", edge_color:"#5f6b75", sheen:true},
                     {cube_id:"guard", color:"#d6b13a", material:"metal"}, {cube_id:"grip", color:"#5b3a1d", material:"leather"}]   # exact colours + materials, one call
-validate_model
+validate_model: for_export=true      # structure, UV, textures, animations, identifier → READY or what to fix
 capture_screenshot
-export_model: codec_id="bedrock"   +   export_animations
+export_model   +   export_animations   # GeckoLib exports .geo.json without a codec_id
 ```
 
 ## Animate

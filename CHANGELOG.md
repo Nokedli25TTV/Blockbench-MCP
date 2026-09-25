@@ -43,6 +43,10 @@ section into the new version (see README → Releasing).
   (names swapped, positions / pivots / rotations mirrored, its children under the twin). Planned in
   the server (`packages/shared/src/spec.ts`, `test:spec`) and built with one `create_cubes` call, so
   the format's rules apply to the whole rig; `dry_run` shows the plan.
+- `validate_model` → `for_export: true`: the export preflight in one report — the structure checks
+  plus the UV layout, faces without a texture, every animation (`check_animation`), the geometry
+  identifier (GeckoLib/Bedrock) and meshes a cubes-only format would drop — ending in a verdict,
+  READY or what to fix first, and the next step. Its own test: `test:preflight`.
 - `run_batch`: several different tool calls in ONE round trip, in order (up to 50). Each step is
   checked and run exactly like a direct call; the reply lists every step's result and carries any
   images. `on_error`: `stop` (default), `continue`, or `rollback` — undo everything the batch changed.

@@ -14,7 +14,8 @@
     "test:placement": "node test/placement.test.mjs",
     "test:views": "node test/views.test.mjs",
     "test:batch": "node test/batch.test.mjs",
-    "test:spec": "node test/spec.test.mjs"
+    "test:spec": "node test/spec.test.mjs",
+    "test:preflight": "node test/preflight.test.mjs"
   },
   "keywords": [],
   "author": "",

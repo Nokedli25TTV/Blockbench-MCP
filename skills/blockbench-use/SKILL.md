@@ -44,8 +44,10 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
 4. **Screenshots at milestones only.** They are 800 px by default; `set_camera_angle screenshot:false`
    moves the camera without an image; `time` renders an animation frame; `views` / `times` put several
    angles or frames into ONE contact-sheet image.
-5. **Validate before export.** `validate_model` (+ `validate_uv` before painting, `check_animation` for
-   animations), then `export_model codec_id="bedrock"` and `export_animations`.
+5. **Validate before export.** `validate_model for_export:true` checks everything the export needs in
+   one report (structure, UV, faces without texture, every animation, the geometry identifier,
+   meshes) and says READY or what to fix; then `export_model` (GeckoLib: `.geo.json`) and
+   `export_animations`. (`validate_uv` before painting, `check_animation` while animating.)
 6. **Real tools over `risky_eval`.** Use it only when no tool exists — it bypasses validation.
 
 ## Typical flows
@@ -54,7 +56,7 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
 New GeckoLib entity:   create_project → blockbench-modeling (create_cubes) → blockbench-texturing
                        (pack_uv → validate_uv → create_texture → apply_texture → shade_cubes)
                        → blockbench-animation (create_animation / set_keyframes → check_animation)
-                       → validate_model → export_model + export_animations
+                       → validate_model for_export:true → export_model + export_animations
 Retexture:             list_textures / filter_by_material → replace_texture or repaint the regions
 Fix an animation:      get_keyframes (no bone = all bones) → set_keyframes → check_animation
 ```

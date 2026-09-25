@@ -916,10 +916,15 @@ server.registerTool(
       "Validate the current model against its format's rules: duplicate names, missing pivots, invalid " +
       "geometry, rotations the format can't export (e.g. group rotation or non-22.5° steps in Java block/item " +
       "for Minecraft 1.9–1.21.5), coordinates outside the format's range, missing textures, and orphaned " +
-      "groups. Returns a pass/fail report. Run before exporting or animating (rule #8).",
-    inputSchema: {},
+      "groups. Returns a pass/fail report. Run before exporting or animating (rule #8). `for_export: true` " +
+      "adds everything an export needs in the same report — the UV layout, faces without a texture, every " +
+      "animation (check_animation), the geometry identifier, meshes a cubes-only format would drop — and ends " +
+      "with a verdict: ready to export, or what to fix first.",
+    inputSchema: {
+      for_export: z.boolean().optional().describe("Also check what the export needs (UV, textures, animations, identifier, meshes) and give a verdict."),
+    },
   },
-  async () => {
+  async (args) => {
     let r: any;
     try {
       r = await sendToBlockbench("get_scene_tree", {});
@@ -951,10 +956,66 @@ server.registerTool(
     }
     if (report.issues.length === 0 && !meshWarn) lines.push("  No issues found.");
 
-    return {
-      isError: !report.ok,
-      content: [{ type: "text" as const, text: lines.join("\n") }],
+    if (!args.for_export) {
+      return {
+        isError: !report.ok,
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+      };
+    }
+
+    // ---- Preflight: what the export needs, in the same report --------------------------
+    type Finding = { severity: "error" | "warning"; rule: string; message: string };
+    const found: Finding[] = [];
+    // Meshes are dropped from a cubes-only export: an error here, not a warning.
+    if (meshWarn) found.push({ severity: "error", rule: "mesh-in-box-format", message: meshWarn });
+    const ask = async (tool: ToolType, input: Record<string, any>): Promise<any> => {
+      try { const a: any = await sendToBlockbench(tool, input); return a && a.ok !== false ? a : null; } catch { return null; }
     };
+    const info = (await ask("get_project_info", {}))?.info;
+    const formatId = info?.format?.id || fmt?.id;
+    if ((formatId === "geckolib_model" || formatId === "bedrock") && !info?.project?.model_identifier) {
+      found.push({ severity: "error", rule: "geometry-identifier", message: 'No geometry identifier — set_project model_identifier="<name>" (GeckoLib loads geometry.<name>).' });
+    }
+    // Textures: none at all, or faces without one.
+    const cubes: any[] = [];
+    const walkNodes = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "cube") cubes.push(n); else walkNodes(n.children || []); });
+    walkNodes(tree.roots || []);
+    const bare = cubes.map((c) => ({ name: c.name, faces: Object.entries(c.faces || {}).filter(([, f]: [string, any]) => !f?.texture).map(([k]) => k) })).filter((c) => c.faces.length);
+    if (cubes.length && !(tree.textures || []).length) {
+      found.push({ severity: "warning", rule: "no-texture", message: "The project has no texture, so the model exports untextured." });
+    } else if (bare.length) {
+      const count = bare.reduce((n, c) => n + c.faces.length, 0);
+      found.push({ severity: "warning", rule: "faces-without-texture", message: `${count} face(s) have no texture: ${bare.slice(0, 6).map((c) => `${c.name} (${c.faces.join(", ")})`).join("; ")}${bare.length > 6 ? "; …" : ""} — apply_texture.` });
+    }
+    // UV layout.
+    if (cubes.length) {
+      const uv = await ask("validate_uv", {});
+      if (uv && uv.valid === false) {
+        found.push({ severity: "error", rule: "uv", message: `UV layout is not valid — overlaps ${uv.overlaps}, out of bounds ${uv.out_of_bounds}, missing ${uv.null_uv}, zero-size ${uv.zero_size_uv}. Run pack_uv, then validate_uv.` });
+      }
+    }
+    // Every animation.
+    const anims: any[] = (await ask("list_animations", {}))?.animations || [];
+    for (const a of anims) {
+      const c = await ask("check_animation", { animation_id: a.name });
+      for (const issue of c?.issues || []) found.push({ severity: issue.severity === "error" ? "error" : "warning", rule: `animation ${a.name}`, message: issue.message });
+    }
+
+    const errors = report.errors.length + found.filter((f) => f.severity === "error").length;
+    const warnings = report.warnings.length + found.filter((f) => f.severity === "warning").length;
+    const out: string[] = [
+      errors === 0
+        ? `Export check: READY ✅ — ${warnings} warning(s). Structure, UV, textures${anims.length ? `, ${anims.length} animation(s)` : ""} checked.`
+        : `Export check: NOT READY ❌ — fix ${errors} error(s) first (${warnings} warning(s)).`,
+    ];
+    for (const issue of report.issues) out.push(`  [${issue.severity === "error" ? "ERROR" : "warn "}] (${issue.rule}) ${issue.message}`);
+    for (const f of found) out.push(`  [${f.severity === "error" ? "ERROR" : "warn "}] (${f.rule}) ${f.message}`);
+    if (errors === 0) {
+      out.push(formatId === "java_block"
+        ? "Next: export_model (codec java_block)."
+        : `Next: export_model (${formatId === "geckolib_model" ? "GeckoLib → .geo.json" : "the format's codec"})${anims.length ? " and export_animations" : ""}.`);
+    }
+    return { isError: errors > 0, content: [{ type: "text" as const, text: out.join("\n") }] };
   }
 );
 
