@@ -15,6 +15,8 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-25
+
 ### Fixed
 - **Undo did not work for several tools on Blockbench 5** — found by `run_batch`'s rollback, then by a
   live audit that runs every editing tool, undoes and redoes it and compares the project:
