@@ -15,54 +15,6 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
-### Added
-- `place_relative`: put a part against another one without computing coordinates — `side` on_top,
-  below, left, right, front, back or inside, a `gap`, `align` on the other axes (center, min, max,
-  keep — for both, or per axis like `{ y: "min" }`), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world bounds,
-  rotations included; the model faces north, so front is −Z and its own left is −X.
-- `move_element`: move a cube, mesh or a whole group — everything inside it, pivots included — by a
-  world `offset` (rotated parents are accounted for), or put its pivot at a world point with `to`.
-  One undo step, `dry_run`, and the format's coordinate range is checked before anything moves.
-- `set_origin` → `anchor`: the pivot from the part's own geometry — its centre or the centre of its
-  top, bottom, left, right, front or back side (an arm's shoulder is `top`).
-- `duplicate_element` → `mirror` (x, y or z; plane at `mirror_center`, default 0, or 8 in Java
-  block/item): the copy is the mirror image — positions, pivots, rotations and box UV mirrored like
-  Blockbench's own Flip, and side names swapped (left_arm → right_arm, arm_L → arm_R). `count` makes
-  a row of copies, each `offset` further on; `newName` then takes `{i}`. Still one undo step.
-- `packages/shared/src/placement.ts`: the shared world-bounds and placement math (Euler ZYX, as
-  Blockbench renders), with its own test (`test:placement`, part of `pnpm test`); checked live against
-  Blockbench's 3D view.
-- `capture_screenshot` → `views` and `times`: a contact sheet — several angles (front, back, left,
-  right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
-  labelled image, with a line saying which cell is which. Up to 16 pictures (one view at several
-  times, or one frame from several views, is a near-square grid); the camera and the timeline are
-  put back afterwards. One image read instead of one per angle or frame.
-- `create_from_spec`: a whole rig from a part list in ONE call and one undo step (all-or-nothing).
-  Each part becomes a bone with one cube: its size, what it rests against (`attach`: side, gap,
-  align, offset — as `place_relative`) or an explicit corner, its pivot as an anchor of its own box
-  (top for a shoulder or hip) or a point, a rotation, and `mirror: "x"` for the left↔right twin
-  (names swapped, positions / pivots / rotations mirrored, its children under the twin). Planned in
-  the server (`packages/shared/src/spec.ts`, `test:spec`) and built with one `create_cubes` call, so
-  the format's rules apply to the whole rig; `dry_run` shows the plan.
-- `generate_animation`: a looping `walk` or `idle` from the rig in ONE call. Bones are found by name
-  (legs and arms with left = −X, body / torso / chest, head) or given; a walk swings the legs in
-  opposite phase (four legs trot in diagonal pairs), the arms against the legs, bobs the body
-  (highest as the legs pass) and leans it over the stance leg, keeping the head level; idle breathes,
-  drifts the arms and nods. The last keyframe repeats the first, so the loop has no seam. It warns
-  when a leg or arm does not pivot at its top, and runs `check_animation` on the result. Planned in
-  `packages/shared/src/gaits.ts` (`test:gait`), created with one `create_animation` call.
-- `validate_model` → `for_export: true`: the export preflight in one report — the structure checks
-  plus the UV layout, faces without a texture, every animation (`check_animation`), the geometry
-  identifier (GeckoLib/Bedrock) and meshes a cubes-only format would drop — ending in a verdict,
-  READY or what to fix first, and the next step. Its own test: `test:preflight`.
-- `run_batch`: several different tool calls in ONE round trip, in order (up to 50). Each step is
-  checked and run exactly like a direct call; the reply lists every step's result and carries any
-  images. `on_error`: `stop` (default), `continue`, or `rollback` — undo everything the batch changed.
-  Its own test: `test:batch`.
-- `get_scene_tree` → `format: "outline"`: one line per group or cube (pivot, rotation, from→to,
-  size, box-UV offset) instead of the pretty-printed JSON — a fraction of the text for orienting on a
-  model. Views and outline have their own test (`test:views`).
-
 ### Fixed
 - **Undo did not work for several tools on Blockbench 5** — found by `run_batch`'s rollback, then by a
   live audit that runs every editing tool, undoes and redoes it and compares the project:
@@ -86,9 +38,62 @@ section into the new version (see README → Releasing).
   a 32×32 texture on 16×16 UV) it painted only the top-left part. Each face is now painted at the
   texture's pixel size.
 
+### Added
+Building without coordinate maths (the model faces north, so front is −Z and its own left is −X):
+- `create_from_spec`: a whole rig from a part list in ONE call and one undo step (all-or-nothing).
+  Each part becomes a bone with one cube: its size, what it rests against (`attach`: side, gap,
+  align, offset — as `place_relative`) or an explicit corner, its pivot as an anchor of its own box
+  (top for a shoulder or hip) or a point, a rotation, and `mirror: "x"` for the left↔right twin
+  (names swapped, positions / pivots / rotations mirrored, its children under the twin). Planned in
+  the server and built with one `create_cubes` call, so the format's rules apply to the whole rig;
+  `dry_run` shows the plan.
+- `place_relative`: put a part against another one — `side` on_top, below, left, right, front, back
+  or inside, a `gap`, `align` on the other axes (center, min, max, keep — for both, or per axis like
+  `{ y: "min" }`), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world
+  bounds, rotations included.
+- `move_element`: move a cube, mesh or a whole group — everything inside it, pivots included — by a
+  world `offset` (rotated parents are accounted for), or put its pivot at a world point with `to`.
+  One undo step, `dry_run`, and the format's coordinate range is checked before anything moves.
+- `set_origin` → `anchor`: the pivot from the part's own geometry — its centre or the centre of its
+  top, bottom, left, right, front or back side (an arm's shoulder is `top`).
+- `duplicate_element` → `mirror` (x, y or z; plane at `mirror_center`, default 0, or 8 in Java
+  block/item): the copy is the mirror image — positions, pivots, rotations and box UV mirrored like
+  Blockbench's own Flip, and side names swapped (left_arm → right_arm, arm_L → arm_R). `count` makes
+  a row of copies, each `offset` further on; `newName` then takes `{i}`. Still one undo step.
+
+Seeing and checking in fewer reads:
+- `capture_screenshot` → `views` and `times`: a contact sheet — several angles (front, back, left,
+  right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
+  labelled image, with a line saying which cell is which. Up to 16 pictures (one view at several
+  times, or one frame from several views, is a near-square grid); the camera and the timeline are
+  put back afterwards.
+- `get_scene_tree` → `format: "outline"`: one line per group or cube (pivot, rotation, from→to,
+  size, box-UV offset) instead of the pretty-printed JSON — a fraction of the text.
+- `validate_model` → `for_export: true`: the export preflight in one report — the structure checks
+  plus the UV layout, faces without a texture, every animation (`check_animation`), the geometry
+  identifier (GeckoLib/Bedrock) and meshes a cubes-only format would drop — ending in a verdict,
+  READY or what to fix first, and the next step.
+
+Animation and sequences:
+- `generate_animation`: a looping `walk` or `idle` from the rig in ONE call. Bones are found by name
+  (legs and arms with left = −X, body / torso / chest, head) or given; a walk swings the legs in
+  opposite phase (four legs trot in diagonal pairs), the arms against the legs, bobs the body
+  (highest as the legs pass) and leans it over the stance leg, keeping the head level; idle breathes,
+  drifts the arms and nods. The last keyframe repeats the first, so the loop has no seam. It warns
+  when a leg or arm does not pivot at its top, and runs `check_animation` on the result.
+- `run_batch`: several different tool calls in ONE round trip, in order (up to 50). Each step is
+  checked and run exactly like a direct call; the reply lists every step's result and carries any
+  images. `on_error`: `stop` (default), `continue`, or `rollback` — undo everything the batch changed.
+
+Under the hood: the math lives in `packages/shared/src` (`placement.ts` — world bounds with Euler ZYX,
+as Blockbench renders, checked live against its 3D view — plus `views.ts`, `outline.ts`, `spec.ts`,
+`gaits.ts`), each with its own test in `pnpm test` (`test:placement`, `test:views`, `test:batch`,
+`test:spec`, `test:preflight`, `test:gait`).
+
 ### Changed
+- The `geckolib` profile loads 74 tools (was 69), `full` 124 (was 119).
 - The `blockbench-modeling` skill uses the real tool names (it still listed `place_cube`,
-  `add_group`, `list_outline`) and shows the place / pivot / mirror workflow.
+  `add_group`, `list_outline`) and shows the build / place / pivot / mirror workflow.
 
 ## [0.4.0] - 2026-09-24
 
