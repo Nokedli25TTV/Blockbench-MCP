@@ -64,7 +64,7 @@ place_relative: target="tail", ref="body", side="back", gap=-1              # su
 move_element: target="arm_left", offset=[0, -1, 0]                          # nudge a whole part
 ```
 
-Sides are world axes and the model faces north (−Z): `left` = +X (its own left), `front` = −Z.
+Sides are world axes and the model faces north (−Z): `front` = −Z, `left` = −X (its own left).
 Groups move with everything inside and keep their pivots; bounds include rotations. Add
 `dry_run: true` to see where it would go first.
 
@@ -215,14 +215,14 @@ create_cubes: groups=[
     {name: "root", origin: [0, 0, 0]},
     {name: "body", parent: "root", origin: [0, 24, 0]},
     {name: "head", parent: "body", origin: [0, 24, 0]},
-    {name: "arm_left", parent: "body", origin: [5, 22, 0]},
-    {name: "leg_left", parent: "root", origin: [2, 12, 0]}],
+    {name: "arm_left", parent: "body", origin: [-5, 22, 0]},
+    {name: "leg_left", parent: "root", origin: [-2, 12, 0]}],
   cubes=[
     {name: "head_cube", parent: "head", from: [-4, 24, -4], to: [4, 32, 4]},
     {name: "body_cube", parent: "body", from: [-4, 12, -2], to: [4, 24, 2]},
-    {name: "arm_left_cube", parent: "arm_left", from: [4, 12, -2], to: [8, 24, 2]},
-    {name: "leg_left_cube", parent: "leg_left", from: [0, 0, -2], to: [4, 12, 2]}]
-duplicate_element: id="arm_left", mirror="x"   # arm_right: x −8..−4, pivot [−5, 22, 0]
+    {name: "arm_left_cube", parent: "arm_left", from: [-8, 12, -2], to: [-4, 24, 2]},
+    {name: "leg_left_cube", parent: "leg_left", from: [-4, 0, -2], to: [0, 12, 2]}]
+duplicate_element: id="arm_left", mirror="x"   # arm_right: x 4..8, pivot [5, 22, 0]
 duplicate_element: id="leg_left", mirror="x"   # leg_right
 ```
 

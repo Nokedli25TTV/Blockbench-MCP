@@ -32,14 +32,14 @@ check("a world move is undone through rotated parents", near(toModelDelta([0, 2,
 const body = { min: [-4, 12, -2], max: [4, 24, 2] }, head = { min: [-3, 0, -3], max: [3, 6, 3] };
 check("on_top: centred, resting on the top", near(placementDelta(head, body, "on_top"), [0, 24, 0]));
 check("gap keeps a space", near(placementDelta(head, body, "on_top", { gap: 1 }), [0, 25, 0]));
-check("left is +X (the model's own left), centred on the other axes", near(placementDelta(head, body, "left"), [7, 15, 0]));
+check("left is −X (the model's own left, facing north), centred on the other axes", near(placementDelta(head, body, "left"), [-7, 15, 0]));
 check("front is −Z", near(placementDelta(head, body, "front"), [0, 15, -5]));
 check("inside + align min: flush with ref's lower corner", near(placementDelta(head, body, "inside", { align: "min" }), [-1, 12, 1]));
 check("align keep only moves along the side's axis", near(placementDelta(head, body, "below", { align: "keep" }), [0, 6, 0]));
 
 const arm = { min: [4, 12, -2], max: [8, 24, 2] };
 check("anchor top = centre of the top side", near(anchorPoint(arm, "top"), [6, 24, 0]));
-check("anchor bottom / left / front", near(anchorPoint(arm, "bottom"), [6, 12, 0]) && near(anchorPoint(arm, "left"), [8, 18, 0]) && near(anchorPoint(arm, "front"), [6, 18, -2]));
+check("anchor bottom / left (−X) / right / front", near(anchorPoint(arm, "bottom"), [6, 12, 0]) && near(anchorPoint(arm, "left"), [4, 18, 0]) && near(anchorPoint(arm, "right"), [8, 18, 0]) && near(anchorPoint(arm, "front"), [6, 18, -2]));
 
 const names = [["left_arm", 0, "right_arm"], ["arm_L", 0, "arm_R"], ["armLeft", 0, "armRight"], ["l_leg", 0, "r_leg"], ["body", 0, "body"],
   ["clarinet", 0, "clarinet"], ["top_fin", 1, "bottom_fin"], ["front_leg", 2, "back_leg"], ["rearLeg", 2, "frontLeg"]];

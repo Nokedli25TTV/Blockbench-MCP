@@ -709,7 +709,7 @@ server.registerTool(
       "Set the pivot/origin of a group (bone) — or of a cube, in formats where cubes rotate (e.g. Java " +
       "block/item, where the rotation lives on the cube). Define the pivot BEFORE rotating (rule #1). " +
       "Give `origin` [x,y,z], or `anchor` to take it from the part's own geometry: its centre, or the " +
-      "centre of its top / bottom / left (+X) / right (−X) / front (−Z) / back (+Z) side — an arm's " +
+      "centre of its top / bottom / left (−X) / right (+X) / front (−Z) / back (+Z) side — an arm's " +
       "shoulder is anchor \"top\", a door's hinge a side.",
     inputSchema: {
       target: z.string().describe("Name of the group (or cube) whose pivot to set."),
@@ -1744,12 +1744,12 @@ server.registerTool(
       "centred\"): `side` on_top | below | left | right | front | back | inside, `gap` between them " +
       "(negative sinks it in), `align` on the other two axes center (default) | min | max | keep. Works " +
       "on cubes and whole groups — moved with everything inside, pivots included — using their world " +
-      "bounds, rotations included. The model faces north (−Z): left = +X (its own left), front = −Z. " +
+      "bounds, rotations included. The model faces north (−Z): front = −Z, left = −X (its own left). " +
       "One undo step; `dry_run` only reports.",
     inputSchema: {
       target: z.string().describe("The element or group to move."),
       ref: z.string().describe("The element or group to place it against (stays where it is)."),
-      side: z.enum(SIDES).describe("on_top (+Y), below (−Y), left (+X), right (−X), front (−Z), back (+Z), inside (centred in ref)."),
+      side: z.enum(SIDES).describe("on_top (+Y), below (−Y), left (−X), right (+X), front (−Z), back (+Z), inside (centred in ref)."),
       gap: z.number().optional().describe("Space between them in units (default 0 = touching; negative = overlap)."),
       align: z.enum(ALIGNS).optional().describe("On the other axes: center (default), min / max (flush with ref's lower / upper side), keep (don't move)."),
       offset: vec3.optional().describe("Extra nudge [x,y,z] after placing."),
@@ -1932,7 +1932,7 @@ server.registerTool(
       "Images are downscaled to `max_size` px (default 800) — ask for more only when you need fine detail. " +
       "CONTACT SHEET: `views` renders several angles framed on the whole model and/or `times` several " +
       "animation frames into ONE labelled image — one read instead of a screenshot each (views × times, up " +
-      "to 16 pictures). The model faces north: front = −Z side, left = its own left (+X). The camera and " +
+      "to 16 pictures). The model faces north: front = −Z side, left = its own left (−X). The camera and " +
       "the timeline are restored afterwards.",
     inputSchema: {
       project: z.string().optional().describe("Project name/uuid; default the open one."),

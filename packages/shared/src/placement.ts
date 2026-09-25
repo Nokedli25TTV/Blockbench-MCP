@@ -88,14 +88,15 @@ export function toModelDelta(worldDelta: Vec3, chain: Frame[]): Vec3 {
 }
 
 // ---- place_relative ------------------------------------------------------------
-// Sides in world axes. The model faces north (−Z), as Minecraft entity models do, so
-// its own left is +X and its front is −Z.
+// Sides in world axes. The model faces north (−Z), as Minecraft entity models do in
+// Blockbench, so its front is −Z and its own left is −X (Blockbench's Bedrock import puts
+// vanilla leftArm, pivot [5, 22, 0] in the file, at [-5, 22, 0]).
 export const SIDES = ["on_top", "below", "left", "right", "front", "back", "inside"] as const;
 export type Side = (typeof SIDES)[number];
 export const ALIGNS = ["center", "min", "max", "keep"] as const;
 export type Align = (typeof ALIGNS)[number];
 const SIDE_AXIS: Record<Exclude<Side, "inside">, [number, 1 | -1]> = {
-  on_top: [1, 1], below: [1, -1], left: [0, 1], right: [0, -1], front: [2, -1], back: [2, 1],
+  on_top: [1, 1], below: [1, -1], left: [0, -1], right: [0, 1], front: [2, -1], back: [2, 1],
 };
 
 /**
@@ -123,14 +124,14 @@ export function placementDelta(target: Box, ref: Box, side: Side, o: { gap?: num
 export const ANCHORS = ["center", "top", "bottom", "left", "right", "front", "back"] as const;
 export type Anchor = (typeof ANCHORS)[number];
 
-/** The centre of a box, or the centre of one of its sides (left = +X, front = −Z). */
+/** The centre of a box, or the centre of one of its sides (left = −X, front = −Z). */
 export function anchorPoint(b: Box, anchor: Anchor): Vec3 {
   const c = boxCenter(b);
   switch (anchor) {
     case "top": return [c[0], b.max[1], c[2]];
     case "bottom": return [c[0], b.min[1], c[2]];
-    case "left": return [b.max[0], c[1], c[2]];
-    case "right": return [b.min[0], c[1], c[2]];
+    case "left": return [b.min[0], c[1], c[2]];
+    case "right": return [b.max[0], c[1], c[2]];
     case "front": return [c[0], c[1], b.min[2]];
     case "back": return [c[0], c[1], b.max[2]];
     default: return c;

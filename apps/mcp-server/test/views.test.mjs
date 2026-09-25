@@ -14,11 +14,11 @@ const near = (a, b, eps = 1e-6) => a.length === b.length && a.every((v, i) => Ma
 console.log("--- views ---");
 check("every view is a unit direction", VIEWS.every((v) => Math.abs(Math.hypot(...viewDirection(v)) - 1) < 1e-9));
 check("front looks at the model's north side (camera at −Z)", near(viewDirection("front"), [0, 0, -1]));
-check("left looks at its own left (camera at +X)", near(viewDirection("left"), [1, 0, 0]));
+check("left looks at its own left (camera at −X)", near(viewDirection("left"), [-1, 0, 0]));
 const top = viewDirection("top");
 check("top looks down, nudged to the front so up stays defined", top[1] > 0.999 && top[2] < 0 && top[2] > -0.01, JSON.stringify(top));
 const iso = viewDirection("iso");
-check("iso sees the front, the left side and the top", iso[0] > 0 && iso[1] > 0 && iso[2] < 0);
+check("iso sees the front, the left side (−X) and the top", iso[0] < 0 && iso[1] > 0 && iso[2] < 0);
 const d = fitDistance(10, 45);
 check("fitDistance fits the sphere inside the field of view", 10 / d < Math.sin((45 * Math.PI) / 360), `d=${d.toFixed(2)}`);
 check("a bigger model stands the camera further away", fitDistance(20, 45) > d);

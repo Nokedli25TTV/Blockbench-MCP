@@ -19,7 +19,7 @@ section into the new version (see README → Releasing).
 - `place_relative`: put a part against another one without computing coordinates — `side` on_top,
   below, left, right, front, back or inside, a `gap`, `align` on the other axes (center, min, max,
   keep), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world bounds,
-  rotations included; the model faces north, so left is +X and front is −Z.
+  rotations included; the model faces north, so front is −Z and its own left is −X.
 - `move_element`: move a cube, mesh or a whole group — everything inside it, pivots included — by a
   world `offset` (rotated parents are accounted for), or put its pivot at a world point with `to`.
   One undo step, `dry_run`, and the format's coordinate range is checked before anything moves.

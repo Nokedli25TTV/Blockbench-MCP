@@ -1,6 +1,6 @@
 // Contact sheets for capture_screenshot: several angles and/or animation frames in one
 // image. The named views follow the placement convention — the model faces north (−Z),
-// so "front" looks at its north side and "left" at its own left (+X).
+// so "front" looks at its north side and "left" at its own left (−X).
 import type { Vec3 } from "./types";
 
 export const VIEWS = ["front", "back", "left", "right", "top", "bottom", "iso", "iso_back"] as const;
@@ -16,14 +16,14 @@ export function viewDirection(view: View): Vec3 {
   switch (view) {
     case "front": return [0, 0, -1];
     case "back": return [0, 0, 1];
-    case "left": return [1, 0, 0];
-    case "right": return [-1, 0, 0];
+    case "left": return [-1, 0, 0];
+    case "right": return [1, 0, 0];
     // Straight down / up, nudged toward the front so the camera's up axis stays defined
     // and the model's front is at the bottom of the picture.
     case "top": return unit([0, 1, -0.002]);
     case "bottom": return unit([0, -1, -0.002]);
-    case "iso": return unit([1, 0.8, -1]); // its front, its left side and the top
-    case "iso_back": return unit([-1, 0.8, 1]);
+    case "iso": return unit([-1, 0.8, -1]); // its front, its left side and the top
+    case "iso_back": return unit([1, 0.8, 1]);
   }
 }
 
