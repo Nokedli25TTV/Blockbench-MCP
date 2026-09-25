@@ -6,7 +6,7 @@ How this project is built and where everything lives. Companion to `MODELING_CON
 ## 1. What it is
 
 A custom integration that lets **Claude (Claude Desktop)** do 3D modeling in **Blockbench**
-over the **Model Context Protocol (MCP)**. 119 MCP tools cover modeling, animation, export,
+over the **Model Context Protocol (MCP)**. 125 MCP tools cover modeling, animation, export,
 texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 
 ## 2. The three processes + data flow
@@ -40,10 +40,12 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
   `get_project_info` reports `mcp_bridge: { role, relays_connected }`.
 - Every tool call carries its own Socket.IO ack and a per-tool timeout (`TOOL_TIMEOUTS` in
   `index.ts`: 10 s default, 20 s reads/animation, 30 s render/pack, 60 s export). A connected
-  plugin is usable immediately — there is no separate "ready" gate.
+  plugin is usable immediately — there is no separate "ready" gate. A reply may be up to 64 MB
+  (`maxHttpBufferSize`, like the relay endpoint): above Socket.IO's 1 MB default the plugin's
+  connection was closed — a large texture, a native-size screenshot.
 - **Tool profile** (`BLOCKBENCH_MCP_PROFILE`, default `geckolib`): skips 50 mesh / armature /
   Bedrock-PBR / brush-emulation tools that don't apply to cube models — the tools/list sent to the
-  model shrinks from ~24k to ~16k tokens. `full` loads all 119. Set it in the client's MCP server
+  model shrinks from ~24k to ~16k tokens. `full` loads all 125. Set it in the client's MCP server
   config (`"env": { "BLOCKBENCH_MCP_PROFILE": "full" }`). Every tool also carries MCP annotations
   (`readOnlyHint` / `destructiveHint`).
 - Screenshots (`capture_screenshot`, `set_camera_angle`, app captures) are downscaled to 800 px on
@@ -57,7 +59,7 @@ blockbench-mcp/
 ├─ apps/
 │  ├─ mcp-server/                 # the external MCP server (Node, stdio + Socket.IO bridge)
 │  │  ├─ src/
-│  │  │  ├─ index.ts              # ★ registers ALL 119 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
+│  │  │  ├─ index.ts              # ★ registers ALL 125 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
 │  │  │  └─ skills.ts             # loads skills/*, builds the MCP `instructions` index, get_skill content
 │  │  ├─ test/
 │  │  │  ├─ harness.mjs           # spawns real server + a MOCK Blockbench scene + an MCP stdio client
@@ -70,6 +72,7 @@ blockbench-mcp/
 ├─ packages/shared/src/
 │  ├─ validation.ts               # validateScene() / buildReport() — pure, unit-testable guardrails
 │  ├─ palettes.ts                 # 13 hue-shifted 5-step pixel-art ramps + getPalette()
+│  ├─ modAssets.ts                # export_bundle: GeckoLib 4/5 folders in assets/<mod_id>, resource-name checks
 │  └─ types.ts                    # ToolType + SceneTree shared types
 ├─ skills/                        # 8 Markdown guides (use / mcp-overview / modeling / texturing /
 │                                 #   pbr-materials / pixel-shading / animation / development)
@@ -165,6 +168,12 @@ its own region, texture sized to fit) → `validate_uv` → `create_texture` (no
   server's `validateScene` and the test mock all use the same module (the mock imports the `.ts`
   directly; Node strips the types).
 - **Pivot-first, unique names, validate before export** — enforced in code + `validateScene`.
+- **`export_bundle` writes from the server.** The plugin only compiles (the calls `export_model`,
+  `export_animations` and `get_texture` make); the server finds `assets/<mod_id>` from `mod_dir`, puts
+  each file where GeckoLib 4 or 5 looks (`modAssets.ts`), compares it with the file already there
+  (identical = unchanged; different = refused without `overwrite`), and writes through a temp file +
+  rename. So Blockbench shows no file-permission prompt, and the export check (`exportPreflight`,
+  shared with `validate_model for_export`) decides whether anything is written.
 - Plugin element creation: `new Cube(...).init()` BEFORE `addTo`; always attach to a parent;
   guarantee `Undo.finishEdit()` runs (else an orphan with no undo entry).
 - Plugin imports `packages/shared` by **relative path** for runtime (vite can't resolve the

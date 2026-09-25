@@ -42,11 +42,12 @@ const JAVA_RANGES: Record<string, string> = {
   "26.3": "Minecraft 26.3+",
 };
 
-const versionParts = (v: string): number[] | null => {
+/** A Minecraft version as [major, minor, patch]: "1.20.1" → [1, 20, 1], "26.3" → [26, 3, 0]. */
+export const versionParts = (v: string): number[] | null => {
   const m = /^\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*$/.exec(v);
   return m ? [Number(m[1]), Number(m[2] || 0), Number(m[3] || 0)] : null;
 };
-const before = (a: number[], b: number[]): boolean => {
+export const versionBefore = (a: number[], b: number[]): boolean => {
   for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
   return false;
 };
@@ -55,9 +56,9 @@ const before = (a: number[], b: number[]): boolean => {
 export function javaBlockVersionFor(minecraftVersion: string): string | null {
   const v = versionParts(minecraftVersion);
   if (!v) return null;
-  if (before(v, [1, 21, 6])) return "1.9.0";
-  if (before(v, [1, 21, 11])) return "1.21.6";
-  if (before(v, [26, 3, 0])) return "1.21.11";
+  if (versionBefore(v, [1, 21, 6])) return "1.9.0";
+  if (versionBefore(v, [1, 21, 11])) return "1.21.6";
+  if (versionBefore(v, [26, 3, 0])) return "1.21.11";
   return "26.3";
 }
 

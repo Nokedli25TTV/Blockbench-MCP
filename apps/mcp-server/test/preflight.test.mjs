@@ -49,7 +49,7 @@ try {
   await h.call("set_keyframes", { keyframes: [{ bone: "body", channel: "rotation", time: 0, values: [0, 0, 0] }, { bone: "body", channel: "rotation", time: 0.5, values: [120, 0, 0] }] });
   r = await h.call("validate_model", { for_export: true });
   check("animation problems are reported per animation, warnings still READY", !r.isError && /READY ✅/.test(r.text) && /\(animation animation\.walk\) body\.rotation turns 120°/.test(r.text), one(r.text));
-  check("…with the next step", /Next: export_model \(GeckoLib → \.geo\.json\) and export_animations\./.test(r.text), one(r.text));
+  check("…with the next step: export_bundle (or the single-file exports)", /Next: export_bundle — the model, its animations and texture into the mod's folders in one call \(export_model \+ export_animations for loose files\)\./.test(r.text), one(r.text));
 } finally {
   h.stop();
 }

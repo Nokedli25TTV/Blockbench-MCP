@@ -67,7 +67,10 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
   values Blockbench shows; the exporter handles the GeckoLib file convention.
 - **See the result** — screenshots from any camera angle, also of a specific animation frame
   (`capture_screenshot` with `time`).
-- **Export for GeckoLib** — `.geo.json` via `export_model` plus `.animation.json` via `export_animations`.
+- **Export for GeckoLib** — `export_bundle` writes the `.geo.json`, the `.animation.json` and the texture
+  straight into your mod's `assets/<mod_id>` folders (GeckoLib 4 or 5 layout) in one call, after the
+  export check and without overwriting anything unless asked; `export_model` / `export_animations` give
+  single files.
 - **Stay safe** — edits are normal Blockbench undo steps; `save_checkpoint` / `undo` / `redo`;
   `validate_model` checks the rules in [MODELING_CONSTRAINTS.md](MODELING_CONSTRAINTS.md) before export.
 - **Guide the AI** — eight bundled skill guides (modeling, texturing, animation, pixel shading, …)
@@ -167,8 +170,8 @@ see [Troubleshooting](#-troubleshooting).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 74 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 124. |
-| `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | Minecraft version a new Java block/item project targets (`create_project` can override it). It decides the rotation rules: up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. |
+| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 75 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 125. |
+| `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | The Minecraft version your mod targets. A new Java block/item project takes its rotation rules from it (`create_project` can override it): up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. `export_bundle` picks GeckoLib's folders from it: GeckoLib 4 up to 1.21.4, GeckoLib 5 from 1.21.5. |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
 To set the profile, add `"env": { "BLOCKBENCH_MCP_PROFILE": "full" }` next to `"args"` in the Claude
@@ -186,7 +189,7 @@ Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
 | Animation | `create_animation`, `set_keyframes` (batch), `check_animation` (lint + floor check), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
 | Camera | `capture_screenshot`, `set_camera_angle`, `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
-| Export | `list_export_formats`, `export_model`, `export_animations` |
+| Export | `export_bundle` (model + animations + texture into the mod's folders), `list_export_formats`, `export_model`, `export_animations` |
 | Guides | `list_skills`, `get_skill` (also readable as `skill://…` resources) |
 | Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` |
 
@@ -203,7 +206,7 @@ from edits. Failures start with a stable code: `[NOT_CONNECTED]`, `[TIMEOUT]`, `
 - "Pack the UVs, then texture the blade steel `#b9c2cb` with a dark edge, the guard gold and the grip brown."
 - "Add a 2-second looping idle animation where the head sways a few degrees."
 - "Show me the model at 1.0 s of the `idle` animation from the front."
-- "Validate the model and export the `.geo.json` and `.animation.json` to my mod's assets folder."
+- "Validate the model and export it into my mod at `C:/mods/goblinmod` — model, animations and texture."
 
 ### Tips for fast sessions
 
@@ -316,7 +319,9 @@ To preview a release package without releasing, run the Release workflow by hand
   second server share the bridge accepts only requests with no Origin, a custom header and a
   `127.0.0.1`/`localhost` Host. Other programs running on your own machine can still connect.
 - `export_model` / `export_animations` can write files to the path you give (Blockbench asks for file
-  system permission).
+  system permission). `export_bundle` writes from the server process, so Blockbench does not ask: it
+  writes only `.geo.json`, `.animation.json` and `.png` files inside the `assets/<mod_id>` folder it
+  resolved from `mod_dir`, and never replaces a file whose content differs unless `overwrite: true`.
 - GeckoLib renders cubes only — mesh elements are dropped on export (`validate_model` warns about it).
 - Always save your work before large AI-driven edits; most tool edits are undoable, but a crash is not.
 

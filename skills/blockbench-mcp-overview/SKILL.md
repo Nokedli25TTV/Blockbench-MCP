@@ -25,7 +25,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Camera | `capture_screenshot` (`time`, `max_size`; `views` / `times` = one contact-sheet image of several angles or frames), `set_camera_angle` (`screenshot:false`), `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
 | Sequences | `run_batch` (several different tool calls in one round trip; `on_error`: stop / continue / rollback) |
-| Export | `list_export_formats`, `export_model`, `export_animations` |
+| Export | `export_bundle` (model + animations + texture into the mod's `assets/<mod_id>`, GeckoLib 4 or 5 folders, after the export check, never overwriting unless asked), `list_export_formats`, `export_model`, `export_animations` |
 | Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` (last resort) |
 
 ## Efficiency rules (these decide how fast a session is)
@@ -67,7 +67,8 @@ shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", material:"metal", edge_co
                     {cube_id:"guard", color:"#d6b13a", material:"metal"}, {cube_id:"grip", color:"#5b3a1d", material:"leather"}]   # exact colours + materials, one call
 validate_model: for_export=true      # structure, UV, textures, animations, identifier → READY or what to fix
 capture_screenshot
-export_model   +   export_animations   # GeckoLib exports .geo.json without a codec_id
+export_bundle: mod_dir="C:/mods/daggermod", kind="item"   # .geo.json + .animation.json + .png into assets/<mod_id>
+                                                         # (loose files: export_model + export_animations)
 ```
 
 ## Animate
@@ -94,8 +95,15 @@ Non-fatal notes arrive as `⚠️` lines in a successful reply (e.g. a cube thin
 ```
 save_checkpoint: name="before_arm_rework"      # appears in get_undo_stack as [checkpoint] …
 undo: steps=2
+export_bundle: mod_dir="C:/mods/daggermod", dry_run=true   # where each file would go, what exists
+export_bundle: mod_dir="C:/mods/daggermod", minecraft_version="1.21.5"   # GeckoLib 5: geckolib/models/…
 list_export_formats: only_current_format=true
 export_model: codec_id="bedrock", path="C:/models/dagger.geo.json", max_content_length=0
 ```
 
-Content is truncated at `max_content_length` (default 100,000 chars); `byte_length` gives the real size.
+`export_bundle` names the files after the geometry identifier (or `name`), puts them in GeckoLib's
+folders for `kind` (entity / item / block) and says which `Defaulted…GeoModel` finds them. It writes
+nothing when the export check finds an error, or when a file already there would change: then ask
+the user before `overwrite: true` (`force: true` only if they accept the check's errors).
+`export_model` content is truncated at `max_content_length` (default 100,000 chars); `byte_length`
+gives the real size.

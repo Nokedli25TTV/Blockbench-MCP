@@ -15,6 +15,33 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Added
+- `export_bundle`: a GeckoLib model into a mod in ONE call — the geometry (`.geo.json`), the animations
+  (`.animation.json`) and the texture (`.png`), each where GeckoLib's defaulted models
+  (`DefaultedEntityGeoModel`, `…ItemGeoModel`, `…BlockGeoModel`) load it, under `assets/<mod_id>/`:
+  - GeckoLib 4 (Minecraft up to 1.21.4): `geo/<kind>/`, `animations/<kind>/`, `textures/<kind>/`;
+  - GeckoLib 5 (1.21.5 and newer): `geckolib/models/<kind>/`, `geckolib/animations/<kind>/`, and the
+    texture where it was. `minecraft_version` (default `BLOCKBENCH_MCP_MC_VERSION`, 1.20.1) picks the
+    layout; `geckolib: "4" | "5"` forces one.
+
+  `mod_dir` is the mod project, its `src/main/resources` or its `assets/<mod_id>` folder; `mod_id` is
+  read from it when there is only one mod's assets. The file name is the geometry identifier unless
+  `name` gives another (sub-folders allowed; names Minecraft would refuse are refused). `kind` is
+  `entity`, `item` or `block`; with several textures the one on the most faces ships, or `texture`.
+  Nothing is written when the export check (as `validate_model for_export`) finds an error — `force`
+  overrides — or when a file already there would change: identical files count as unchanged, and
+  `overwrite: true` replaces the rest. `dry_run` shows the plan. The server writes the files (temp
+  file, then moved into place), so Blockbench shows no file-permission prompt.
+
+### Fixed
+- A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
+  plugin's connection, and the call timed out. The bridge now takes replies up to 64 MB, like the
+  relay endpoint.
+
+### Changed
+- `validate_model for_export` names `export_bundle` as the next step for GeckoLib and Bedrock models.
+- The `geckolib` profile loads 75 tools (was 74), `full` 125 (was 124).
+
 ## [0.5.0] - 2026-09-25
 
 ### Fixed

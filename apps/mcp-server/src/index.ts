@@ -2,10 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Server as IOServer, Socket } from "socket.io";
 import { createServer, request as httpRequest, IncomingMessage, ServerResponse } from "http";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync, readdirSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { ToolType, SceneTree } from "../../../packages/shared/src/types";
+import type { ToolType, SceneTree, SceneTexture } from "../../../packages/shared/src/types";
 import { validateScene, buildReport } from "../../../packages/shared/src/validation";
 import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../../packages/shared/src/palettes";
 import { MATERIALS } from "../../../packages/shared/src/facePainter";
@@ -14,6 +15,8 @@ import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
 import { findRig, planWalk, planIdle } from "../../../packages/shared/src/gaits";
+import { BUNDLE_KINDS, BUNDLE_PARTS, DEFAULTED_MODEL, geckolibFor, bundlePaths, bundleName, resourceNameError, pickTexture } from "../../../packages/shared/src/modAssets";
+import type { BundleKind, BundlePart } from "../../../packages/shared/src/modAssets";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -105,6 +108,9 @@ function bridgeHttpHandler(req: IncomingMessage, res: ServerResponse) {
 const httpServer = createServer(bridgeHttpHandler);
 const io = new IOServer(httpServer, {
   cors: { origin: "*" },
+  // Replies carry whole files (export_bundle) and images. Above Socket.IO's default 1 MB the
+  // plugin's connection was closed and the call timed out; same cap as the relay endpoint.
+  maxHttpBufferSize: 64 * 1024 * 1024,
   allowRequest: (req, callback) => {
     const origin = req.headers.origin;
     if (isWebOrigin(origin)) {
@@ -909,6 +915,78 @@ server.registerTool(
     )
 );
 
+// Formats whose models ship as Bedrock geometry — what GeckoLib loads (export_bundle).
+const BUNDLE_FORMATS = new Set(["geckolib_model", "animated_entity_model", "bedrock"]);
+
+// Meshes in a cubes-only format (GeckoLib/Bedrock) don't render in-game and are silently
+// dropped on export — said by validate_model, and an error in the export preflight.
+const meshWarning = (tree: any): string | null => {
+  const fmt = tree && tree.format;
+  const count = (tree && tree.mesh_count) || 0;
+  return fmt && fmt.meshes === false && count > 0
+    ? `${count} mesh element(s) present, but this format ("${fmt.id}") renders ONLY cubes — meshes won't show in-game and are silently dropped on export. Convert them to cubes.`
+    : null;
+};
+
+// The export preflight (validate_model for_export, export_bundle): the structure checks plus what
+// an export needs — the geometry identifier, textures, the UV layout, meshes, every animation.
+// `known` passes what the caller has already read, so it isn't asked for twice.
+type Finding = { severity: "error" | "warning"; rule: string; message: string };
+type Preflight = { findings: Finding[]; errors: number; warnings: number; formatId?: string; animations: any[] };
+const findingLine = (f: Finding) => `  [${f.severity === "error" ? "ERROR" : "warn "}] (${f.rule}) ${f.message}`;
+const preflightVerdict = (pre: Preflight) =>
+  pre.errors === 0
+    ? `Export check: READY ✅ — ${pre.warnings} warning(s). Structure, UV, textures${pre.animations.length ? `, ${pre.animations.length} animation(s)` : ""} checked.`
+    : `Export check: NOT READY ❌ — fix ${pre.errors} error(s) first (${pre.warnings} warning(s)).`;
+
+async function exportPreflight(tree: SceneTree, known: { info?: any; animations?: any[] } = {}): Promise<Preflight> {
+  const ask = async (tool: ToolType, input: Record<string, any>): Promise<any> => {
+    try { const a: any = await sendToBlockbench(tool, input); return a && a.ok !== false ? a : null; } catch { return null; }
+  };
+  const findings: Finding[] = validateScene(tree).map(({ severity, rule, message }) => ({ severity, rule, message }));
+  // Meshes are dropped from a cubes-only export: an error here, not a warning.
+  const meshWarn = meshWarning(tree);
+  if (meshWarn) findings.push({ severity: "error", rule: "mesh-in-box-format", message: meshWarn });
+  const info = known.info ?? (await ask("get_project_info", {}))?.info;
+  const formatId: string | undefined = info?.format?.id || (tree as any).format?.id;
+  if ((formatId === "geckolib_model" || formatId === "bedrock") && !info?.project?.model_identifier) {
+    findings.push({ severity: "error", rule: "geometry-identifier", message: 'No geometry identifier — set_project model_identifier="<name>" (GeckoLib loads geometry.<name>).' });
+  }
+  // Textures: none at all, or faces without one.
+  const cubes: any[] = [];
+  const walkNodes = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "cube") cubes.push(n); else walkNodes(n.children || []); });
+  walkNodes(tree.roots || []);
+  const bare = cubes.map((c) => ({ name: c.name, faces: Object.entries(c.faces || {}).filter(([, f]: [string, any]) => !f?.texture).map(([k]) => k) })).filter((c) => c.faces.length);
+  if (cubes.length && !(tree.textures || []).length) {
+    findings.push({ severity: "warning", rule: "no-texture", message: "The project has no texture, so the model exports untextured." });
+  } else if (bare.length) {
+    const count = bare.reduce((n, c) => n + c.faces.length, 0);
+    findings.push({ severity: "warning", rule: "faces-without-texture", message: `${count} face(s) have no texture: ${bare.slice(0, 6).map((c) => `${c.name} (${c.faces.join(", ")})`).join("; ")}${bare.length > 6 ? "; …" : ""} — apply_texture.` });
+  }
+  // UV layout.
+  if (cubes.length) {
+    const uv = await ask("validate_uv", {});
+    if (uv && uv.valid === false) {
+      findings.push({ severity: "error", rule: "uv", message: `UV layout is not valid — overlaps ${uv.overlaps}, out of bounds ${uv.out_of_bounds}, missing ${uv.null_uv}, zero-size ${uv.zero_size_uv}. Run pack_uv, then validate_uv.` });
+    }
+  }
+  // Every animation.
+  const animations: any[] = known.animations ?? (await ask("list_animations", {}))?.animations ?? [];
+  for (const a of animations) {
+    const c = await ask("check_animation", { animation_id: a.name });
+    for (const issue of c?.issues || []) findings.push({ severity: issue.severity === "error" ? "error" : "warning", rule: `animation ${a.name}`, message: issue.message });
+  }
+  const errors = findings.filter((f) => f.severity === "error").length;
+  return { findings, errors, warnings: findings.length - errors, formatId, animations };
+}
+
+const nextExportStep = (formatId: string | undefined, animations: number): string =>
+  formatId === "java_block"
+    ? "Next: export_model (codec java_block)."
+    : BUNDLE_FORMATS.has(formatId || "")
+      ? `Next: export_bundle — the model${animations ? ", its animations" : ""} and texture into the mod's folders in one call (export_model${animations ? " + export_animations" : ""} for loose files).`
+      : `Next: export_model (the format's codec)${animations ? " and export_animations" : ""}.`;
+
 server.registerTool(
   "validate_model",
   {
@@ -935,15 +1013,17 @@ server.registerTool(
     if (r && r.ok === false) return fail(`validate_model could not read the scene: ${r.error}`);
 
     const tree = r.tree as SceneTree;
+    if (args.for_export) {
+      const pre = await exportPreflight(tree);
+      const out = [preflightVerdict(pre), ...pre.findings.map(findingLine)];
+      if (pre.errors === 0) out.push(nextExportStep(pre.formatId, pre.animations.length));
+      return { isError: pre.errors > 0, content: [{ type: "text" as const, text: out.join("\n") }] };
+    }
     const report = buildReport(validateScene(tree));
 
     // EARLY mesh warning: meshes in a cubes-only format (GeckoLib/Bedrock) won't
     // render in-game and are silently dropped on export — catch it now, not at export.
-    const meshCount = ((r.tree as any) && (r.tree as any).mesh_count) || 0;
-    const fmt = (r.tree as any) && (r.tree as any).format;
-    const meshWarn = fmt && fmt.meshes === false && meshCount > 0
-      ? `${meshCount} mesh element(s) present, but this format ("${fmt.id}") renders ONLY cubes — meshes won't show in-game and are silently dropped on export. Convert them to cubes.`
-      : null;
+    const meshWarn = meshWarning(tree);
     const totalWarnings = report.warnings.length + (meshWarn ? 1 : 0);
 
     const lines: string[] = [];
@@ -957,66 +1037,10 @@ server.registerTool(
     }
     if (report.issues.length === 0 && !meshWarn) lines.push("  No issues found.");
 
-    if (!args.for_export) {
-      return {
-        isError: !report.ok,
-        content: [{ type: "text" as const, text: lines.join("\n") }],
-      };
-    }
-
-    // ---- Preflight: what the export needs, in the same report --------------------------
-    type Finding = { severity: "error" | "warning"; rule: string; message: string };
-    const found: Finding[] = [];
-    // Meshes are dropped from a cubes-only export: an error here, not a warning.
-    if (meshWarn) found.push({ severity: "error", rule: "mesh-in-box-format", message: meshWarn });
-    const ask = async (tool: ToolType, input: Record<string, any>): Promise<any> => {
-      try { const a: any = await sendToBlockbench(tool, input); return a && a.ok !== false ? a : null; } catch { return null; }
+    return {
+      isError: !report.ok,
+      content: [{ type: "text" as const, text: lines.join("\n") }],
     };
-    const info = (await ask("get_project_info", {}))?.info;
-    const formatId = info?.format?.id || fmt?.id;
-    if ((formatId === "geckolib_model" || formatId === "bedrock") && !info?.project?.model_identifier) {
-      found.push({ severity: "error", rule: "geometry-identifier", message: 'No geometry identifier — set_project model_identifier="<name>" (GeckoLib loads geometry.<name>).' });
-    }
-    // Textures: none at all, or faces without one.
-    const cubes: any[] = [];
-    const walkNodes = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "cube") cubes.push(n); else walkNodes(n.children || []); });
-    walkNodes(tree.roots || []);
-    const bare = cubes.map((c) => ({ name: c.name, faces: Object.entries(c.faces || {}).filter(([, f]: [string, any]) => !f?.texture).map(([k]) => k) })).filter((c) => c.faces.length);
-    if (cubes.length && !(tree.textures || []).length) {
-      found.push({ severity: "warning", rule: "no-texture", message: "The project has no texture, so the model exports untextured." });
-    } else if (bare.length) {
-      const count = bare.reduce((n, c) => n + c.faces.length, 0);
-      found.push({ severity: "warning", rule: "faces-without-texture", message: `${count} face(s) have no texture: ${bare.slice(0, 6).map((c) => `${c.name} (${c.faces.join(", ")})`).join("; ")}${bare.length > 6 ? "; …" : ""} — apply_texture.` });
-    }
-    // UV layout.
-    if (cubes.length) {
-      const uv = await ask("validate_uv", {});
-      if (uv && uv.valid === false) {
-        found.push({ severity: "error", rule: "uv", message: `UV layout is not valid — overlaps ${uv.overlaps}, out of bounds ${uv.out_of_bounds}, missing ${uv.null_uv}, zero-size ${uv.zero_size_uv}. Run pack_uv, then validate_uv.` });
-      }
-    }
-    // Every animation.
-    const anims: any[] = (await ask("list_animations", {}))?.animations || [];
-    for (const a of anims) {
-      const c = await ask("check_animation", { animation_id: a.name });
-      for (const issue of c?.issues || []) found.push({ severity: issue.severity === "error" ? "error" : "warning", rule: `animation ${a.name}`, message: issue.message });
-    }
-
-    const errors = report.errors.length + found.filter((f) => f.severity === "error").length;
-    const warnings = report.warnings.length + found.filter((f) => f.severity === "warning").length;
-    const out: string[] = [
-      errors === 0
-        ? `Export check: READY ✅ — ${warnings} warning(s). Structure, UV, textures${anims.length ? `, ${anims.length} animation(s)` : ""} checked.`
-        : `Export check: NOT READY ❌ — fix ${errors} error(s) first (${warnings} warning(s)).`,
-    ];
-    for (const issue of report.issues) out.push(`  [${issue.severity === "error" ? "ERROR" : "warn "}] (${issue.rule}) ${issue.message}`);
-    for (const f of found) out.push(`  [${f.severity === "error" ? "ERROR" : "warn "}] (${f.rule}) ${f.message}`);
-    if (errors === 0) {
-      out.push(formatId === "java_block"
-        ? "Next: export_model (codec java_block)."
-        : `Next: export_model (${formatId === "geckolib_model" ? "GeckoLib → .geo.json" : "the format's codec"})${anims.length ? " and export_animations" : ""}.`);
-    }
-    return { isError: errors > 0, content: [{ type: "text" as const, text: out.join("\n") }] };
   }
 );
 
@@ -1668,6 +1692,209 @@ server.registerTool(
         (r.truncated ? " [content truncated]" : "");
       return r.content != null ? `${header}\n\n${r.content}` : header;
     })
+);
+
+// The mod's assets/<mod_id> folder from what the caller knows: the mod project, its resources
+// folder, its assets folder, or assets/<mod_id> itself. A namespace folder is only created where
+// mod_id can't be a typo — in an assets folder that holds no other mod, or a fresh resources folder.
+function resolveModAssets(modDir: string, modId?: string): { dir: string; modId: string; create: boolean } | { error: string } {
+  const isDir = (p: string) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+  const named = (p: string, name: string) => path.basename(p).toLowerCase() === name;
+  const inside = (assets: string, id: string, create: boolean) => {
+    const bad = resourceNameError(id, "mod_id", false);
+    return bad ? { error: bad } : { dir: path.join(assets, id), modId: id, create };
+  };
+  if (!path.isAbsolute(modDir)) return { error: `mod_dir must be an absolute path (got "${modDir}").` };
+  const badId = modId === undefined ? null : resourceNameError(modId, "mod_id", false);
+  if (badId) return { error: badId };
+  const dir = path.resolve(modDir);
+  if (!isDir(dir)) return { error: `mod_dir "${dir}" was not found (or is not a folder).` };
+  if (named(path.dirname(dir), "assets")) {
+    const id = path.basename(dir);
+    if (modId !== undefined && modId !== id) return { error: `mod_dir is the assets folder of "${id}", so mod_id must be "${id}" (got "${modId}").` };
+    return inside(path.dirname(dir), id, false);
+  }
+  const assets = [
+    ...(named(dir, "assets") ? [dir] : []),
+    path.join(dir, "assets"),
+    path.join(dir, "src", "main", "resources", "assets"),
+    path.join(dir, "common", "src", "main", "resources", "assets"),
+  ].find(isDir);
+  if (!assets) {
+    const resources = [
+      ...(named(dir, "resources") ? [dir] : []),
+      path.join(dir, "src", "main", "resources"),
+      path.join(dir, "common", "src", "main", "resources"),
+    ].find(isDir);
+    if (!resources) return { error: `could not find an assets or src/main/resources folder in "${dir}" — pass the mod project, its resources folder or its assets/<mod_id> folder.` };
+    if (modId === undefined) return { error: `mod_id is required: "${resources}" has no assets folder yet to read it from.` };
+    return inside(path.join(resources, "assets"), modId, true);
+  }
+  const mods = readdirSync(assets, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "minecraft")
+    .map((e) => e.name);
+  if (modId !== undefined) {
+    if (mods.includes(modId)) return inside(assets, modId, false);
+    if (mods.length) return { error: `assets/${modId} was not found in "${assets}" — it holds ${mods.join(", ")}. Check mod_id.` };
+    return inside(assets, modId, true);
+  }
+  if (mods.length === 1) return inside(assets, mods[0], false);
+  return { error: `mod_id is required: "${assets}" holds ${mods.length ? `several mods' assets (${mods.join(", ")})` : "no mod folder yet"}.` };
+}
+
+// A GeckoLib model into a mod in ONE call. The plugin compiles, with the calls export_model /
+// export_animations / get_texture make; the server writes the files where GeckoLib's defaulted
+// models look (packages/shared/src/modAssets.ts) — so Blockbench asks for no file permission, and
+// nothing is written unless the whole bundle can be.
+server.registerTool(
+  "export_bundle",
+  {
+    title: "Export Bundle (into a mod)",
+    description:
+      "Export a GeckoLib model into a mod in ONE call: the geometry (.geo.json), the animations (.animation.json) " +
+      "and the texture (.png), each where GeckoLib's defaulted models (DefaultedEntityGeoModel …) load it, under " +
+      "assets/<mod_id>/ — GeckoLib 4 (Minecraft up to 1.21.4): geo/<kind>/, animations/<kind>/, textures/<kind>/; " +
+      "GeckoLib 5 (1.21.5+): geckolib/models/<kind>/, geckolib/animations/<kind>/, textures/<kind>/. Runs the " +
+      "export check first (as validate_model for_export) and writes NOTHING when it finds an error, or when a " +
+      "file already there would change — ask the user, then pass overwrite: true. Identical files count as " +
+      "unchanged. dry_run shows the plan. GeckoLib and Bedrock projects.",
+    inputSchema: {
+      mod_dir: z.string().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder."),
+      mod_id: z.string().optional().describe("The mod's namespace. Default: from mod_dir, or the only mod folder in its assets."),
+      name: z.string().optional().describe("File name without extension; may include folders ('boss/goblin'). Default: the geometry identifier."),
+      kind: z.enum(BUNDLE_KINDS).optional().describe("GeckoLib's sub-folder: entity (default), item or block."),
+      minecraft_version: z.string().optional().describe(`The mod's Minecraft version; decides GeckoLib 4 or 5 folders (default ${DEFAULT_MC_VERSION}).`),
+      geckolib: z.enum(["4", "5"]).optional().describe("Use GeckoLib 4 or 5 folders whatever the Minecraft version."),
+      texture: z.string().optional().describe("Which texture, when the project has several (default: the one on the most faces)."),
+      include: z.array(z.enum(BUNDLE_PARTS)).min(1).optional().describe("Only these parts: model, animations, texture (default: all the project has)."),
+      overwrite: z.boolean().optional().describe("Replace existing files that differ (default false: write nothing and list them)."),
+      force: z.boolean().optional().describe("Write although the export check found errors — only when the user accepts them."),
+      dry_run: z.boolean().optional().describe("Only show what would be written."),
+    },
+  },
+  async (args) => {
+    const ask = async (tool: ToolType, input: Record<string, any>): Promise<any> => {
+      const r: any = await sendToBlockbench(tool, input);
+      if (r && r.ok === false) throw new Error(`${tool} failed: ${r.error}`);
+      return r || {};
+    };
+    const refuse = (why: string) => fail(`export_bundle failed: ${why}`);
+    try {
+      // The project, the file names and the folder — before anything is compiled.
+      const info = (await ask("get_project_info", {})).info || {};
+      const formatId = info.format?.id;
+      if (!BUNDLE_FORMATS.has(formatId)) return refuse(`the "${formatId}" format is unsupported — it writes GeckoLib models (a GeckoLib or Bedrock project); use export_model.`);
+      const name = bundleName(args.name, info.project?.model_identifier);
+      if (!name) return refuse("a name is required — pass name, or set_project model_identifier (it names the geometry too).");
+      const badName = resourceNameError(name, "name");
+      if (badName) return refuse(badName);
+      const mcVersion = args.minecraft_version ?? DEFAULT_MC_VERSION;
+      const geckolib = args.geckolib ? (Number(args.geckolib) as 4 | 5) : geckolibFor(mcVersion);
+      if (!geckolib) return refuse(`minecraft_version must be a version like 1.20.1 or 26.1 (got "${mcVersion}").`);
+      const target = resolveModAssets(args.mod_dir, args.mod_id);
+      if ("error" in target) return refuse(target.error);
+      const kind: BundleKind = args.kind ?? "entity";
+      const rel = bundlePaths(geckolib, kind, name);
+
+      // What there is to ship, and the export check.
+      const tree = (await ask("get_scene_tree", {})).tree as SceneTree;
+      const animations: any[] = (await ask("list_animations", {})).animations || [];
+      const include = new Set<BundlePart>(args.include ?? BUNDLE_PARTS);
+      const notes: string[] = [];
+      let texture: SceneTexture | null = null;
+      if (include.has("texture")) {
+        const pick = pickTexture(tree, args.texture);
+        if ("error" in pick) return refuse(pick.error);
+        texture = pick.texture;
+        if (!texture) notes.push("The project has no texture — no .png.");
+        else if (pick.others.length && args.texture === undefined) notes.push(`GeckoLib draws a model with one texture: exported "${texture.name}" (on ${pick.faces} face(s)), not ${pick.others.map((t) => `"${t.name}"`).join(", ")} — pass texture to pick another.`);
+      }
+      if (include.has("animations") && !animations.length) notes.push("The project has no animation — no .animation.json.");
+      const pre = await exportPreflight(tree, { info, animations });
+
+      // Compile in Blockbench — whole, since the result is written, not shown.
+      type Planned = { rel: string; file: string; data: Buffer; status: "new" | "unchanged" | "changed" };
+      const planned: Planned[] = [];
+      const add = (part: BundlePart, data: Buffer) => {
+        const file = path.join(target.dir, ...rel[part].split("/"));
+        let old: Buffer | null = null;
+        try { old = readFileSync(file); } catch { /* not there yet */ }
+        planned.push({ rel: rel[part], file, data, status: !old ? "new" : old.equals(data) ? "unchanged" : "changed" });
+      };
+      const whole = { max_content_length: Number.MAX_SAFE_INTEGER };
+      if (include.has("model")) {
+        const m = await ask("export_model", whole);
+        let geo: any = null;
+        try { geo = m.encoding === "utf-8" && !m.truncated ? JSON.parse(m.content) : null; } catch { /* checked below */ }
+        if (!geo || !geo["minecraft:geometry"]) return refuse(`the ${m.codec?.id ?? "format's"} codec did not produce Bedrock geometry (.geo.json) — nothing was written.`);
+        add("model", Buffer.from(m.content, "utf8"));
+      }
+      if (include.has("animations") && animations.length) {
+        const a = await ask("export_animations", whole);
+        if (a.truncated || typeof a.content !== "string") return refuse("the animations came back incomplete — nothing was written.");
+        add("animations", Buffer.from(a.content, "utf8"));
+      }
+      if (texture) {
+        const t = await ask("get_texture", { texture: texture.uuid });
+        const prefix = "data:image/png;base64,";
+        if (typeof t.data_url !== "string" || !t.data_url.startsWith(prefix)) return refuse(`texture "${texture.name}" did not come back as a PNG — nothing was written.`);
+        add("texture", Buffer.from(t.data_url.slice(prefix.length), "base64"));
+      }
+      if (!planned.length) return refuse(`there is nothing to export. ${notes.join(" ")}`);
+
+      const changed = planned.filter((p) => p.status === "changed");
+      const layout = `GeckoLib ${geckolib} (${args.geckolib ? "as asked" : `for Minecraft ${mcVersion}`})`;
+      const size = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+      const report = [preflightVerdict(pre), ...pre.findings.map(findingLine)].join("\n");
+      const noteLines = notes.map((n) => `\n⚠️  ${n}`).join("");
+      if (args.dry_run) {
+        const blockers = [
+          pre.errors && !args.force ? "the export check's errors" : null,
+          changed.length && !args.overwrite ? `${changed.length} existing file(s) that would change (overwrite: true replaces them)` : null,
+        ].filter(Boolean);
+        const state = (p: Planned) => (p.status === "changed" ? (args.overwrite ? "replaces the existing file" : "EXISTS and differs") : p.status);
+        return ok(
+          `Plan (nothing written): "${name}" for ${layout} into ${target.dir}${target.create ? " (to be created)" : ""}:\n` +
+            planned.map((p) => `  ${p.rel}  — ${state(p)}, ${size(p.data.length)}`).join("\n") +
+            `\n${report}${noteLines}\n` +
+            (blockers.length ? `The real call would write nothing: ${blockers.join("; ")}.` : "The real call would write these files.")
+        );
+      }
+      if (pre.errors && !args.force) {
+        const alsoChanged = changed.length && !args.overwrite ? ` Then ${changed.length} existing file(s) would change: overwrite: true replaces them.` : "";
+        return { isError: true, content: [{ type: "text" as const, text: `${report}\nNothing was written. Fix the errors first, or pass force: true if the user accepts them.${alsoChanged}` }] };
+      }
+      if (changed.length && !args.overwrite) {
+        return refuse(`nothing was written — each of these already exists with different content:\n${changed.map((p) => `  ${p.file}`).join("\n")}\nAsk the user, then pass overwrite: true to replace them (or choose another name).`);
+      }
+
+      // Every file to a temp file first, then all moved into place: a write that fails (disk full,
+      // no permission) replaces nothing, and a failed move names what was already moved.
+      const toWrite = planned.filter((p) => p.status !== "unchanged");
+      const temps: Array<[string, string]> = [];
+      let moved = 0;
+      try {
+        for (const p of toWrite) {
+          mkdirSync(path.dirname(p.file), { recursive: true });
+          const tmp = `${p.file}.${process.pid}.tmp`;
+          writeFileSync(tmp, p.data);
+          temps.push([tmp, p.file]);
+        }
+        for (const [tmp, file] of temps) { renameSync(tmp, file); moved++; }
+      } catch (e: any) {
+        for (const [tmp] of temps.slice(moved)) { try { unlinkSync(tmp); } catch { /* already gone */ } }
+        return refuse(`writing into "${target.dir}" failed: ${e?.message || e}${moved ? ` — already written: ${toWrite.slice(0, moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
+      }
+      const forced = pre.errors ? `\n⚠️  Written although the export check found ${pre.errors} error(s) (force).` : "";
+      return ok(
+        `Exported "${name}" for ${layout} into ${target.dir}${target.create ? " (created)" : ""}:\n` +
+          planned.map((p) => `  ${p.rel}  (${size(p.data.length)}, ${p.status === "changed" ? "replaced" : p.status})`).join("\n") +
+          `\n${report}${forced}${noteLines}\nIn the mod, ${DEFAULTED_MODEL[kind]} finds these files from "${target.modId}:${name}".`
+      );
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+  }
 );
 
 server.registerTool(
