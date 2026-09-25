@@ -717,8 +717,10 @@ server.registerTool(
       "(arm_left → arm_right), positions, pivots and rotations mirrored, and its children go under the twin. " +
       "Positions are computed at rest, before rotations. The model faces north: front = −Z, its own left = −X. " +
       "`template` starts from a ready rig — humanoid (body, head, arms, legs), quadruped (body, head, four legs, " +
-      "tail) or sword (grip, guard, blade, pommel) — sized by `scale`; `parts` then adds to it (e.g. horns " +
-      "attached to the head). `dry_run` shows the plan. Afterwards run pack_uv.",
+      "tail), sword (grip, guard, blade, pommel) or chain (`segments` pieces one behind the other, each pivoting " +
+      "at its front: a tail, tentacle or snake — put it on a body with place_relative on segment_1) — sized by " +
+      "`scale`; `parts` then adds to it (e.g. horns attached to the head). `dry_run` shows the plan. Afterwards " +
+      "run pack_uv.",
     inputSchema: {
       parts: z
         .array(z.object({
@@ -741,7 +743,8 @@ server.registerTool(
         .max(64)
         .optional()
         .describe("Parts in order: attach targets and parents before the parts that use them. With a template: extra parts."),
-      template: z.enum(TEMPLATES).optional().describe("Start from a ready rig: humanoid, quadruped or sword."),
+      template: z.enum(TEMPLATES).optional().describe("Start from a ready rig: humanoid, quadruped, sword or chain."),
+      segments: z.number().int().min(2).max(16).optional().describe("chain: how many segments (default 4)."),
       scale: z.number().min(0.25).max(4).optional().describe("Template size (1 = Minecraft proportions, a 32-unit humanoid); sizes round to whole units."),
       dry_run: z.boolean().optional().describe("Only show the plan; create nothing."),
     },
@@ -758,7 +761,8 @@ server.registerTool(
     const groupNames = new Set<string>();
     const walk = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "group") { groupNames.add(n.name); walk(n.children || []); } });
     walk(tree?.roots || []);
-    const parts = [...(args.template ? templateParts(args.template, args.scale ?? 1) : []), ...((args.parts as any[]) || [])];
+    if (args.segments !== undefined && args.template !== "chain") return fail('create_from_spec failed: segments is invalid without template "chain" (it sets the chain\'s length).');
+    const parts = [...(args.template ? templateParts(args.template, args.scale ?? 1, args.segments ?? 4) : []), ...((args.parts as any[]) || [])];
     if (!parts.length) return fail("create_from_spec failed: give parts, a template, or both.");
     const plan = planSpec(parts, sceneBoxes(tree || { roots: [] }), groupNames, tree?.format?.id === "java_block" ? 8 : 0);
     if ("error" in plan) return fail(`create_from_spec failed: ${plan.error}`);

@@ -69,6 +69,15 @@ const sc = (n) => sword.cubes.find((x) => x.name === n);
 check("sword: guard on the grip, blade on the guard, pommel under the grip",
   near(sc("guard_cube").from, [-4, 6, -1]) && near(sc("blade_cube").from, [-1, 7, -0.5]) && near(sc("blade_cube").to, [1, 23, 0.5]) && near(sc("pommel_cube").from, [-2, -2, -2]),
   JSON.stringify(sword.cubes));
+const chain = planSpec(templateParts("chain"));
+const cc = (n) => chain.cubes.find((x) => x.name === n), cg = (n) => chain.groups.find((x) => x.name === n);
+check("chain: 4 segments one behind the other (+Z), each inside the one before, pivoting at its front",
+  chain.groups.length === 4 && near(cc("segment_1_cube").from, [-1, 0, 0]) && near(cc("segment_2_cube").from, [-1, 0, 4]) && near(cc("segment_4_cube").to, [1, 2, 16]) &&
+  !cg("segment_1").parent && cg("segment_2").parent === "segment_1" && cg("segment_4").parent === "segment_3" &&
+  [1, 2, 3, 4].every((k) => near(cg(`segment_${k}`).origin, [0, 1, 4 * (k - 1)])),
+  JSON.stringify(chain.groups));
+check("chain: segments sets its length, scale its size",
+  planSpec(templateParts("chain", 1, 6)).groups.length === 6 && near(planSpec(templateParts("chain", 2)).cubes[0].to, [2, 4, 8]));
 
 console.log("\n--- through the server (mock Blockbench) ---");
 const h = await startHarness();
@@ -81,6 +90,10 @@ try {
   check("a template alone, scaled, as a plan", !quadPlanned.isError && /Plan \(nothing created\): 7 bone\(s\), 7 cube\(s\)/.test(quadPlanned.text), quadPlanned.text.split("\n")[0]);
   const neither = await h.call("create_from_spec", {});
   check("neither parts nor a template is refused", neither.isError && /give parts, a template, or both/.test(neither.text), neither.text);
+  const chainPlanned = await h.call("create_from_spec", { template: "chain", segments: 5, dry_run: true });
+  check("a chain of 5 segments as a plan", !chainPlanned.isError && /Plan \(nothing created\): 5 bone\(s\), 5 cube\(s\)/.test(chainPlanned.text) && /segment_5\/ \(in segment_4\)/.test(chainPlanned.text), chainPlanned.text.split("\n")[0]);
+  const stray = await h.call("create_from_spec", { template: "humanoid", segments: 5, dry_run: true });
+  check("segments with another template is refused", stray.isError && /^\[INVALID_INPUT\] .*segments is invalid without template "chain"/.test(stray.text), stray.text);
   const dry = await h.call("create_from_spec", { parts: HUMANOID, dry_run: true });
   check("dry_run shows the plan and creates nothing", !dry.isError && /Plan \(nothing created\): 8 bone\(s\), 8 cube\(s\)/.test(dry.text) && !node("body"), dry.text.split("\n")[0]);
   const built = await h.call("create_from_spec", { parts: HUMANOID });

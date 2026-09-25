@@ -66,7 +66,9 @@ create_from_spec: template="humanoid", scale=1.25, parts=[
   {name: "horn_left", size: [1, 3, 1], parent: "head", attach: {to: "head", side: "on_top", align: {x: "min"}}, mirror: "x"}]
 ```
 
-Templates: `humanoid`, `quadruped`, `sword` (`dry_run` lists their parts).
+Templates: `humanoid`, `quadruped`, `sword`, `chain` (`dry_run` lists their parts). A chain
+(`segments`: 2–16) is a tail or tentacle — each segment inside the one before, pivoting at its front;
+then `place_relative target:"segment_1" ref:"body" side:"back"` moves the whole chain onto the body.
 Every part becomes a bone with one cube; `mirror: "x"` adds arm_right / leg_right. Parts are placed in
 order (attach targets first), at rest; `dry_run: true` shows the plan. Then `pack_uv`.
 

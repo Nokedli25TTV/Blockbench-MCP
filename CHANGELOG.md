@@ -17,8 +17,10 @@ section into the new version (see README → Releasing).
 
 ### Added
 - `create_from_spec` → `template`: start from a ready rig — `humanoid` (body, head, arms, legs; hips,
-  shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail) or `sword`
-  (grip, guard, blade, pommel; pivot at the grip) — sized by `scale` (1 = Minecraft proportions,
+  shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail), `sword`
+  (grip, guard, blade, pommel; pivot at the grip) or `chain` (`segments`, 2–16, default 4: pieces one
+  behind the other, each inside the one before and pivoting at its front — a tail, tentacle or snake;
+  `place_relative` on `segment_1` puts it on a body) — sized by `scale` (1 = Minecraft proportions,
   whole units), with `parts` added on top (e.g. horns attached to the head). The templates are part
   lists (`packages/shared/src/templates.ts`), so `dry_run` shows them for tweaking.
 - `measure`: parts by number instead of from a screenshot. Each target's world box (min→max, size,

@@ -1,14 +1,14 @@
-// Rig templates for create_from_spec: ready part lists (humanoid, quadruped, sword) scaled
+// Rig templates for create_from_spec: ready part lists (humanoid, quadruped, sword, chain) scaled
 // to whole units. The model faces north (−Z) with its own left at −X; limbs pivot at their
 // top (hip, shoulder), heads at the neck. Extra parts can attach to the template's parts.
 import type { SpecPart } from "./spec.ts"; // with the extension: the tests run this file in Node directly
 import type { Vec3 } from "./types";
 
-export const TEMPLATES = ["humanoid", "quadruped", "sword"] as const;
+export const TEMPLATES = ["humanoid", "quadruped", "sword", "chain"] as const;
 export type Template = (typeof TEMPLATES)[number];
 
-/** The template's parts at `scale` (1 = Minecraft proportions: a 32-unit humanoid). */
-export function templateParts(template: Template, scale = 1): SpecPart[] {
+/** The template's parts at `scale` (1 = Minecraft proportions: a 32-unit humanoid); `segments`: a chain's length. */
+export function templateParts(template: Template, scale = 1, segments = 4): SpecPart[] {
   const s = (n: number) => Math.max(1, Math.round(n * scale));
   const v = (x: number, y: number, z: number): Vec3 => [s(x), s(y), s(z)];
   switch (template) {
@@ -39,6 +39,16 @@ export function templateParts(template: Template, scale = 1): SpecPart[] {
         { name: "blade", size: v(2, 16, 1), parent: "grip", attach: { to: "guard", side: "on_top" }, pivot: "bottom" },
         { name: "pommel", size: v(4, 2, 4), parent: "grip", attach: { to: "grip", side: "below" }, pivot: "center" },
       ];
+    }
+    case "chain": {
+      // A tail, tentacle or snake body: segments one behind the other (+Z), each inside the one
+      // before and pivoting at its front, so bending one bends everything behind it.
+      const seg = v(2, 2, 4);
+      const parts: SpecPart[] = [{ name: "segment_1", size: seg, from: [-seg[0] / 2, 0, 0], pivot: "front" }];
+      for (let k = 2; k <= segments; k++) {
+        parts.push({ name: `segment_${k}`, size: seg, parent: `segment_${k - 1}`, attach: { to: `segment_${k - 1}`, side: "back" }, pivot: "front" });
+      }
+      return parts;
     }
   }
 }
