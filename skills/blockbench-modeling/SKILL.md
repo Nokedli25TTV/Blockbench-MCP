@@ -58,6 +58,14 @@ create_from_spec: parts=[
   {name: "leg_left", size: [4, 12, 4], attach: {to: "body", side: "below", align: "min"}, pivot: "top", mirror: "x"}]
 ```
 
+Or start from a template and add to it:
+
+```
+create_from_spec: template="humanoid", scale=1.25, parts=[
+  {name: "horn_left", size: [1, 3, 1], parent: "head", attach: {to: "head", side: "on_top", align: {x: "min"}}, mirror: "x"}]
+```
+
+Templates: `humanoid`, `quadruped`, `sword` (`dry_run` lists their parts).
 Every part becomes a bone with one cube; `mirror: "x"` adds arm_right / leg_right. Parts are placed in
 order (attach targets first), at rest; `dry_run: true` shows the plan. Then `pack_uv`.
 

@@ -15,6 +15,13 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Added
+- `create_from_spec` → `template`: start from a ready rig — `humanoid` (body, head, arms, legs; hips,
+  shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail) or `sword`
+  (grip, guard, blade, pommel; pivot at the grip) — sized by `scale` (1 = Minecraft proportions,
+  whole units), with `parts` added on top (e.g. horns attached to the head). The templates are part
+  lists (`packages/shared/src/templates.ts`), so `dry_run` shows them for tweaking.
+
 ## [0.5.0] - 2026-09-25
 
 ### Fixed
