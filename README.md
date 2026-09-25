@@ -54,10 +54,12 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
 
 ## ✨ What it can do
 
-- **Build a model in one call** — a whole bone hierarchy plus its cubes with `create_cubes`, with
-  guardrails: unique names, pivots first, and rotation rules that follow the format — GeckoLib bones
-  on any axes, Java block/item models (blocks, vanilla-style items) on cubes at the angles their
-  Minecraft version accepts (1.20.1: one axis, 22.5° steps).
+- **Build a model in one call** — a whole rig from a part list or a template (humanoid, quadruped,
+  sword, chain) with `create_from_spec`, parts placed against each other instead of by coordinates
+  (`place_relative`), or any bone hierarchy with `create_cubes` — with guardrails: unique names,
+  pivots first, and rotation rules that follow the format — GeckoLib bones on any axes, Java
+  block/item models (blocks, vanilla-style items) on cubes at the angles their Minecraft version
+  accepts (1.20.1: one axis, 22.5° steps).
 - **Texture precisely** — `pack_uv` gives every cube its own atlas region, `validate_uv` catches
   overlaps before painting, `shade_cubes` paints every part in its exact colour in one call, and there
   are pixel-art palettes and paint tools for hand work.
@@ -182,13 +184,14 @@ Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
 | Domain | Tools |
 |---|---|
 | Project | `get_project_info`, `create_project` (new project in `geckolib` / `bedrock` / `java` format), `set_project` |
-| Geometry | `create_cubes` (batch), `modify_cubes` (batch), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation`, `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
-| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `measure` (boxes, gaps, overlaps — also at an animation time), `find_elements_by_criteria`, `get_selection`, `validate_model` |
+| Geometry | `create_from_spec` (a whole rig from a part list or a template: humanoid, quadruped, sword, chain), `place_relative` (put a part against another), `move_element` (a whole part with its pivots), `create_cubes` (batch), `modify_cubes` (batch), `create_cube`, `create_group`, `modify_cube`, `set_origin` (value or `anchor`), `set_rotation`, `duplicate_element` (`mirror`, `count`), `rename_element`, `reparent_element`, `delete_element` |
+| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`; `format: "outline"`), `measure` (boxes, gaps, overlaps — also at an animation time), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
-| Animation | `create_animation`, `set_keyframes` (batch), `check_animation` (lint + floor check), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
-| Camera | `capture_screenshot`, `set_camera_angle`, `capture_app_screenshot` |
+| Animation | `generate_animation` (a walk or idle loop from the rig), `create_animation`, `set_keyframes` (batch), `check_animation` (lint + floor check), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
+| Camera | `capture_screenshot` (`views` / `times`: several angles or frames in one image), `set_camera_angle`, `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
+| Sequences | `run_batch` (several different calls in one round trip; stop, continue or roll back on an error) |
 | Export | `export_bundle` (model + animations + texture into the mod's folders), `list_export_formats`, `export_model`, `export_animations` |
 | Guides | `list_skills`, `get_skill` (also readable as `skill://…` resources) |
 | Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` |
