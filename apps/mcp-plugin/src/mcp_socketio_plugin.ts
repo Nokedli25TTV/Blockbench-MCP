@@ -7,7 +7,7 @@ import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor, javaVersionL
 import type { FormatInfo, FormatRules } from "../../../packages/shared/src/formatRules";
 import { paintFace, rampFromBase, seedFrom, MATERIALS } from "../../../packages/shared/src/facePainter";
 import type { FaceKey, Material } from "../../../packages/shared/src/facePainter";
-import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
+import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, isAlignSpec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
 import type { GeoNode, Frame, Box, Side, Align, Anchor } from "../../../packages/shared/src/placement";
 import type { Vec3 } from "../../../packages/shared/src/types";
 import { VIEWS, viewDirection, fitDistance, sheetLayout, sheetCell } from "../../../packages/shared/src/views";
@@ -3172,12 +3172,12 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         if (part === ref || isDescendantOf(ref, part)) return { ok: false, error: `"${ref.name}" is inside "${part.name}" and would move with it — place against a part outside it.` };
         if (!(SIDES as readonly string[]).includes(input.side)) return { ok: false, error: `side must be one of ${SIDES.join(', ')}.` };
         const align = input.align ?? 'center';
-        if (!(ALIGNS as readonly string[]).includes(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(', ')}.` };
+        if (!isAlignSpec(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(', ')}, or per axis like { y: "min" }.` };
         const gap = typeof input.gap === 'number' && isFinite(input.gap) ? input.gap : 0;
         const box = worldBoxOf(part), refBox = worldBoxOf(ref);
         if (!box) return { ok: false, error: `"${part.name}" has no geometry to place.` };
         if (!refBox) return { ok: false, error: `Reference "${ref.name}" has no geometry to place against.` };
-        const world = placementDelta(box, refBox, input.side as Side, { gap, align: align as Align, offset: isVec3(input.offset) ? v3(input.offset) : undefined });
+        const world = placementDelta(box, refBox, input.side as Side, { gap, align, offset: isVec3(input.offset) ? v3(input.offset) : undefined });
         const d = toModelDelta(world, chainAbove(part));
         const nodes = subtreeOf(part);
         const rangeError = moveRangeError(nodes, d);

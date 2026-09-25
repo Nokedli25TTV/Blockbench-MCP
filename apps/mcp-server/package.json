@@ -13,7 +13,8 @@
     "test:painter": "node test/painter.test.mjs",
     "test:placement": "node test/placement.test.mjs",
     "test:views": "node test/views.test.mjs",
-    "test:batch": "node test/batch.test.mjs"
+    "test:batch": "node test/batch.test.mjs",
+    "test:spec": "node test/spec.test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -14,7 +14,7 @@ import path from "node:path";
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor } from "../../../packages/shared/src/formatRules.ts";
 import { rampFromBase, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
 import { VIEWS, sheetLayout } from "../../../packages/shared/src/views.ts";
-import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement.ts";
+import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, isAlignSpec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement.ts";
 
 const require = createRequire(import.meta.url);
 const dir = path.dirname(fileURLToPath(import.meta.url));
@@ -566,7 +566,7 @@ export function createMockScene() {
       if (part === ref || subtree(part).includes(ref)) return { ok: false, error: `"${ref.name}" is inside "${part.name}" and would move with it — place against a part outside it.` };
       if (!SIDES.includes(input.side)) return { ok: false, error: `side must be one of ${SIDES.join(", ")}.` };
       const align = input.align ?? "center";
-      if (!ALIGNS.includes(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(", ")}.` };
+      if (!isAlignSpec(align)) return { ok: false, error: `align must be one of ${ALIGNS.join(", ")}, or per axis.` };
       const box = worldBox(part), refBox = worldBox(ref);
       if (!box) return { ok: false, error: `"${part.name}" has no geometry to place.` };
       if (!refBox) return { ok: false, error: `Reference "${ref.name}" has no geometry to place against.` };

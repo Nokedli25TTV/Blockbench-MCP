@@ -12,6 +12,7 @@ import { MATERIALS } from "../../../packages/shared/src/facePainter";
 import { SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
 import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
+import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -493,6 +494,11 @@ async function forwardImageOrText(tool: ToolType, args: Record<string, any>, onT
 }
 
 const vec3 = z.array(z.number()).length(3);
+// place_relative / create_from_spec: one alignment for both other axes, or per axis.
+const alignSchema = z.union([
+  z.enum(ALIGNS),
+  z.object({ x: z.enum(ALIGNS).optional(), y: z.enum(ALIGNS).optional(), z: z.enum(ALIGNS).optional() }),
+]);
 // Longest edge of a returned screenshot. Smaller images cost the model far fewer
 // tokens to read; 800 px keeps a model clearly legible.
 const screenshotMaxSize = z
@@ -682,6 +688,73 @@ server.registerTool(
       ((r.cubes || []).length ? ` Cubes: ${(r.cubes || []).join(", ")}.` : "") +
       warningLines(r)
     )
+);
+
+// A whole rig from a part list: planned in the server (packages/shared/src/spec.ts) and built
+// with ONE create_cubes call — one undo step, all-or-nothing.
+server.registerTool(
+  "create_from_spec",
+  {
+    title: "Create From Spec",
+    description:
+      "Build a whole rig from a list of parts in ONE call (one undo step, all-or-nothing). Each part becomes " +
+      "a bone (group) holding one cube. Give its size and either `attach` it to an earlier part or an " +
+      "existing element (side on_top / below / left / right / front / back / inside, gap, align, offset — as " +
+      "place_relative) or an explicit `from` corner (default: centred on the origin, standing on y = 0). " +
+      "`pivot`: an anchor of the part's own box — center (default), top (shoulder, hip, neck), bottom, left, " +
+      "right, front, back — or a point. `mirror: \"x\"` also builds the left↔right twin: names swapped " +
+      "(arm_left → arm_right), positions, pivots and rotations mirrored, and its children go under the twin. " +
+      "Positions are computed at rest, before rotations. The model faces north: front = −Z, its own left = −X. " +
+      "`dry_run` shows the plan. Afterwards run pack_uv.",
+    inputSchema: {
+      parts: z
+        .array(z.object({
+          name: z.string().describe("Bone name, e.g. 'arm_left'."),
+          size: vec3.describe("The part's cube size [w, h, d]."),
+          parent: z.string().optional().describe("Parent bone: an earlier part or an existing group."),
+          attach: z.object({
+            to: z.string().describe("An earlier part or an existing group/cube."),
+            side: z.enum(SIDES).describe("on_top, below, left (−X), right (+X), front (−Z), back (+Z), inside."),
+            gap: z.number().optional().describe("Space between them (default 0; negative = sunk in)."),
+            align: alignSchema.optional().describe("On the other axes: center (default), min, max, keep — or per axis, e.g. { y: \"min\" }."),
+            offset: vec3.optional().describe("Extra nudge [x,y,z]."),
+          }).optional().describe("Rest the part against another one."),
+          from: vec3.optional().describe("Or: the cube's lower corner [x,y,z]."),
+          pivot: z.union([z.enum(ANCHORS), vec3]).optional().describe("Anchor of the part's box (default center) or [x,y,z]."),
+          rotation: vec3.optional().describe("Bone rotation [x,y,z] degrees, where the format allows it."),
+          mirror: z.enum(["x"]).optional().describe("Also build the mirrored twin (left ↔ right)."),
+          cube_name: z.string().optional().describe("The cube's name (default '<name>_cube')."),
+        }))
+        .min(1)
+        .max(64)
+        .describe("Parts in order: attach targets and parents before the parts that use them."),
+      dry_run: z.boolean().optional().describe("Only show the plan; create nothing."),
+    },
+  },
+  async (args) => {
+    let tree: any;
+    try {
+      const r: any = await sendToBlockbench("get_scene_tree", { include_faces: false });
+      if (r && r.ok === false) return fail(`create_from_spec failed: ${r.error}`);
+      tree = r.tree;
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    const groupNames = new Set<string>();
+    const walk = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "group") { groupNames.add(n.name); walk(n.children || []); } });
+    walk(tree?.roots || []);
+    const plan = planSpec(args.parts as any, sceneBoxes(tree || { roots: [] }), groupNames, tree?.format?.id === "java_block" ? 8 : 0);
+    if ("error" in plan) return fail(`create_from_spec failed: ${plan.error}`);
+    const cubeOf = new Map(plan.cubes.map((c) => [c.parent, c]));
+    const lines = plan.groups.map((g) => {
+      const c = cubeOf.get(g.name)!;
+      return `${g.name}/${g.parent ? ` (in ${g.parent})` : ""}  pivot [${g.origin.join(", ")}]${g.rotation ? `  rot [${g.rotation.join(", ")}]` : ""}  →  ${c.name} [${c.from.join(", ")}]→[${c.to.join(", ")}]`;
+    });
+    if (args.dry_run) return ok(`Plan (nothing created): ${plan.groups.length} bone(s), ${plan.cubes.length} cube(s).\n${lines.join("\n")}`);
+    return forward("create_cubes", { groups: plan.groups, cubes: plan.cubes }, (r) =>
+      `Built ${(r.groups || []).length} bone(s) with ${(r.cubes || []).length} cube(s) in one undo step:\n${lines.join("\n")}` +
+      warningLines(r) + "\nNext: pack_uv (then validate_uv) before texturing.");
+  }
 );
 
 server.registerTool(
@@ -1754,7 +1827,7 @@ server.registerTool(
       ref: z.string().describe("The element or group to place it against (stays where it is)."),
       side: z.enum(SIDES).describe("on_top (+Y), below (−Y), left (−X), right (+X), front (−Z), back (+Z), inside (centred in ref)."),
       gap: z.number().optional().describe("Space between them in units (default 0 = touching; negative = overlap)."),
-      align: z.enum(ALIGNS).optional().describe("On the other axes: center (default), min / max (flush with ref's lower / upper side), keep (don't move)."),
+      align: alignSchema.optional().describe("On the other axes: center (default), min / max (flush with ref's lower / upper side), keep (don't move) — or per axis, e.g. { y: \"min\" } (unnamed axes centred)."),
       offset: vec3.optional().describe("Extra nudge [x,y,z] after placing."),
       dry_run: z.boolean().optional().describe("Only report the move; change nothing."),
     },

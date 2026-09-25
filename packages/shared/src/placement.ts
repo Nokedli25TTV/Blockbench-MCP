@@ -95,6 +95,11 @@ export const SIDES = ["on_top", "below", "left", "right", "front", "back", "insi
 export type Side = (typeof SIDES)[number];
 export const ALIGNS = ["center", "min", "max", "keep"] as const;
 export type Align = (typeof ALIGNS)[number];
+/** One alignment for both other axes, or per axis ({ y: "min" } — unnamed axes are centred). */
+export type AlignSpec = Align | Partial<Record<"x" | "y" | "z", Align>>;
+export const isAlignSpec = (a: unknown): a is AlignSpec =>
+  typeof a === "string" ? (ALIGNS as readonly string[]).includes(a)
+    : !!a && typeof a === "object" && Object.entries(a).every(([k, v]) => ["x", "y", "z"].includes(k) && (ALIGNS as readonly string[]).includes(v as string));
 const SIDE_AXIS: Record<Exclude<Side, "inside">, [number, 1 | -1]> = {
   on_top: [1, 1], below: [1, -1], left: [0, -1], right: [0, 1], front: [2, -1], back: [2, 1],
 };
@@ -102,15 +107,22 @@ const SIDE_AXIS: Record<Exclude<Side, "inside">, [number, 1 | -1]> = {
 /**
  * World offset that puts `target` against `ref`'s `side` with `gap` between them (negative
  * = sunk in), and lines it up on the other two axes: centred, flush with ref's min or max
- * side, or kept where it is. "inside" lines it up on all three axes.
+ * side, or kept where it is — the same way on both, or per axis. "inside" lines it up on
+ * all three axes.
  */
-export function placementDelta(target: Box, ref: Box, side: Side, o: { gap?: number; align?: Align; offset?: Vec3 } = {}): Vec3 {
-  const gap = o.gap ?? 0, align = o.align ?? "center";
-  const line = (i: number) =>
-    align === "keep" ? 0
+export function placementDelta(target: Box, ref: Box, side: Side, o: { gap?: number; align?: AlignSpec; offset?: Vec3 } = {}): Vec3 {
+  const gap = o.gap ?? 0;
+  const alignOf = (i: number): Align => {
+    const a = o.align ?? "center";
+    return typeof a === "string" ? a : a[(["x", "y", "z"] as const)[i]] ?? "center";
+  };
+  const line = (i: number) => {
+    const align = alignOf(i);
+    return align === "keep" ? 0
       : align === "min" ? ref.min[i] - target.min[i]
         : align === "max" ? ref.max[i] - target.max[i]
           : (ref.min[i] + ref.max[i]) / 2 - (target.min[i] + target.max[i]) / 2;
+  };
   const d: number[] = [0, 1, 2].map(line);
   if (side !== "inside") {
     const [axis, dir] = SIDE_AXIS[side];

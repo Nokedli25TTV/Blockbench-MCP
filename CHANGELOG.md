@@ -18,7 +18,7 @@ section into the new version (see README → Releasing).
 ### Added
 - `place_relative`: put a part against another one without computing coordinates — `side` on_top,
   below, left, right, front, back or inside, a `gap`, `align` on the other axes (center, min, max,
-  keep), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world bounds,
+  keep — for both, or per axis like `{ y: "min" }`), an extra `offset` and `dry_run`. Works on cubes and whole groups using their world bounds,
   rotations included; the model faces north, so front is −Z and its own left is −X.
 - `move_element`: move a cube, mesh or a whole group — everything inside it, pivots included — by a
   world `offset` (rotated parents are accounted for), or put its pivot at a world point with `to`.
@@ -36,6 +36,13 @@ section into the new version (see README → Releasing).
   right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
   labelled image, with a line saying which cell is which. Up to 16 pictures; the camera and the
   timeline are put back afterwards. One image read instead of one per angle or frame.
+- `create_from_spec`: a whole rig from a part list in ONE call and one undo step (all-or-nothing).
+  Each part becomes a bone with one cube: its size, what it rests against (`attach`: side, gap,
+  align, offset — as `place_relative`) or an explicit corner, its pivot as an anchor of its own box
+  (top for a shoulder or hip) or a point, a rotation, and `mirror: "x"` for the left↔right twin
+  (names swapped, positions / pivots / rotations mirrored, its children under the twin). Planned in
+  the server (`packages/shared/src/spec.ts`, `test:spec`) and built with one `create_cubes` call, so
+  the format's rules apply to the whole rig; `dry_run` shows the plan.
 - `run_batch`: several different tool calls in ONE round trip, in order (up to 50). Each step is
   checked and run exactly like a direct call; the reply lists every step's result and carries any
   images. `on_error`: `stop` (default), `continue`, or `rollback` — undo everything the batch changed.

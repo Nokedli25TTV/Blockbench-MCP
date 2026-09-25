@@ -12,7 +12,8 @@ Build 3D models using cubes and meshes in Blockbench.
 ### Cube & part tools
 | Tool | Purpose |
 |------|---------|
-| `create_cubes` | Build a hierarchy in one call — groups (bones) + cubes, one undo step |
+| `create_from_spec` | Build a whole rig from a part list — sizes, what each part rests on, pivots, mirrored twins — no coordinate maths, one undo step |
+| `create_cubes` | Build a hierarchy from explicit coordinates in one call — groups (bones) + cubes, one undo step |
 | `create_cube` / `create_group` | One cube / one group |
 | `modify_cube` / `modify_cubes` | Edit cubes: from/to, origin, rotation, inflate, UV |
 | `place_relative` | Put a part against another (on_top, below, left, right, front, back, inside) with a gap and alignment — no coordinate maths |
@@ -46,6 +47,19 @@ Build 3D models using cubes and meshes in Blockbench.
 | `filter_by_material` | Find elements referencing a texture |
 
 ## Cube Modeling
+
+### Build a rig from a part list (no coordinates)
+
+```
+create_from_spec: parts=[
+  {name: "body", size: [8, 12, 4], from: [-4, 12, -2], pivot: "bottom"},
+  {name: "head", size: [8, 8, 8], parent: "body", attach: {to: "body", side: "on_top"}, pivot: "bottom"},
+  {name: "arm_left", size: [4, 12, 4], parent: "body", attach: {to: "body", side: "left", align: "max"}, pivot: "top", mirror: "x"},
+  {name: "leg_left", size: [4, 12, 4], attach: {to: "body", side: "below", align: "min"}, pivot: "top", mirror: "x"}]
+```
+
+Every part becomes a bone with one cube; `mirror: "x"` adds arm_right / leg_right. Parts are placed in
+order (attach targets first), at rest; `dry_run: true` shows the plan. Then `pack_uv`.
 
 ### Build a hierarchy in one call
 

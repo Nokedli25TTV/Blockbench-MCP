@@ -36,6 +36,7 @@ check("left is −X (the model's own left, facing north), centred on the other a
 check("front is −Z", near(placementDelta(head, body, "front"), [0, 15, -5]));
 check("inside + align min: flush with ref's lower corner", near(placementDelta(head, body, "inside", { align: "min" }), [-1, 12, 1]));
 check("align keep only moves along the side's axis", near(placementDelta(head, body, "below", { align: "keep" }), [0, 6, 0]));
+check("align per axis: { y: \"min\" } is flush at the bottom, x stays centred", near(placementDelta(head, body, "front", { align: { y: "min" } }), [0, 12, -5]));
 
 const arm = { min: [4, 12, -2], max: [8, 24, 2] };
 check("anchor top = centre of the top side", near(anchorPoint(arm, "top"), [6, 24, 0]));
@@ -63,6 +64,8 @@ try {
   check("the head's pivot moved with it", near(cube("head").origin, [0, 24, 0]), fmt(cube("head").origin));
   const inside = await call("place_relative", { target: "body", ref: "body_cube", side: "on_top" });
   check("placing against a part inside the target is refused", inside.isError && /inside/.test(inside.text), inside.text);
+  const perAxis = await call("place_relative", { target: "head", ref: "body", side: "front", align: { y: "max" }, dry_run: true });
+  check("place_relative takes a per-axis align", !perAxis.isError && perAxis.text.includes("would span [-3, 18, -8]→[3, 24, -2]"), perAxis.text);
   const badSide = await call("place_relative", { target: "head", ref: "body", side: "above" });
   check("an unknown side is refused by the schema", badSide.isError, badSide.text.slice(0, 120));
 

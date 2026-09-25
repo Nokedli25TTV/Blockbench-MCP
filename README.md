@@ -167,7 +167,7 @@ see [Troubleshooting](#-troubleshooting).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 72 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 122. |
+| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 73 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 123. |
 | `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | Minecraft version a new Java block/item project targets (`create_project` can override it). It decides the rotation rules: up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
