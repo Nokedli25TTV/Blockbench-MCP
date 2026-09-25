@@ -32,6 +32,13 @@ section into the new version (see README → Releasing).
 - `packages/shared/src/placement.ts`: the shared world-bounds and placement math (Euler ZYX, as
   Blockbench renders), with its own test (`test:placement`, part of `pnpm test`); checked live against
   Blockbench's 3D view.
+- `capture_screenshot` → `views` and `times`: a contact sheet — several angles (front, back, left,
+  right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
+  labelled image, with a line saying which cell is which. Up to 16 pictures; the camera and the
+  timeline are put back afterwards. One image read instead of one per angle or frame.
+- `get_scene_tree` → `format: "outline"`: one line per group or cube (pivot, rotation, from→to,
+  size, box-UV offset) instead of the pretty-printed JSON — a fraction of the text for orienting on a
+  model. Views and outline have their own test (`test:views`).
 
 ### Changed
 - The `blockbench-modeling` skill uses the real tool names (it still listed `place_cube`,

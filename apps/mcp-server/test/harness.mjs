@@ -13,6 +13,7 @@ import path from "node:path";
 // The same rotation/coordinate rules the plugin enforces (Node strips the TS types).
 import { rulesFor, checkRotation, checkBounds, javaBlockVersionFor } from "../../../packages/shared/src/formatRules.ts";
 import { rampFromBase, MATERIALS } from "../../../packages/shared/src/facePainter.ts";
+import { VIEWS, sheetLayout } from "../../../packages/shared/src/views.ts";
 import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement.ts";
 
 const require = createRequire(import.meta.url);
@@ -473,7 +474,16 @@ export function createMockScene() {
       const history = scene.history || []; const index = scene.index ?? 0;
       return { ok: true, stack: { index, total: history.length, can_undo: index > 0, can_redo: index < history.length, entries: history.map((e, i) => ({ index: i, action: e.action, is_applied: i < index })).reverse() } };
     },
-    capture_screenshot() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
+    capture_screenshot(input) {
+      const png = "data:image/png;base64,iVBORw0KGgo=";
+      if (!Array.isArray(input.views) && !Array.isArray(input.times)) return { ok: true, data_url: png };
+      // Contact sheet: the plugin renders; the mock reports the same cell labels and grid.
+      const views = input.views || [], times = input.times || [];
+      if (views.some((v) => !VIEWS.includes(v))) return { ok: false, error: `views must be from: ${VIEWS.join(", ")}.` };
+      const cells = [];
+      for (const t of times.length ? times : [null]) for (const v of views.length ? views : [null]) cells.push([v, t !== null ? `t=${t}s` : null].filter(Boolean).join(" · ") || "current view");
+      return { ok: true, data_url: png, cells, ...sheetLayout(views.length, times.length) };
+    },
     capture_app_screenshot() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
     set_camera_angle(input) {
       if (input.screenshot === false) return { ok: true, message: `Camera set to [${(input.position || []).join(", ")}].` };

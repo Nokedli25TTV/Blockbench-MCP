@@ -27,7 +27,7 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
    it opens a new tab and leaves the current one alone. Its **`rules`** say where rotation may go:
    GeckoLib/Bedrock bones and cubes on any axes; Java block/item only cubes — groups don't export
    rotation — at one axis and -45/-22.5/0/22.5/45° for 1.9–1.21.5, inside -16..32.
-2. **What's already there?** `get_scene_tree` — on big models narrow it with `bone_names`,
+2. **What's already there?** `get_scene_tree format:"outline"` (one line per part), or the JSON — on big models narrow it with `bone_names`,
    `include_faces:false` or `max_depth`; `find_elements_by_criteria` for targeted lookups.
 3. **Tool missing?** The default `geckolib` profile does not load mesh, armature, PBR and brush tools.
    Ask the user to set `BLOCKBENCH_MCP_PROFILE=full` if the task truly needs them.
@@ -41,7 +41,8 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
 3. **Trust the replies.** Write tools echo what they stored and add `⚠️` notes; errors start with a code
    such as `[NOT_FOUND]` or `[DUPLICATE_NAME]`. Re-query only when the reply shows a problem.
 4. **Screenshots at milestones only.** They are 800 px by default; `set_camera_angle screenshot:false`
-   moves the camera without an image; `time` renders an animation frame.
+   moves the camera without an image; `time` renders an animation frame; `views` / `times` put several
+   angles or frames into ONE contact-sheet image.
 5. **Validate before export.** `validate_model` (+ `validate_uv` before painting, `check_animation` for
    animations), then `export_model codec_id="bedrock"` and `export_animations`.
 6. **Real tools over `risky_eval`.** Use it only when no tool exists — it bypasses validation.

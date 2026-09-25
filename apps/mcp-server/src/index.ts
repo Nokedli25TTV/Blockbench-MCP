@@ -10,6 +10,8 @@ import { validateScene, buildReport } from "../../../packages/shared/src/validat
 import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../../packages/shared/src/palettes";
 import { MATERIALS } from "../../../packages/shared/src/facePainter";
 import { SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
+import { VIEWS } from "../../../packages/shared/src/views";
+import { outlineText } from "../../../packages/shared/src/outline";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -747,8 +749,11 @@ server.registerTool(
       "registered textures, as JSON. Use before acting to verify state (rule #3/#8). On big models, narrow " +
       "the payload with the optional filters: `bone_names` returns ONLY those bones' subtrees, " +
       "`include_faces:false` drops per-cube face data, and `max_depth` caps nesting (a capped group reports " +
-      "`truncated_children` so you can re-query that subtree). With no filters it returns the FULL tree.",
+      "`truncated_children` so you can re-query that subtree). With no filters it returns the FULL tree. " +
+      "`format: \"outline\"` returns one line per group/cube instead (name, pivot, rotation, from→to, size, " +
+      "box-UV offset) — a fraction of the JSON; use it to get oriented on a model.",
     inputSchema: {
+      format: z.enum(["json", "outline"]).optional().describe("json (default) or outline: one compact line per group/cube, no face data."),
       bone_names: z
         .array(z.string())
         .optional()
@@ -766,14 +771,16 @@ server.registerTool(
     },
   },
   async (args) => {
+    const { format, ...rest } = args as any;
+    if (format === "outline" && rest.include_faces === undefined) rest.include_faces = false;
     let r: any;
     try {
-      r = await sendToBlockbench("get_scene_tree", args);
+      r = await sendToBlockbench("get_scene_tree", rest);
     } catch (e: any) {
       return fail(e?.message || String(e));
     }
     if (r && r.ok === false) return fail(`get_scene_tree failed: ${r.error}`);
-    return ok(JSON.stringify(r.tree, null, 2));
+    return ok(format === "outline" ? outlineText(r.tree) : JSON.stringify(r.tree, null, 2));
   }
 );
 
@@ -1922,15 +1929,38 @@ server.registerTool(
       "ANIMATION frame, pass `time` (seconds) — the tool evaluates the animation at that moment right before " +
       "rendering, so you get the posed frame, NOT the rest pose (without it, a screenshot after animation_timeline " +
       "set_time can race the timeline and show the bind pose). Pass `animation_id` to pick which animation. " +
-      "Images are downscaled to `max_size` px (default 800) — ask for more only when you need fine detail.",
+      "Images are downscaled to `max_size` px (default 800) — ask for more only when you need fine detail. " +
+      "CONTACT SHEET: `views` renders several angles framed on the whole model and/or `times` several " +
+      "animation frames into ONE labelled image — one read instead of a screenshot each (views × times, up " +
+      "to 16 pictures). The model faces north: front = −Z side, left = its own left (+X). The camera and " +
+      "the timeline are restored afterwards.",
     inputSchema: {
       project: z.string().optional().describe("Project name/uuid; default the open one."),
       time: z.number().optional().describe("Seconds — evaluate the animation at this moment before rendering (for posed/animation frames)."),
       animation_id: z.string().optional().describe("Animation UUID or name to evaluate at `time`. Default: the selected animation."),
+      views: z.array(z.enum(VIEWS)).min(1).max(8).optional().describe("Contact sheet angles: front, back, left, right, top, bottom, iso (front-left-top), iso_back."),
+      times: z.array(z.number().min(0)).min(1).max(12).optional().describe("Contact sheet of an animation: one frame per time (seconds), from the current camera or from each of `views`."),
       max_size: screenshotMaxSize,
     },
   },
-  async (args) => forwardImage("capture_screenshot", args)
+  async (args) => {
+    if (!args.views && !args.times) return forwardImage("capture_screenshot", args);
+    let r: any;
+    try {
+      r = await sendToBlockbench("capture_screenshot", args);
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    if (r && r.ok === false) return fail(`capture_screenshot failed: ${r.error}`);
+    const picture = image(r.data_url);
+    const cells = Array.isArray(r.cells) ? r.cells : [];
+    return {
+      content: [
+        ...picture.content,
+        { type: "text" as const, text: `Contact sheet, ${r.cols}×${r.rows}, left to right, top to bottom: ${cells.join(" | ")}.` },
+      ],
+    };
+  }
 );
 
 server.registerTool(

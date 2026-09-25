@@ -10,6 +10,8 @@ import type { FaceKey, Material } from "../../../packages/shared/src/facePainter
 import { worldPoints, boxOf, throughChain, toModelDelta, placementDelta, anchorPoint, mirroredName, mirrorCoord, shiftBox, roundVec, SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
 import type { GeoNode, Frame, Box, Side, Align, Anchor } from "../../../packages/shared/src/placement";
 import type { Vec3 } from "../../../packages/shared/src/types";
+import { VIEWS, viewDirection, fitDistance, sheetLayout, sheetCell } from "../../../packages/shared/src/views";
+import type { View } from "../../../packages/shared/src/views";
 
 // Global variable declarations
 let mcpPanel: Panel;
@@ -2735,6 +2737,88 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } catch { /* best-effort: fall back to the current pose */ }
     };
 
+    // A contact sheet: several angles and/or animation frames in ONE image — one read
+    // instead of a screenshot each (packages/shared/src/views.ts). Each named view is
+    // framed on the whole model over all requested frames; without views every frame uses
+    // the current camera. The camera and the timeline are put back afterwards.
+    const captureSheet = (input: any, preview: any): any => {
+      const views: View[] = Array.isArray(input.views) ? input.views : [];
+      const times: number[] = Array.isArray(input.times) ? input.times : (views.length && input.time !== undefined ? [input.time] : []);
+      if (views.some((v) => !(VIEWS as readonly string[]).includes(v))) return { ok: false, error: `views must be from: ${VIEWS.join(', ')}.` };
+      if (times.some((t) => typeof t !== 'number' || !isFinite(t) || t < 0)) return { ok: false, error: 'times must be seconds ≥ 0.' };
+      if (views.length > 8 || times.length > 12 || Math.max(1, views.length) * Math.max(1, times.length) > 16) return { ok: false, error: 'A sheet takes at most 8 views, 12 times and 16 pictures.' };
+      const cam = preview.camera, controls = preview.controls;
+      const saved = {
+        position: cam?.position?.toArray?.(), target: controls?.target?.toArray?.(),
+        ortho: !!preview.isOrtho, zoom: preview.camOrtho?.zoom,
+      };
+      const savedTime = times.length && typeof Timeline !== 'undefined' ? (Timeline as any).time : null;
+      const frames: (number | null)[] = times.length ? times : [null];
+      const angles: (View | null)[] = views.length ? views : [null];
+      const poseAt = (t: number | null) => { if (t !== null) poseAtTime({ time: t, animation_id: input.animation_id }); };
+      try {
+        // Frame on the model over every requested frame.
+        let box: any = null;
+        for (const t of frames) {
+          poseAt(t);
+          const b = elementsWorldBox(null);
+          if (b) box = box ? box.union(b) : b.clone();
+        }
+        const center: Vec3 = box ? [(box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2, (box.min.z + box.max.z) / 2] : [0, 8, 0];
+        const dist = fitDistance(box ? box.min.distanceTo(box.max) / 2 : 8, preview.camPers?.fov ?? 45);
+        const { cols, rows } = sheetLayout(views.length, times.length);
+        const gap = 4;
+        const cell = sheetCell(cols, rows, screenshotMax(input) || 1600, gap);
+        const sheet = document.createElement('canvas');
+        sheet.width = cols * cell + (cols + 1) * gap;
+        sheet.height = rows * cell + (rows + 1) * gap;
+        const ctx = sheet.getContext('2d');
+        if (!ctx) return { ok: false, error: 'Could not create the sheet canvas.' };
+        ctx.fillStyle = '#3a3d44';
+        ctx.fillRect(0, 0, sheet.width, sheet.height);
+        const cells: string[] = [];
+        let index = 0;
+        for (const t of frames) {
+          for (const v of angles) {
+            poseAt(t);
+            if (v) {
+              const d = viewDirection(v);
+              preview.loadAnglePreset({ position: center.map((x, k) => x + d[k] * dist), target: center, projection: 'perspective' });
+            }
+            const x0 = gap + (index % cols) * (cell + gap), y0 = gap + Math.floor(index / cols) * (cell + gap);
+            ctx.fillStyle = '#e6e8ec';
+            ctx.fillRect(x0, y0, cell, cell);
+            (Canvas as any).withoutGizmos(() => {
+              preview.render();
+              // Read the WebGL canvas in the same tick as render(); keep the centred square.
+              const src = preview.canvas;
+              const side = Math.min(src.width, src.height);
+              ctx.imageSmoothingQuality = 'high';
+              ctx.drawImage(src, (src.width - side) / 2, (src.height - side) / 2, side, side, x0, y0, cell, cell);
+            });
+            const label = [v, t !== null ? `t=${t}s` : null].filter(Boolean).join(' · ') || 'current view';
+            const font = Math.max(11, Math.round(cell / 20));
+            ctx.font = `600 ${font}px sans-serif`;
+            ctx.fillStyle = 'rgba(20, 22, 28, 0.72)';
+            ctx.fillRect(x0 + 4, y0 + 4, ctx.measureText(label).width + font * 0.8, font * 1.5);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(label, x0 + 4 + font * 0.4, y0 + 4 + font * 1.1);
+            cells.push(label);
+            index++;
+          }
+        }
+        return { ok: true, data_url: sheet.toDataURL(), cells, cols, rows };
+      } finally {
+        try {
+          if (saved.position && saved.target) preview.loadAnglePreset({ position: saved.position, target: saved.target, projection: saved.ortho ? 'orthographic' : 'perspective' });
+          if (saved.ortho && saved.zoom && preview.camOrtho) { preview.camOrtho.zoom = saved.zoom; preview.camOrtho.updateProjectionMatrix?.(); }
+        } catch { /* the view is best-effort */ }
+        if (savedTime !== null) {
+          try { (Timeline as any).time = savedTime; (Animator as any).preview?.(); } catch { /* best-effort */ }
+        }
+      }
+    };
+
     const captureScreenshot = (input: any): any => {
       try {
         let selectedProject: any = (typeof Project !== 'undefined') ? Project : null;
@@ -2751,9 +2835,10 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         if (!selectedProject) return { ok: false, error: 'No project found.' };
         if (!selectedProject.selected) selectedProject.select();
 
-        poseAtTime(input);
         const preview = (Preview as any).selected;
         if (!preview) return { ok: false, error: 'No preview available for the selected project.' };
+        if (Array.isArray(input.views) || Array.isArray(input.times)) return captureSheet(input, preview);
+        poseAtTime(input);
 
         const dataUrl = renderPreviewDataURL(preview, screenshotMax(input));
         if (!dataUrl) return { ok: false, error: 'Failed to capture preview screenshot.' };

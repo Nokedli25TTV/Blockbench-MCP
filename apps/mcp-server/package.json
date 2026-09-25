@@ -11,7 +11,8 @@
     "test:model": "node test/full-model.test.mjs",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:painter": "node test/painter.test.mjs",
-    "test:placement": "node test/placement.test.mjs"
+    "test:placement": "node test/placement.test.mjs",
+    "test:views": "node test/views.test.mjs"
   },
   "keywords": [],
   "author": "",
