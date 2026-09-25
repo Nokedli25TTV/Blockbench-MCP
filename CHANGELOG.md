@@ -41,6 +41,9 @@ section into the new version (see README → Releasing).
   model. Views and outline have their own test (`test:views`).
 
 ### Fixed
+- `from_geo_json` failed on Blockbench 5 ("reading 'initEntity'"): it parsed the geometry into the open
+  project, which the Bedrock codec then tried to switch to its own format. It now loads it into a new
+  Bedrock project, and refuses input that is not JSON or has no `minecraft:geometry`.
 - `export_model` without `codec_id` in a GeckoLib project exported the `.bbmodel` project file (the
   GeckoLib format's own codec) instead of the model. It now exports Bedrock geometry (`.geo.json`,
   what GeckoLib loads) — or a registered GeckoLib codec — and says so; `codec_id: "project"` still

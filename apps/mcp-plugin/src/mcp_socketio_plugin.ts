@@ -4168,8 +4168,16 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           if (!res.ok) return { ok: false, error: `Failed to fetch: ${res.status} ${res.statusText}` };
           geojson = await res.text();
         }
-        if (typeof Codecs === 'undefined' || !(Codecs as any).bedrock?.parse) return { ok: false, error: 'Bedrock codec parse not available.' };
-        (Codecs as any).bedrock.parse(JSON.parse(geojson), '');
+        const codec: any = typeof Codecs !== 'undefined' ? (Codecs as any).bedrock : null;
+        if (!codec?.load && !codec?.parse) return { ok: false, error: 'Bedrock codec not available.' };
+        let model: any;
+        try { model = JSON.parse(geojson); } catch (e: any) { return { ok: false, error: `The geo JSON is not valid JSON: ${e?.message || e}` }; }
+        if (!Array.isArray(model?.['minecraft:geometry'])) return { ok: false, error: 'Not a Bedrock geo JSON: "minecraft:geometry" is missing.' };
+        // load() sets up a new Bedrock project and then parses into it. parse() alone assumes
+        // the open project is already Bedrock and switches its format otherwise, which
+        // throws on Blockbench 5 ("reading 'initEntity'", seen live on 5.2.1).
+        if (typeof codec.load === 'function') codec.load(model, { path: '' });
+        else codec.parse(model, '');
         await new Promise((r) => setTimeout(r, 1500));
         const shot = await captureAppScreenshot();
         return shot.ok ? { ok: true, data_url: shot.data_url } : { ok: true, message: 'Imported GeoJSON.' };
