@@ -1399,10 +1399,10 @@ server.registerTool(
     description:
       "Compile the current project through a codec and return the result (and optionally write it to a " +
       "filesystem path — Blockbench may prompt for fs permission). Omit codec_id to use the format's " +
-      "default. Run list_export_formats first. For very large output, set max_content_length (0 = write " +
+      "default — for GeckoLib that is Bedrock geometry (.geo.json), not the .bbmodel. Run list_export_formats first. For very large output, set max_content_length (0 = write " +
       "to path only, no inline content). Validate the model first (validate_model).",
     inputSchema: {
-      codec_id: z.string().optional().describe("Codec id (e.g. 'bedrock', 'gltf', 'project'). Default: format's codec."),
+      codec_id: z.string().optional().describe("Codec id (e.g. 'bedrock', 'gltf', 'project'). Default: the format's codec (GeckoLib: bedrock)."),
       options: z.record(z.string(), z.unknown()).optional().describe("Codec-specific export options."),
       path: z.string().optional().describe("Absolute path to write the compiled file to."),
       max_content_length: z

@@ -40,6 +40,15 @@ section into the new version (see README → Releasing).
   size, box-UV offset) instead of the pretty-printed JSON — a fraction of the text for orienting on a
   model. Views and outline have their own test (`test:views`).
 
+### Fixed
+- `export_model` without `codec_id` in a GeckoLib project exported the `.bbmodel` project file (the
+  GeckoLib format's own codec) instead of the model. It now exports Bedrock geometry (`.geo.json`,
+  what GeckoLib loads) — or a registered GeckoLib codec — and says so; `codec_id: "project"` still
+  gives the `.bbmodel`.
+- `shade_cube(s)` treated UV units as pixels, so on a texture with more pixels than its UV grid (e.g.
+  a 32×32 texture on 16×16 UV) it painted only the top-left part. Each face is now painted at the
+  texture's pixel size.
+
 ### Changed
 - The `blockbench-modeling` skill uses the real tool names (it still listed `place_cube`,
   `add_group`, `list_outline`) and shows the place / pivot / mirror workflow.

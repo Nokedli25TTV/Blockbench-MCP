@@ -2181,7 +2181,19 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         const registry: any = (typeof Codecs !== 'undefined') ? (Codecs as any) : {};
         const formatCodec = (typeof Format !== 'undefined' && (Format as any).codec) ? (Format as any).codec : null;
-        const resolvedId = input.codec_id || (formatCodec ? formatCodec.id : null);
+        let resolvedId = input.codec_id || (formatCodec ? formatCodec.id : null);
+        // GeckoLib's format codec is the project file (.bbmodel), but a GeckoLib model ships as
+        // Bedrock geometry (.geo.json) — without a codec_id that is what the caller wants.
+        let defaultNote: string | null = null;
+        if (!input.codec_id && resolvedId === 'project' && (Format as any)?.id === 'geckolib_model') {
+          const geo = Object.keys(registry).find((k) => /geckolib/i.test(k) && typeof registry[k]?.compile === 'function')
+            || (typeof registry.bedrock?.compile === 'function' ? 'bedrock' : null);
+          if (geo) {
+            resolvedId = geo;
+            const what = geo === 'bedrock' ? 'Bedrock geometry (.geo.json), what GeckoLib loads' : `"${geo}"`;
+            defaultNote = `no codec_id: a GeckoLib model exports as ${what} — pass codec_id "project" for the .bbmodel file.`;
+          }
+        }
         if (!resolvedId) return { ok: false, error: 'No codec_id and the current format has no default codec. Use list_export_formats.' };
         const codec = registry[resolvedId];
         if (!codec) return { ok: false, error: `Codec "${resolvedId}" not found. Use list_export_formats for valid IDs.` };
@@ -2226,9 +2238,10 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         // cubes, so the codec drops any mesh WITHOUT erroring or warning (the export
         // looks fine but the mesh is gone — LIVE 2026-06-15). Surface it explicitly.
         const meshCount = (typeof Mesh !== 'undefined' && (Mesh as any).all) ? (Mesh as any).all.length : 0;
-        const warning = (meshCount > 0 && resolvedId === 'bedrock')
+        const meshWarning = (meshCount > 0 && resolvedId === 'bedrock')
           ? `${meshCount} mesh element(s) were OMITTED — the Bedrock/GeckoLib geometry format supports only cubes. Convert meshes to cubes or delete them before exporting.`
           : null;
+        const warning = [defaultNote, meshWarning].filter(Boolean).join(' ') || null;
 
         logToHistory(`exported via "${resolvedId}"${wrote_to_path ? ` → ${wrote_to_path}` : ''}${warning ? ' [mesh omitted]' : ''}`);
         return {
@@ -4762,15 +4775,23 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     };
 
     // Paint one spec's cubes into an open texture canvas; returns pixels painted.
-    const paintShadeSpec = (ctx: any, TW: number, TH: number, spec: ShadeSpec): number => {
+    // UV coordinates are in the texture's UV size, which can be smaller than its pixels (a
+    // 32×32 texture on a 16×16 UV grid is 2 px per unit) — paint each face at pixel size.
+    const uvScale = (texture: any, TW: number, TH: number): [number, number] => {
+      const P: any = typeof Project !== 'undefined' ? Project : null;
+      const uw = Number(P?.getUVWidth?.(texture) ?? texture?.uv_width ?? P?.texture_width) || TW;
+      const uh = Number(P?.getUVHeight?.(texture) ?? texture?.uv_height ?? P?.texture_height) || TH;
+      return [TW / uw, TH / uh];
+    };
+    const paintShadeSpec = (ctx: any, TW: number, TH: number, spec: ShadeSpec, [sx, sy]: [number, number] = [1, 1]): number => {
       let painted = 0;
       for (const cube of spec.cubes) {
         const seed = seedFrom(String(cube.name || cube.uuid || ''));
         for (const fk of Object.keys(cube.faces || {})) {
           const uv = cube.faces[fk] && cube.faces[fk].uv;
           if (!uv || uv.length < 4) continue;
-          const x0 = Math.round(Math.min(uv[0], uv[2])), y0 = Math.round(Math.min(uv[1], uv[3]));
-          const x1 = Math.round(Math.max(uv[0], uv[2])), y1 = Math.round(Math.max(uv[1], uv[3]));
+          const x0 = Math.round(Math.min(uv[0], uv[2]) * sx), y0 = Math.round(Math.min(uv[1], uv[3]) * sy);
+          const x1 = Math.round(Math.max(uv[0], uv[2]) * sx), y1 = Math.round(Math.max(uv[1], uv[3]) * sy);
           const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) continue;
           const face = fk as FaceKey;
           const thinSide = !!spec.edgeColor && (face === 'east' || face === 'west');
@@ -4807,7 +4828,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         let painted = 0;
         Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
-          painted = paintShadeSpec(canvas.getContext('2d'), canvas.width, canvas.height, spec);
+          painted = paintShadeSpec(canvas.getContext('2d'), canvas.width, canvas.height, spec, uvScale(texture, canvas.width, canvas.height));
         }, { edit_name: 'Shade cube' });
         Undo.finishEdit('Shade cube via MCP');
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
@@ -4837,7 +4858,8 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         Undo.initEdit({ textures: [texture], layers: layer ? texture.layers : undefined, bitmap: true } as any);
         texture.edit((canvas: any) => {
           const ctx = canvas.getContext('2d');
-          for (const spec of specs) perItem.push(paintShadeSpec(ctx, canvas.width, canvas.height, spec));
+          const scale = uvScale(texture, canvas.width, canvas.height);
+          for (const spec of specs) perItem.push(paintShadeSpec(ctx, canvas.width, canvas.height, spec, scale));
         }, { edit_name: 'Shade cubes' });
         Undo.finishEdit('Shade cubes via MCP');
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
