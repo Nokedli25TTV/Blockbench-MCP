@@ -15,7 +15,8 @@
     "test:views": "node test/views.test.mjs",
     "test:batch": "node test/batch.test.mjs",
     "test:spec": "node test/spec.test.mjs",
-    "test:preflight": "node test/preflight.test.mjs"
+    "test:preflight": "node test/preflight.test.mjs",
+    "test:gait": "node test/gait.test.mjs"
   },
   "keywords": [],
   "author": "",

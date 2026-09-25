@@ -24,6 +24,7 @@ check("fitDistance fits the sphere inside the field of view", 10 / d < Math.sin(
 check("a bigger model stands the camera further away", fitDistance(20, 45) > d);
 check("layout: 4 views → 2×2, 3 views → 3×1, 6 frames → 3×2", near(Object.values(sheetLayout(4, 0)), [2, 2]) && near(Object.values(sheetLayout(3, 0)), [3, 1]) && near(Object.values(sheetLayout(0, 6)), [3, 2]));
 check("layout: views × times → frames as rows, views as columns", near(Object.values(sheetLayout(2, 3)), [2, 3]));
+check("layout: one view at four times is 2×2, not a thin column", near(Object.values(sheetLayout(1, 4)), [2, 2]) && near(Object.values(sheetLayout(3, 1)), [3, 1]));
 const cell = sheetCell(3, 2, 800);
 check("the whole sheet stays within max_size", 3 * cell + 4 * 4 <= 800, `cell ${cell}px`);
 

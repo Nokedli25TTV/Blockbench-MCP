@@ -55,6 +55,7 @@ Create animations for 3D models using Blockbench MCP tools.
 
 | Tool | Purpose |
 |------|---------|
+| `generate_animation` | **A walk or idle loop in one call** — bones found by name, legs opposite, arms against legs, body bob/lean, seamless loop, checked with check_animation |
 | `create_animation` | Create animation with keyframes for bones |
 | `set_keyframes` | **Batch**: many bones × channels × times in one call (upsert, echoes stored values) |
 | `manage_keyframes` | Create/edit/delete keyframes per bone and channel (echoes stored values) |
@@ -94,6 +95,11 @@ Create animations for 3D models using Blockbench MCP tools.
 ## Common Workflows
 
 ### Walk Cycle (1 second)
+
+The quick way: `generate_animation kind="walk"` (or `kind="idle"`) builds the whole loop from the rig —
+legs in opposite phase (four legs trot), arms against the legs, body bob and lean, head level — and
+warns if a leg or arm does not pivot at its top (`set_origin anchor="top"` first). Tune it with `stride`,
+`arm_swing`, `bob`, `sway`, `length`. By hand, the same idea:
 
 ```
 create_animation: name="walk", animation_length=1.0, loop=true, bones={

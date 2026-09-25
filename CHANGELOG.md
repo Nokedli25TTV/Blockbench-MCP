@@ -34,8 +34,9 @@ section into the new version (see README → Releasing).
   Blockbench's 3D view.
 - `capture_screenshot` → `views` and `times`: a contact sheet — several angles (front, back, left,
   right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
-  labelled image, with a line saying which cell is which. Up to 16 pictures; the camera and the
-  timeline are put back afterwards. One image read instead of one per angle or frame.
+  labelled image, with a line saying which cell is which. Up to 16 pictures (one view at several
+  times, or one frame from several views, is a near-square grid); the camera and the timeline are
+  put back afterwards. One image read instead of one per angle or frame.
 - `create_from_spec`: a whole rig from a part list in ONE call and one undo step (all-or-nothing).
   Each part becomes a bone with one cube: its size, what it rests against (`attach`: side, gap,
   align, offset — as `place_relative`) or an explicit corner, its pivot as an anchor of its own box
@@ -43,6 +44,13 @@ section into the new version (see README → Releasing).
   (names swapped, positions / pivots / rotations mirrored, its children under the twin). Planned in
   the server (`packages/shared/src/spec.ts`, `test:spec`) and built with one `create_cubes` call, so
   the format's rules apply to the whole rig; `dry_run` shows the plan.
+- `generate_animation`: a looping `walk` or `idle` from the rig in ONE call. Bones are found by name
+  (legs and arms with left = −X, body / torso / chest, head) or given; a walk swings the legs in
+  opposite phase (four legs trot in diagonal pairs), the arms against the legs, bobs the body
+  (highest as the legs pass) and leans it over the stance leg, keeping the head level; idle breathes,
+  drifts the arms and nods. The last keyframe repeats the first, so the loop has no seam. It warns
+  when a leg or arm does not pivot at its top, and runs `check_animation` on the result. Planned in
+  `packages/shared/src/gaits.ts` (`test:gait`), created with one `create_animation` call.
 - `validate_model` → `for_export: true`: the export preflight in one report — the structure checks
   plus the UV layout, faces without a texture, every animation (`check_animation`), the geometry
   identifier (GeckoLib/Bedrock) and meshes a cubes-only format would drop — ending in a verdict,

@@ -13,6 +13,7 @@ import { SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
 import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
+import { findRig, planWalk, planIdle } from "../../../packages/shared/src/gaits";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -1370,6 +1371,84 @@ server.registerTool(
         ? JSON.stringify({ animation: r.animation, bones: r.bones, ...(r.not_found ? { not_found: r.not_found } : {}) }, null, 2)
         : JSON.stringify({ animation: r.animation, bone: r.bone, has_animator: r.has_animator, channels: r.channels }, null, 2)
     );
+  }
+);
+
+// Walk / idle loops computed from the rig (packages/shared/src/gaits.ts): one
+// create_animation call (one undo step), then check_animation on the result.
+server.registerTool(
+  "generate_animation",
+  {
+    title: "Generate Animation",
+    description:
+      "Create a looping walk or idle animation for the rig in ONE call. The bones are found by name — " +
+      "legs and arms (left = −X), body / torso / chest (else the root bone), head — or given explicitly. " +
+      "walk: legs swing in opposite phase (4 legs trot: diagonal pairs together), arms swing against the " +
+      "legs, the body bobs (highest as the legs pass) and leans over the stance leg, the head stays level. " +
+      "idle: slow breathing, a slight arm drift and a small head nod. The last keyframe repeats the first, " +
+      "so the loop has no seam. Legs and arms swing about their pivots: set them at the hips / shoulders " +
+      "first (set_origin anchor \"top\"); the reply warns when they aren't. Values are what Blockbench " +
+      "shows. The new animation is checked with check_animation.",
+    inputSchema: {
+      kind: z.enum(["walk", "idle"]).describe("walk or idle."),
+      name: z.string().optional().describe("Animation name (default: the kind)."),
+      length: z.number().min(0.1).max(30).optional().describe("Seconds per loop (walk 1, idle 3)."),
+      legs: z.array(z.string()).min(2).max(4).optional().describe("Leg bones: [left, right], or [front-left, front-right, back-left, back-right]. Default: found by name."),
+      arms: z.array(z.string()).length(2).optional().describe("Arm bones [left, right]. Default: found by name."),
+      body: z.string().optional().describe("Body bone for the bob / breathing. Default: body / torso / chest, else the root bone."),
+      head: z.string().optional().describe("Head bone. Default: found by name."),
+      stride: z.number().min(0).max(90).optional().describe("walk: leg swing each way in degrees (default 30)."),
+      arm_swing: z.number().min(0).max(90).optional().describe("walk: arm swing each way in degrees (default 25)."),
+      bob: z.number().min(0).max(8).optional().describe("Body rise in units (walk 0.5, idle breathing 0.3)."),
+      sway: z.number().min(0).max(30).optional().describe("walk: body lean in degrees (default 2); idle: arm drift and nod (default 2)."),
+      dry_run: z.boolean().optional().describe("Only show the plan; create nothing."),
+    },
+  },
+  async (args) => {
+    let tree: any;
+    try {
+      const r: any = await sendToBlockbench("get_scene_tree", { include_faces: false });
+      if (r && r.ok === false) return fail(`generate_animation failed: ${r.error}`);
+      tree = r.tree;
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    const rig = findRig(tree || { roots: [] }, { legs: args.legs, arms: args.arms, body: args.body, head: args.head });
+    if (args.kind === "walk" && !rig.legs.length) {
+      return fail('generate_animation failed: no legs found — name the leg bones with "leg" (e.g. leg_left / leg_right) or pass legs: [left, right].');
+    }
+    const opts = { length: args.length, stride: args.stride, arm_swing: args.arm_swing, bob: args.bob, sway: args.sway };
+    const bones = args.kind === "walk" ? planWalk(rig, opts) : planIdle(rig, opts);
+    if (!Object.keys(bones).length) return fail("generate_animation failed: no bones to animate — pass body / arms / head.");
+    const length = args.length ?? (args.kind === "walk" ? 1 : 3);
+    const name = args.name || args.kind;
+    // Name only the bones this animation moves (idle leaves the legs alone).
+    const moved = (names: string[]) => names.filter((n) => bones[n]);
+    const used = [
+      moved(rig.legs).length ? `legs ${moved(rig.legs).join(" / ")}` : null,
+      moved(rig.arms).length ? `arms ${moved(rig.arms).join(" / ")}` : null,
+      rig.body && bones[rig.body] ? `body ${rig.body}` : null,
+      rig.head && rig.head !== rig.body && bones[rig.head] ? `head ${rig.head}` : null,
+    ].filter(Boolean).join(", ");
+    const notes = rig.warnings.map((w) => `\n⚠️  ${w}`).join("");
+    if (args.dry_run) {
+      const keys = Object.values(bones).reduce((n, k) => n + k.length, 0);
+      return ok(`Plan (nothing created): ${args.kind} "${name}", ${length}s loop, ${Object.keys(bones).length} bone(s), ${keys} keyframe(s) — ${used}.${notes}`);
+    }
+    let created: any;
+    try {
+      created = await sendToBlockbench("create_animation", { name, animation_length: length, loop: true, bones });
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    if (created && created.ok === false) return fail(`generate_animation failed: ${created.error}`);
+    let lint = "";
+    try {
+      const c: any = await sendToBlockbench("check_animation", { animation_id: created?.name || name });
+      const issues: any[] = c?.issues || [];
+      lint = issues.length ? `\ncheck_animation: ${issues.length} issue(s) — ${issues.slice(0, 4).map((i) => i.message).join(" · ")}` : "\ncheck_animation: no issues.";
+    } catch { /* the lint is a bonus */ }
+    return ok(`Created ${created?.name || name} (${args.kind}, ${length}s loop, seamless) on ${used}.${notes}${lint}`);
   }
 );
 

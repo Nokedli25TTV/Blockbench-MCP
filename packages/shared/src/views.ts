@@ -34,12 +34,13 @@ export function fitDistance(radius: number, fovDeg: number, margin = 1.12): numb
 }
 
 /**
- * Grid of a sheet: frames as rows and views as columns when both are given; otherwise one
- * row for up to three pictures and a near-square grid for more.
+ * Grid of a sheet: frames as rows and views as columns when there are several of both;
+ * otherwise (one view, or one frame) one row for up to three pictures and a near-square grid
+ * for more — one view at four times is 2×2, not a thin column.
  */
 export function sheetLayout(views: number, times: number): { cols: number; rows: number } {
-  if (views > 0 && times > 0) return { cols: views, rows: times };
-  const n = Math.max(views, times, 1);
+  if (views > 1 && times > 1) return { cols: views, rows: times };
+  const n = Math.max(views, 1) * Math.max(times, 1);
   const cols = n <= 3 ? n : Math.ceil(Math.sqrt(n));
   return { cols, rows: Math.ceil(n / cols) };
 }
