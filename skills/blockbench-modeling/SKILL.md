@@ -42,6 +42,7 @@ Build 3D models using cubes and meshes in Blockbench.
 | Tool | Purpose |
 |------|---------|
 | `get_scene_tree` | The hierarchy (narrow it with `bone_names`, `include_faces:false`, `max_depth`) |
+| `measure` | World boxes of parts and, per pair, the side, the gap or how deep they OVERLAP — check a fit by number |
 | `find_elements_by_criteria` | Query elements by name pattern, type, parent, size |
 | `select_all_of_type` | Bulk-select cubes, meshes, or groups |
 | `filter_by_material` | Find elements referencing a texture |
@@ -81,6 +82,16 @@ move_element: target="arm_left", offset=[0, -1, 0]                          # nu
 Sides are world axes and the model faces north (−Z): `front` = −Z, `left` = −X (its own left).
 Groups move with everything inside and keep their pivots; bounds include rotations. Add
 `dry_run: true` to see where it would go first.
+
+Check the fit by number instead of a screenshot — `measure` reports each pair in the same words:
+
+```
+measure: targets=["arm_left_cube", "body_cube", "hat_cube", "head_cube"]
+#  arm_left_cube → body_cube: left, touching on x
+#  hat_cube → head_cube: on_top, OVERLAPPING — 1 deep on y (shared …, volume 64)
+```
+
+A group's box holds everything inside it, so compare cubes (or sibling bones) to see how parts meet.
 
 ### Pivots from the geometry
 

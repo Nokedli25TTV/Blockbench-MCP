@@ -17,7 +17,8 @@
     "test:spec": "node test/spec.test.mjs",
     "test:preflight": "node test/preflight.test.mjs",
     "test:gait": "node test/gait.test.mjs",
-    "test:bundle": "node test/bundle.test.mjs"
+    "test:bundle": "node test/bundle.test.mjs",
+    "test:measure": "node test/measure.test.mjs"
   },
   "keywords": [],
   "author": "",

@@ -10,7 +10,9 @@ import type { ToolType, SceneTree, SceneTexture } from "../../../packages/shared
 import { validateScene, buildReport } from "../../../packages/shared/src/validation";
 import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../../packages/shared/src/palettes";
 import { MATERIALS } from "../../../packages/shared/src/facePainter";
-import { SIDES, ALIGNS, ANCHORS } from "../../../packages/shared/src/placement";
+import { SIDES, ALIGNS, ANCHORS, boxCenter } from "../../../packages/shared/src/placement";
+import type { Box } from "../../../packages/shared/src/placement";
+import { boxRelation, relationText, boxSize } from "../../../packages/shared/src/measure";
 import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
@@ -296,6 +298,7 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   // Entering Animation mode (ensureAnimationMode) can take a few seconds on a big
   // rig or right after a plugin reload — 20 s is ~20x the slowest measured call.
   get_bone_pose: 20_000,
+  measure: 20_000,
   get_keyframes: 20_000,
   create_animation: 20_000,
   manage_keyframes: 20_000,
@@ -576,7 +579,7 @@ const instructions = (buildInstructions(skills) || "") + profileNote;
 // timeline view state may still move (e.g. capture_screenshot with a `time`).
 const READ_ONLY_TOOLS = new Set([
   "get_scene_tree", "get_project_info", "validate_model", "validate_uv", "list_animations", "get_keyframes",
-  "get_bone_pose", "check_animation", "list_export_formats", "list_textures", "get_texture", "find_elements_by_criteria",
+  "get_bone_pose", "measure", "check_animation", "list_export_formats", "list_textures", "get_texture", "find_elements_by_criteria",
   "filter_by_material", "get_selection", "get_undo_stack", "capture_screenshot", "capture_app_screenshot",
   "list_materials", "get_material_info", "get_face_material_instances", "list_material_instances",
   "list_palettes", "get_palette", "list_actions", "list_armatures", "get_armature", "list_armature_bones",
@@ -1530,6 +1533,53 @@ server.registerTool(
     try { r = await sendToBlockbench("get_bone_pose", args); } catch (e: any) { return fail(e?.message || String(e)); }
     if (r && r.ok === false) return fail(`get_bone_pose failed: ${r.error}`);
     return ok(JSON.stringify({ bone: r.bone, time: r.time, local_rotation: r.local_rotation, world_rotation: r.world_rotation, world_position: r.world_position, world_bbox: r.world_bbox, origin: r.origin }, null, 2));
+  }
+);
+
+// World boxes from the plugin (at rest, or posed at `time`); the gaps, overlaps and sides
+// between them come from packages/shared/src/measure.ts.
+server.registerTool(
+  "measure",
+  {
+    title: "Measure (boxes, gaps, overlaps)",
+    description:
+      "Measure parts by number instead of from a screenshot: each target's world box (min→max, size, centre) and, " +
+      "for every pair, where the first is relative to the second in place_relative's words (on_top, below, left = " +
+      "−X, right, front = −Z, back, inside) and whether they are apart (the gap), touching or OVERLAPPING (how deep, " +
+      "the shared box). Targets are cubes or groups — a group's box holds everything inside it; none = the whole " +
+      "model. At rest by default; `time` measures the animated pose at that moment (does the leg pass through the " +
+      "body at 0.5 s?).",
+    inputSchema: {
+      targets: z.array(z.string()).min(1).max(8).optional().describe("Cube or group names, 1–8. Omit for the whole model."),
+      time: z.number().min(0).optional().describe("Seconds: measure the animated pose at this moment instead of the rest pose."),
+      animation_id: animationIdOptional,
+    },
+  },
+  async (args) => {
+    const targets = args.targets ? [...new Set(args.targets)] : undefined;
+    let r: any;
+    try {
+      r = await sendToBlockbench("measure", { targets, time: args.time, animation_id: args.animation_id });
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    if (r && r.ok === false) return fail(`measure failed: ${r.error}`);
+    const boxes: { name: string; kind: string; box: Box | null }[] = r.boxes || [];
+    const label = (b: { name: string; kind: string }) => (b.kind === "group" ? `${b.name}/` : b.name);
+    const when = r.time === null || r.time === undefined ? "at rest" : `at ${r.time}s of ${r.animation ?? "the animation"}`;
+    const lines = [`Measured ${when} (world units; the model faces north: front −Z, its own left −X):`];
+    for (const b of boxes) {
+      lines.push(`  ${label(b)}  ${b.box ? `${boxText(b.box)}  size ${boxSize(b.box).join(" × ")}  centre [${boxCenter(b.box).join(", ")}]` : "(no geometry)"}`);
+    }
+    const pairs: string[] = [];
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        pairs.push(`  ${a.box && b.box ? relationText(label(a), label(b), boxRelation(a.box, b.box)) : `${label(a)} → ${label(b)}: no geometry to compare`}`);
+      }
+    }
+    if (pairs.length) lines.push("Pairs (A → B: where A is relative to B):", ...pairs);
+    return ok(lines.join("\n"));
   }
 );
 

@@ -3191,6 +3191,52 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
+    // measure: the world boxes of parts — at rest from the element geometry (the math
+    // place_relative uses), or at an animation `time` from the posed 3D view (the boxes
+    // get_bone_pose and check_animation read). The server works out gaps and overlaps.
+    const toBox = (b: any): Box | null => (b ? { min: roundVec([b.min.x, b.min.y, b.min.z]), max: roundVec([b.max.x, b.max.y, b.max.z]) } : null);
+    const posedBoxOf = (n: any): Box | null => {
+      if (isGroupEl(n)) return toBox(elementsWorldBox(n));
+      const T = (globalThis as any).THREE;
+      const m = n && n.mesh;
+      if (!T || !m || !m.geometry) return null;
+      if (m.updateWorldMatrix) m.updateWorldMatrix(true, false);
+      m.geometry.computeBoundingBox();
+      return toBox(new T.Box3().copy(m.geometry.boundingBox).applyMatrix4(m.matrixWorld));
+    };
+    const restModelBox = (): Box | null =>
+      boxOf(((typeof Outliner !== 'undefined' && Outliner.root) ? Outliner.root : []).flatMap((n: any) => {
+        const g = toGeoNode(n);
+        return g ? worldPoints(g, []) : [];
+      }));
+    const measure = (input: any): any => {
+      try {
+        if (!hasProject()) return { ok: false, error: 'No project open.' };
+        const parts: any[] = [];
+        for (const name of Array.isArray(input.targets) ? input.targets.map(String) : []) {
+          const part = findElementAny(name);
+          if (!part) return { ok: false, error: `"${name}" not found — give cube or group names.` };
+          parts.push(part);
+        }
+        const posed = input.time !== undefined;
+        if (posed && !animationsSupported()) return { ok: false, error: 'This format does not support animations, so there is no animated pose to measure — omit time.' };
+        if (posed && !findAnimation(input.animation_id)) return { ok: false, error: animationNotFound(input.animation_id) };
+        const savedTime = posed && typeof Timeline !== 'undefined' ? (Timeline as any).time : null;
+        try {
+          if (posed) poseAtTime(input);
+          const kind = (n: any) => (isGroupEl(n) ? 'group' : (typeof Mesh !== 'undefined' && n instanceof Mesh) ? 'mesh' : 'cube');
+          const boxes = parts.length
+            ? parts.map((n) => ({ name: n.name, kind: kind(n), box: posed ? posedBoxOf(n) : worldBoxOf(n) }))
+            : [{ name: '(whole model)', kind: 'model', box: posed ? toBox(elementsWorldBox(null)) : restModelBox() }];
+          return { ok: true, time: posed ? input.time : null, animation: posed ? ((Animation as any).selected?.name ?? null) : null, boxes };
+        } finally {
+          if (savedTime !== null) {
+            try { (Timeline as any).time = savedTime; (Animator as any).preview?.(); } catch { /* best-effort */ }
+          }
+        }
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
     // Mirror a copied node across the plane `center` on `axis` (as Blockbench's Flip does):
     // coordinates mirrored, the other two rotation axes turned around, box UV mirrored.
     const mirrorNode = (n: any, axis: number, center: number) => {
@@ -4981,6 +5027,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         duplicate_element: duplicateElement,
         move_element: moveElement,
         place_relative: placeRelative,
+        measure: measure,
         rename_element: renameElement,
         find_elements_by_criteria: findElementsByCriteria,
         select_all_of_type: selectAllOfType,

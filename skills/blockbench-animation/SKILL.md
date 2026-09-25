@@ -22,8 +22,9 @@ Create animations for 3D models using Blockbench MCP tools.
   the whole model across the animation and reports the lowest point, when it happens and how much to
   raise the model — plus keyframes past the end, rotation jumps over 90°, loops that pop, and keyframes
   on missing bones. For one bone at one moment, `get_bone_pose {time}` returns `world_rotation`,
-  `world_position` and `world_bbox.lowest_y`. Confirm the look with `capture_screenshot {time}` (or
-  `set_camera_angle {time}`), which evaluates that frame before rendering.
+  `world_position` and `world_bbox.lowest_y`. Does a part pass through another at some moment?
+  `measure {targets, time}` gives the posed boxes and says OVERLAPPING and how deep. Confirm the look
+  with `capture_screenshot {time}` (or `set_camera_angle {time}`), which evaluates that frame before rendering.
 - **Keyframes ADD to the bone's rest rotation.** A bone set to `[18,0,0]` with `set_rotation` and a
   rotation keyframe of `[4,0,0]` shows 22°. To move a posed bone from 18° to 22°, key `0 → 4 → 0`,
   not `18 → 22 → 18`.
@@ -62,6 +63,7 @@ Create animations for 3D models using Blockbench MCP tools.
 | `get_keyframes` | **Read back the actually-stored keyframe values** — one, several or all bones |
 | `check_animation` | **Lint the animation**: past-the-end keys, >90° jumps, loop pops, missing bones, floor dips (`floor_y`) |
 | `get_bone_pose` | **Measure a bone's local + world rotation, world position & bbox** (calibrate direction by number) |
+| `measure` | **Posed boxes of several parts at a `time`** — which pairs overlap (a leg through the body) and how deep |
 | `manage_animation` | Delete / rename / duplicate a whole animation |
 | `animation_graph_editor` | Fine-tune animation curves (smooth, linear, ease) |
 | `animation_timeline` | Control playback, time, FPS, loop settings |

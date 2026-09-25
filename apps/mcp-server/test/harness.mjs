@@ -580,6 +580,24 @@ export function createMockScene() {
       nodes.forEach((n) => shiftNode(n, d));
       return { ok: true, ...result, box: worldBox(part) };
     },
+    measure(input) {
+      // Mirrors the plugin's lookups and refusals; the mock plays no animation, so a posed
+      // measurement returns the rest boxes (the server's wiring and text are what is tested).
+      const parts = [];
+      for (const name of input.targets || []) {
+        const p = findAny(name);
+        if (!p) return { ok: false, error: `"${name}" not found — give cube or group names.` };
+        parts.push(p);
+      }
+      if (input.time !== undefined) {
+        if (scene.format?.id === "java_block") return { ok: false, error: "This format does not support animations, so there is no animated pose to measure — omit time." };
+        if (!animations.length) return { ok: false, error: "No animation selected — pass animation_id. The project has no animations yet — create one with create_animation." };
+      }
+      const boxes = parts.length
+        ? parts.map((p) => ({ name: p.name, kind: p.type, box: worldBox(p) }))
+        : [{ name: "(whole model)", kind: "model", box: boxOf(scene.roots.flatMap((n) => worldPoints(geo(n), []))) }];
+      return { ok: true, time: input.time ?? null, animation: input.time !== undefined ? animations[0].name : null, boxes };
+    },
     find_elements_by_criteria(input) {
       const matches = [];
       walk(scene.roots, (n) => {

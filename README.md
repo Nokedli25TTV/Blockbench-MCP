@@ -170,7 +170,7 @@ see [Troubleshooting](#-troubleshooting).
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 75 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 125. |
+| `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 76 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 126. |
 | `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | The Minecraft version your mod targets. A new Java block/item project takes its rotation rules from it (`create_project` can override it): up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. `export_bundle` picks GeckoLib's folders from it: GeckoLib 4 up to 1.21.4, GeckoLib 5 from 1.21.5. |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
@@ -183,7 +183,7 @@ Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
 |---|---|
 | Project | `get_project_info`, `create_project` (new project in `geckolib` / `bedrock` / `java` format), `set_project` |
 | Geometry | `create_cubes` (batch), `modify_cubes` (batch), `create_cube`, `create_group`, `modify_cube`, `set_origin`, `set_rotation`, `duplicate_element`, `rename_element`, `reparent_element`, `delete_element` |
-| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `find_elements_by_criteria`, `get_selection`, `validate_model` |
+| Inspect | `get_scene_tree` (filters: `bone_names`, `include_faces`, `max_depth`), `measure` (boxes, gaps, overlaps — also at an animation time), `find_elements_by_criteria`, `get_selection`, `validate_model` |
 | Texture / UV | `pack_uv`, `validate_uv`, `create_texture`, `replace_texture`, `apply_texture`, `list_textures`, `get_texture`, `activate_texture` |
 | Paint | `shade_cubes` (batch), `shade_cube`, `paint_pixel_matrix`, `draw_shape_tool`, `paint_fill_tool`, `gradient_tool`, `color_picker_tool`, `texture_layer_management`, `list_palettes`, `get_palette` |
 | Animation | `create_animation`, `set_keyframes` (batch), `check_animation` (lint + floor check), `manage_keyframes`, `get_keyframes`, `manage_animation` (delete / rename / duplicate), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |

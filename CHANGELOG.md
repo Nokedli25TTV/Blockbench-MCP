@@ -32,6 +32,14 @@ section into the new version (see README → Releasing).
   overrides — or when a file already there would change: identical files count as unchanged, and
   `overwrite: true` replaces the rest. `dry_run` shows the plan. The server writes the files (temp
   file, then moved into place), so Blockbench shows no file-permission prompt.
+- `measure`: parts by number instead of from a screenshot. Each target's world box (min→max, size,
+  centre) and, for every pair, where the first is relative to the second in `place_relative`'s words
+  (on_top, below, left = −X, right, front = −Z, back, inside) and whether they are apart (the gap on
+  each axis, the distance), touching or OVERLAPPING (how deep, the shared box and its volume). Targets
+  are cubes or groups (a group's box holds everything inside it); none = the whole model. At rest it
+  uses the math `place_relative` uses; with `time` (and `animation_id`) it measures the animated pose
+  at that moment and puts the timeline back — does a leg pass through the body at 0.5 s? The relations
+  live in `packages/shared/src/measure.ts` (`test:measure`).
 
 ### Fixed
 - A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
@@ -40,7 +48,7 @@ section into the new version (see README → Releasing).
 
 ### Changed
 - `validate_model for_export` names `export_bundle` as the next step for GeckoLib and Bedrock models.
-- The `geckolib` profile loads 75 tools (was 74), `full` 125 (was 124).
+- The `geckolib` profile loads 76 tools (was 74), `full` 126 (was 124).
 
 ## [0.5.0] - 2026-09-25
 
