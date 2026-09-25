@@ -17,6 +17,7 @@ import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
 import { findRig, planWalk, planIdle } from "../../../packages/shared/src/gaits";
+import { TEMPLATES, templateParts } from "../../../packages/shared/src/templates";
 import { BUNDLE_KINDS, BUNDLE_PARTS, DEFAULTED_MODEL, geckolibFor, bundlePaths, bundleName, resourceNameError, pickTexture } from "../../../packages/shared/src/modAssets";
 import type { BundleKind, BundlePart } from "../../../packages/shared/src/modAssets";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
@@ -715,7 +716,9 @@ server.registerTool(
       "right, front, back — or a point. `mirror: \"x\"` also builds the left↔right twin: names swapped " +
       "(arm_left → arm_right), positions, pivots and rotations mirrored, and its children go under the twin. " +
       "Positions are computed at rest, before rotations. The model faces north: front = −Z, its own left = −X. " +
-      "`dry_run` shows the plan. Afterwards run pack_uv.",
+      "`template` starts from a ready rig — humanoid (body, head, arms, legs), quadruped (body, head, four legs, " +
+      "tail) or sword (grip, guard, blade, pommel) — sized by `scale`; `parts` then adds to it (e.g. horns " +
+      "attached to the head). `dry_run` shows the plan. Afterwards run pack_uv.",
     inputSchema: {
       parts: z
         .array(z.object({
@@ -735,9 +738,11 @@ server.registerTool(
           mirror: z.enum(["x"]).optional().describe("Also build the mirrored twin (left ↔ right)."),
           cube_name: z.string().optional().describe("The cube's name (default '<name>_cube')."),
         }))
-        .min(1)
         .max(64)
-        .describe("Parts in order: attach targets and parents before the parts that use them."),
+        .optional()
+        .describe("Parts in order: attach targets and parents before the parts that use them. With a template: extra parts."),
+      template: z.enum(TEMPLATES).optional().describe("Start from a ready rig: humanoid, quadruped or sword."),
+      scale: z.number().min(0.25).max(4).optional().describe("Template size (1 = Minecraft proportions, a 32-unit humanoid); sizes round to whole units."),
       dry_run: z.boolean().optional().describe("Only show the plan; create nothing."),
     },
   },
@@ -753,7 +758,9 @@ server.registerTool(
     const groupNames = new Set<string>();
     const walk = (nodes: any[]) => nodes.forEach((n) => { if (n.type === "group") { groupNames.add(n.name); walk(n.children || []); } });
     walk(tree?.roots || []);
-    const plan = planSpec(args.parts as any, sceneBoxes(tree || { roots: [] }), groupNames, tree?.format?.id === "java_block" ? 8 : 0);
+    const parts = [...(args.template ? templateParts(args.template, args.scale ?? 1) : []), ...((args.parts as any[]) || [])];
+    if (!parts.length) return fail("create_from_spec failed: give parts, a template, or both.");
+    const plan = planSpec(parts, sceneBoxes(tree || { roots: [] }), groupNames, tree?.format?.id === "java_block" ? 8 : 0);
     if ("error" in plan) return fail(`create_from_spec failed: ${plan.error}`);
     const cubeOf = new Map(plan.cubes.map((c) => [c.parent, c]));
     const lines = plan.groups.map((g) => {

@@ -1,6 +1,7 @@
 // create_from_spec: the planner (packages/shared/src/spec.ts, straight from the TypeScript
 // source) and the tool through the server and the mock — a whole humanoid in one call.
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec.ts";
+import { templateParts } from "../../../packages/shared/src/templates.ts";
 import { startHarness } from "./harness.mjs";
 
 let failures = 0;
@@ -48,6 +49,27 @@ check("attach and from together are refused", /attach or from/.test(err([{ name:
 const boxes = sceneBoxes({ roots: [{ type: "group", name: "g", origin: [0, 0, 0], rotation: [0, 0, 90], children: [{ type: "cube", name: "c", from: [0, 0, 0], to: [2, 1, 1], origin: [0, 0, 0], rotation: [0, 0, 0] }] }] });
 check("sceneBoxes measures existing parts with their rotations", near(boxes.c.min, [-1, 0, 0]) && near(boxes.c.max, [0, 2, 1]) && near(boxes.g.min, [-1, 0, 0]));
 
+console.log("\n--- templates ---");
+const hum = planSpec(templateParts("humanoid"));
+const hc = (n) => hum.cubes.find((x) => x.name === n), hg = (n) => hum.groups.find((x) => x.name === n);
+check("humanoid: Minecraft proportions, left limbs at −X, pivots at hips / shoulders / neck",
+  near(hc("head_cube").from, [-4, 24, -4]) && near(hc("arm_left_cube").from, [-8, 12, -2]) && near(hg("arm_left").origin, [-6, 24, 0]) &&
+  near(hc("leg_left_cube").from, [-4, 0, -2]) && near(hg("leg_left").origin, [-2, 12, 0]) && near(hc("leg_right_cube").from, [0, 0, -2]) && near(hg("head").origin, [0, 24, 0]),
+  hum.groups.map((g) => g.name).join(", "));
+const big = planSpec(templateParts("humanoid", 2));
+check("humanoid at scale 2: twice the size, still standing on y = 0",
+  near(big.cubes.find((x) => x.name === "body_cube").to, [8, 48, 4]) && near(big.cubes.find((x) => x.name === "leg_left_cube").from, [-8, 0, -4]));
+const quadPlan = planSpec(templateParts("quadruped"));
+const qc = (n) => quadPlan.cubes.find((x) => x.name === n);
+check("quadruped: legs at the body's corners, head in front, tail behind",
+  near(qc("leg_front_left_cube").from, [-4, 0, -8]) && near(qc("leg_back_right_cube").to, [4, 8, 8]) && qc("head_cube").to[2] === -7 && qc("tail_cube").from[2] === 8,
+  JSON.stringify([qc("head_cube"), qc("tail_cube")]));
+const sword = planSpec(templateParts("sword"));
+const sc = (n) => sword.cubes.find((x) => x.name === n);
+check("sword: guard on the grip, blade on the guard, pommel under the grip",
+  near(sc("guard_cube").from, [-4, 6, -1]) && near(sc("blade_cube").from, [-1, 7, -0.5]) && near(sc("blade_cube").to, [1, 23, 0.5]) && near(sc("pommel_cube").from, [-2, -2, -2]),
+  JSON.stringify(sword.cubes));
+
 console.log("\n--- through the server (mock Blockbench) ---");
 const h = await startHarness();
 try {
@@ -55,6 +77,10 @@ try {
   const strict = await h.call("create_from_spec", { parts: HUMANOID });
   check("the format's rotation rules still apply (legacy rules: one axis per bone), nothing is built", strict.isError && /ILLEGAL_ROTATION/.test(strict.text) && !node("body"), strict.text.slice(0, 120));
   h.mock.setFormat({ id: "geckolib_model", bone_rig: true, rotate_cubes: true }); // GeckoLib: bones on any axes
+  const quadPlanned = await h.call("create_from_spec", { template: "quadruped", scale: 0.5, dry_run: true });
+  check("a template alone, scaled, as a plan", !quadPlanned.isError && /Plan \(nothing created\): 7 bone\(s\), 7 cube\(s\)/.test(quadPlanned.text), quadPlanned.text.split("\n")[0]);
+  const neither = await h.call("create_from_spec", {});
+  check("neither parts nor a template is refused", neither.isError && /give parts, a template, or both/.test(neither.text), neither.text);
   const dry = await h.call("create_from_spec", { parts: HUMANOID, dry_run: true });
   check("dry_run shows the plan and creates nothing", !dry.isError && /Plan \(nothing created\): 8 bone\(s\), 8 cube\(s\)/.test(dry.text) && !node("body"), dry.text.split("\n")[0]);
   const built = await h.call("create_from_spec", { parts: HUMANOID });
