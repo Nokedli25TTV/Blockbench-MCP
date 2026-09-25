@@ -37,7 +37,8 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
 1. **Checkpoint before risk.** For 3+ edits you may want to undo: `save_checkpoint` first, `undo` to
    return. Never `trigger_action` "undo"/"redo" — use the dedicated tools.
 2. **Batch.** `create_cubes`, `modify_cubes`, `shade_cubes`, `set_keyframes` do in one call what used to
-   take dozens; each is all-or-nothing and one undo step.
+   take dozens; each is all-or-nothing and one undo step. A known sequence of different calls goes in
+   one `run_batch` (with `on_error: "rollback"` if it must be all-or-nothing).
 3. **Trust the replies.** Write tools echo what they stored and add `⚠️` notes; errors start with a code
    such as `[NOT_FOUND]` or `[DUPLICATE_NAME]`. Re-query only when the reply shows a problem.
 4. **Screenshots at milestones only.** They are 800 px by default; `set_camera_angle screenshot:false`

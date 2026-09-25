@@ -36,11 +36,26 @@ section into the new version (see README → Releasing).
   right, top, bottom, iso, iso_back; each framed on the whole model) and/or animation frames in ONE
   labelled image, with a line saying which cell is which. Up to 16 pictures; the camera and the
   timeline are put back afterwards. One image read instead of one per angle or frame.
+- `run_batch`: several different tool calls in ONE round trip, in order (up to 50). Each step is
+  checked and run exactly like a direct call; the reply lists every step's result and carries any
+  images. `on_error`: `stop` (default), `continue`, or `rollback` — undo everything the batch changed.
+  Its own test: `test:batch`.
 - `get_scene_tree` → `format: "outline"`: one line per group or cube (pivot, rotation, from→to,
   size, box-UV offset) instead of the pretty-printed JSON — a fraction of the text for orienting on a
   model. Views and outline have their own test (`test:views`).
 
 ### Fixed
+- **Undo did not work for several tools on Blockbench 5** — found by `run_batch`'s rollback, then by a
+  live audit that runs every editing tool, undoes and redoes it and compares the project:
+  - undoing `create_group` or `create_cubes` left the new groups behind;
+  - undoing `set_origin` / `set_rotation` on a group, or `rename_element` on a group, changed nothing;
+  - undoing `delete_element` on a group brought back neither the group nor its cubes;
+  - `create_animation`, `create_texture`, `register_texture` and `animation_timeline` set_length /
+    set_fps / loop recorded no undo step at all, so the next undo reverted an EARLIER edit instead
+    (in the audit: the whole model).
+
+  They now record what Blockbench's own actions record (groups, animations and textures in their
+  own undo aspects). All 24 audited cases undo and redo cleanly.
 - `from_geo_json` failed on Blockbench 5 ("reading 'initEntity'"): it parsed the geometry into the open
   project, which the Bedrock codec then tried to switch to its own format. It now loads it into a new
   Bedrock project, and refuses input that is not JSON or has no `minecraft:geometry`.

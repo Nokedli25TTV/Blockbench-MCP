@@ -24,6 +24,7 @@ renders cubes only. If a task truly needs them, ask the user to set `BLOCKBENCH_
 | Animation | `create_animation`, `set_keyframes` (batch: many bones × channels × times), `check_animation` (lint + floor check), `manage_animation` (delete/rename/duplicate), `manage_keyframes`, `get_keyframes` (one, several or all bones), `get_bone_pose`, `animation_timeline`, `animation_graph_editor`, `batch_keyframe_operations`, `animation_copy_paste`, `list_animations` |
 | Camera | `capture_screenshot` (`time`, `max_size`; `views` / `times` = one contact-sheet image of several angles or frames), `set_camera_angle` (`screenshot:false`), `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
+| Sequences | `run_batch` (several different tool calls in one round trip; `on_error`: stop / continue / rollback) |
 | Export | `list_export_formats`, `export_model`, `export_animations` |
 | Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` (last resort) |
 
@@ -35,7 +36,9 @@ reading results. So:
 1. **Batch.** One call per step, not per element: `create_cubes` builds the hierarchy,
    `modify_cubes` edits many cubes, `shade_cubes` textures every part with its own colour,
    `create_animation` / `set_keyframes` write all bones at once, `get_keyframes` with no bone reads
-   them all back. Batches are all-or-nothing and one undo step each.
+   them all back. Batches are all-or-nothing and one undo step each. For a known sequence of
+   DIFFERENT calls, `run_batch` runs them all in one round trip (`on_error: "rollback"` undoes the
+   whole sequence if a step fails).
 2. **Place, don't compute.** `place_relative` puts a part against another (on top, beside, inside),
    `move_element` moves a whole group with its pivots, `set_origin anchor` puts a pivot on the
    geometry (shoulder = top of the arm), `duplicate_element mirror:"x"` builds the other side.

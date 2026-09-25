@@ -589,11 +589,14 @@ const server = new McpServer(
 );
 
 // Every registerTool below goes through here: tools hidden by the profile are
-// simply not registered, and the rest get their annotations.
+// simply not registered, and the rest get their annotations. Each handler is kept with its
+// input shape, so run_batch can call it exactly like a direct call.
 const notLoaded: string[] = [];
+const toolHandlers = new Map<string, { shape: Record<string, z.ZodTypeAny>; cb: (args: any, extra: any) => Promise<any> }>();
 const registerToolUnfiltered = server.registerTool.bind(server);
 (server as any).registerTool = (name: string, config: any, cb: any) => {
   if (PROFILE !== "full" && GECKOLIB_HIDDEN.has(name)) { notLoaded.push(name); return undefined; }
+  toolHandlers.set(name, { shape: config.inputSchema || {}, cb });
   return registerToolUnfiltered(name, { ...config, annotations: { ...toolAnnotations(name), ...config.annotations } }, cb);
 };
 
@@ -2845,6 +2848,86 @@ server.registerTool(
   async (args) => {
     const r = getSkillContent(skills, args.skill, args.file);
     return r.ok ? ok(r.text) : fail(r.error);
+  }
+);
+
+// Several tool calls in ONE round trip (round trips, not the tools, are what a session spends
+// its time on). Each step goes through the same schema check and handler as a direct call.
+const BATCH_TEXT_MAX = 700;
+server.registerTool(
+  "run_batch",
+  {
+    title: "Run Batch",
+    description:
+      "Run several tool calls in ONE round trip, in order: steps = [{ tool, args }, …] (up to 50). Each " +
+      "step is checked and run exactly like a direct call; the reply lists every step's result (and any " +
+      "images). on_error: stop (default) — stop at the first failure; continue — run the rest anyway; " +
+      "rollback — stop and undo everything this batch changed. Use it when you already know the next " +
+      "steps; for many edits of one kind prefer the batch tools (create_cubes, modify_cubes, shade_cubes, " +
+      "set_keyframes). Steps can't nest run_batch.",
+    inputSchema: {
+      steps: z
+        .array(z.object({
+          tool: z.string().describe("Tool name, e.g. 'place_relative'."),
+          args: z.record(z.string(), z.any()).optional().describe("That tool's arguments."),
+        }))
+        .min(1)
+        .max(50)
+        .describe("The calls, in order."),
+      on_error: z.enum(["stop", "continue", "rollback"]).optional().describe("stop (default), continue, or rollback (undo this batch's changes)."),
+    },
+  },
+  async (args, extra) => {
+    const onError = args.on_error ?? "stop";
+    const undoIndex = async (): Promise<number | null> => {
+      try {
+        const r: any = await sendToBlockbench("get_undo_stack", { limit: 1 });
+        return typeof r?.stack?.index === "number" ? r.stack.index : null;
+      } catch { return null; }
+    };
+    const start = onError === "rollback" ? await undoIndex() : null;
+    const lines: string[] = [];
+    const images: any[] = [];
+    let failed = -1, done = 0;
+    for (let i = 0; i < args.steps.length; i++) {
+      const step = args.steps[i];
+      const entry = toolHandlers.get(step.tool);
+      let result: any;
+      if (step.tool === "run_batch") result = fail("run_batch cannot run inside run_batch.");
+      else if (!entry) result = fail(`Unknown tool "${step.tool}"${notLoaded.includes(step.tool) ? " (not loaded in this profile)" : ""}.`);
+      else {
+        const parsed = z.object(entry.shape).safeParse(step.args ?? {});
+        if (!parsed.success) {
+          result = fail(`Invalid arguments for ${step.tool}: ${parsed.error.issues.map((iss) => `${iss.path.join(".") || "(args)"}: ${iss.message}`).join("; ")}`);
+        } else {
+          try { result = await entry.cb(parsed.data, extra); } catch (e: any) { result = fail(e?.message || String(e)); }
+        }
+      }
+      const content: any[] = result?.content || [];
+      const text = content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+      images.push(...content.filter((c) => c.type === "image"));
+      lines.push(`${i + 1}. ${step.tool} ${result?.isError ? "✗" : "✓"} ${text.length > BATCH_TEXT_MAX ? text.slice(0, BATCH_TEXT_MAX) + "…" : text}`);
+      if (result?.isError) {
+        if (failed < 0) failed = i;
+        if (onError !== "continue") break;
+      } else done++;
+    }
+    let tail = "";
+    if (failed >= 0 && onError === "rollback") {
+      const end = await undoIndex();
+      const n = start !== null && end !== null ? end - start : 0;
+      if (n > 0) {
+        try {
+          await sendToBlockbench("undo", { steps: n });
+          tail = `\nRolled back: undid ${n} step(s); the project is as it was before the batch.`;
+        } catch (e: any) { tail = `\n⚠️  Rollback failed: ${e?.message || e}`; }
+      } else tail = "\nNothing to roll back.";
+    }
+    const head = failed < 0
+      ? `Batch done: ${done}/${args.steps.length} step(s).`
+      : `Batch ${onError === "continue" ? "finished with errors" : "stopped"}: step ${failed + 1} (${args.steps[failed].tool}) failed, ${done} step(s) succeeded.`;
+    const out = { content: [{ type: "text" as const, text: `${head}\n${lines.join("\n")}${tail}` }, ...images] };
+    return failed >= 0 && onError !== "continue" ? { ...out, isError: true } : out;
   }
 );
 

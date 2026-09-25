@@ -470,7 +470,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           if (!parentGroup) return { ok: false, error: `Parent group "${input.parent}" not found.` };
         }
 
-        Undo.initEdit({ outliner: true, elements: [], selection: true });
+        // The new group goes in the 'groups' aspect, as in Blockbench's own Add Group — with the
+        // outliner aspect alone, undo left the group behind (Blockbench 5).
+        Undo.initEdit({ outliner: true, elements: [], groups: [], selection: true } as any);
         // Mirror Blockbench core: init() places it at root; addTo only when nesting.
         // select() wrapped + finishEdit guaranteed (same robustness as create_cube).
         let group: any = null;
@@ -486,7 +488,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         } catch (e: any) {
           createError = e;
         }
-        Undo.finishEdit('Create group via MCP', { outliner: true, selection: true });
+        Undo.finishEdit('Create group via MCP', { outliner: true, groups: group ? [group] : [], selection: true } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         if (!group) return { ok: false, error: createError?.message || String(createError) };
@@ -584,7 +586,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         const resolveParent = (name?: string): any =>
           name ? (createdGroupsByName.get(name) || findGroupByName(name)) : null;
 
-        Undo.initEdit({ elements: [], outliner: true, selection: true });
+        // New groups must be in the 'groups' aspect (as Blockbench's own Add Group does), or undo
+        // leaves them behind on Blockbench 5.
+        Undo.initEdit({ elements: [], groups: [], outliner: true, selection: true } as any);
         let failure: string | null = null;
         try {
           for (const g of groups) {
@@ -620,13 +624,13 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
             (Undo as any).cancelEdit();
           } else {
             for (const el of [...createdCubes, ...createdGroups]) { try { el.remove(); } catch { /* */ } }
-            Undo.finishEdit('Create cubes via MCP (rolled back)', { elements: [], outliner: true, selection: true });
+            Undo.finishEdit('Create cubes via MCP (rolled back)', { elements: [], groups: [], outliner: true, selection: true } as any);
           }
           if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
           return { ok: false, error: `Batch failed and was rolled back (nothing created): ${failure}` };
         }
 
-        Undo.finishEdit('Create cubes via MCP', { elements: createdCubes, outliner: true, selection: true });
+        Undo.finishEdit('Create cubes via MCP', { elements: createdCubes, groups: createdGroups, outliner: true, selection: true } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         const groupNames = createdGroups.map((g) => g.name);
@@ -679,9 +683,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         if (typeof origin === 'string') return { ok: false, error: origin };
         const moved = !isVec3(group.origin) || [0, 1, 2].some((i) => Math.abs(group.origin[i] - origin[i]) > 1e-6);
 
-        Undo.initEdit({ outliner: true, elements: [] });
+        Undo.initEdit({ outliner: true, elements: [], groups: [group] } as any);
         group.origin = origin;
-        Undo.finishEdit('Set origin via MCP', { outliner: true });
+        Undo.finishEdit('Set origin via MCP', { outliner: true, groups: [group] } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`set origin of "${group.name}"`);
@@ -735,9 +739,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         const rotationError = checkRotation(rules.bone, input.rotation, `Group "${group.name}"`);
         if (rotationError) return { ok: false, error: `${rotationError} (rule #1)` };
 
-        Undo.initEdit({ outliner: true, elements: [] });
+        Undo.initEdit({ outliner: true, elements: [], groups: [group] } as any);
         group.rotation = [input.rotation[0], input.rotation[1], input.rotation[2]];
-        Undo.finishEdit('Set rotation via MCP', { outliner: true });
+        Undo.finishEdit('Set rotation via MCP', { outliner: true, groups: [group] } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         // A [0,0,0] pivot is only suspicious when it lies outside the bone's own cubes
@@ -877,6 +881,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         }
 
         let tex: any;
+        Undo.initEdit({ textures: [] } as any); // add(false) records no undo step by itself
         if (input.data_url) {
           tex = new Texture({ name: input.name }).fromDataURL(input.data_url).add(false);
         } else if (input.path) {
@@ -890,6 +895,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           // Transparent blank texture of the requested resolution.
           tex = new Texture({ name: input.name }).fromDataURL(canvas.toDataURL('image/png')).add(false);
         }
+        Undo.finishEdit('Register texture via MCP', { textures: [tex] } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`registered texture "${tex.name}"`);
@@ -1111,18 +1117,22 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           ...(input.particle_effects ? { particle_effects: input.particle_effects } : {}),
         };
 
+        // One undo step, like Blockbench's own Add Animation — loadFile alone records none,
+        // so an undo right after went back to the edit BEFORE it (seen live: it undid the model).
+        Undo.initEdit({ animations: [] } as any);
         Animator.loadFile({
           content: JSON.stringify({
             format_version: '1.8.0',
             animations: { [`animation.${input.name}`]: animationData },
           }),
         } as any);
+        const created = findAnimation(`animation.${input.name}`);
+        Undo.finishEdit('Create animation via MCP', { animations: created ? [created] : [] } as any);
 
         // Enter animation mode and select, so timeline/keyframe tools work
         // immediately (live finding: Blockbench does not select imported
         // animations, and selection is a no-op outside animation mode).
         ensureAnimationMode();
-        const created = findAnimation(`animation.${input.name}`);
         if (created && typeof created.select === 'function') created.select();
         const selected = isAnimationSelected(created);
 
@@ -1437,12 +1447,22 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
             Timeline.setTime(input.time); message = `Set timeline to ${input.time}s`; break;
           case 'set_length':
             if (input.length === undefined) return { ok: false, error: 'length is required for set_length.' };
-            selected.length = input.length; message = `Set animation length to ${input.length}s`; break;
+            Undo.initEdit({ animations: [selected] } as any);
+            selected.length = input.length;
+            Undo.finishEdit('Set animation length via MCP', { animations: [selected] } as any);
+            message = `Set animation length to ${input.length}s`; break;
           case 'set_fps':
             if (input.fps === undefined) return { ok: false, error: 'fps is required for set_fps.' };
-            selected.snapping = input.fps; message = `Set animation FPS to ${input.fps}`; break;
+            Undo.initEdit({ animations: [selected] } as any);
+            selected.snapping = input.fps;
+            Undo.finishEdit('Set animation FPS via MCP', { animations: [selected] } as any);
+            message = `Set animation FPS to ${input.fps}`; break;
           case 'loop':
-            if (input.loop_mode) selected.loop = input.loop_mode;
+            if (input.loop_mode) {
+              Undo.initEdit({ animations: [selected] } as any);
+              selected.loop = input.loop_mode;
+              Undo.finishEdit('Set loop mode via MCP', { animations: [selected] } as any);
+            }
             message = `Loop mode: ${input.loop_mode || selected.loop}`; break;
           case 'select_range': {
             if (!input.range) return { ok: false, error: 'range is required for select_range.' };
@@ -2096,10 +2116,13 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         const kind = isGroup ? 'group' : (isMesh ? 'mesh' : 'cube');
         const name = el.name;
 
-        // Groups delete via the outliner; cubes AND meshes are elements.
-        Undo.initEdit({ elements: isGroup ? [] : [el], outliner: true, selection: true });
+        // Everything that goes away is in the undo snapshot — groups in 'groups', cubes and
+        // meshes in 'elements'. With the outliner aspect alone, undoing a group delete brought
+        // back neither the group nor its cubes (Blockbench 5, seen live).
+        const gone = subtreeOf(el);
+        Undo.initEdit({ elements: gone.filter((n) => !isGroupEl(n)), groups: gone.filter(isGroupEl), outliner: true, selection: true } as any);
         el.remove();
-        Undo.finishEdit('Delete element via MCP', { outliner: true, selection: true });
+        Undo.finishEdit('Delete element via MCP', { elements: [], groups: [], outliner: true, selection: true } as any);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
 
         logToHistory(`deleted ${kind} "${name}"`);
@@ -2472,6 +2495,8 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         const h = input.height || projH || 16;
         let tex: any;
 
+        // add(false) records no undo step by itself; the whole creation is one step here.
+        Undo.initEdit({ textures: [] } as any);
         if (input.data && typeof input.data === 'string') {
           if (input.data.startsWith('data:image/')) {
             tex = new Texture({ name: input.name, width: w, height: h }).fromDataURL(input.data).add(false);
@@ -2495,7 +2520,8 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
 
         // Optional: enable texture layers so paint passes can be non-destructive
         // (paint tools accept a `layer` name to target separate base/shade/highlight).
-        if (input.layers && typeof tex.activateLayers === 'function' && !tex.layers_enabled) tex.activateLayers(true);
+        if (input.layers && typeof tex.activateLayers === 'function' && !tex.layers_enabled) tex.activateLayers(false);
+        Undo.finishEdit('Create texture via MCP', { textures: [tex] } as any);
 
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
         logToHistory(`created texture "${tex.name}"${tex.layers_enabled ? ' (layers on)' : ''}`);
@@ -3033,9 +3059,12 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         if (input.new_name !== el.name && nameTaken(input.new_name)) {
           return { ok: false, error: `Name "${input.new_name}" already exists (rule #4).` };
         }
-        Undo.initEdit({ elements: [el], outliner: true } as any);
+        // A group's own data is the 'groups' aspect; in 'elements' its rename was not undone.
+        const renamedGroup = typeof Group !== 'undefined' && el instanceof Group;
+        const aspects: any = { elements: renamedGroup ? [] : [el], groups: renamedGroup ? [el] : [], outliner: true };
+        Undo.initEdit(aspects);
         el.extend({ name: input.new_name });
-        Undo.finishEdit('Rename element via MCP');
+        Undo.finishEdit('Rename element via MCP', aspects);
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
         logToHistory(`renamed "${input.id}" → "${input.new_name}"`);
         return { ok: true, id: input.id, name: input.new_name };

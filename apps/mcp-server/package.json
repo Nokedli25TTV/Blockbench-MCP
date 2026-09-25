@@ -12,7 +12,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:painter": "node test/painter.test.mjs",
     "test:placement": "node test/placement.test.mjs",
-    "test:views": "node test/views.test.mjs"
+    "test:views": "node test/views.test.mjs",
+    "test:batch": "node test/batch.test.mjs"
   },
   "keywords": [],
   "author": "",
