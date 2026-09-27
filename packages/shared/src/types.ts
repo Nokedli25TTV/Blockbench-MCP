@@ -51,6 +51,7 @@ export type ToolType =
   | "move_element"
   | "place_relative"
   | "measure"
+  | "import_bundle"
   | "rename_element"
   | "find_elements_by_criteria"
   | "select_all_of_type"

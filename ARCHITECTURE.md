@@ -6,7 +6,7 @@ How this project is built and where everything lives. Companion to `MODELING_CON
 ## 1. What it is
 
 A custom integration that lets **Claude (Claude Desktop)** do 3D modeling in **Blockbench**
-over the **Model Context Protocol (MCP)**. 126 MCP tools cover modeling, animation, export,
+over the **Model Context Protocol (MCP)**. 127 MCP tools cover modeling, animation, export,
 texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
 
 ## 2. The three processes + data flow
@@ -45,7 +45,7 @@ texturing/UV, painting, camera, history, PBR, mesh, armature and UI.
   connection was closed — a large texture, a native-size screenshot.
 - **Tool profile** (`BLOCKBENCH_MCP_PROFILE`, default `geckolib`): skips 50 mesh / armature /
   Bedrock-PBR / brush-emulation tools that don't apply to cube models — the tools/list sent to the
-  model shrinks from ~24k to ~16k tokens. `full` loads all 126. Set it in the client's MCP server
+  model shrinks from ~24k to ~16k tokens. `full` loads all 127. Set it in the client's MCP server
   config (`"env": { "BLOCKBENCH_MCP_PROFILE": "full" }`). Every tool also carries MCP annotations
   (`readOnlyHint` / `destructiveHint`).
 - Screenshots (`capture_screenshot`, `set_camera_angle`, app captures) are downscaled to 800 px on
@@ -59,7 +59,7 @@ blockbench-mcp/
 ├─ apps/
 │  ├─ mcp-server/                 # the external MCP server (Node, stdio + Socket.IO bridge)
 │  │  ├─ src/
-│  │  │  ├─ index.ts              # ★ registers ALL 126 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
+│  │  │  ├─ index.ts              # ★ registers ALL 127 MCP tools (profile-filtered); the :9999 bridge; forward() helpers
 │  │  │  └─ skills.ts             # loads skills/*, builds the MCP `instructions` index, get_skill content
 │  │  ├─ test/
 │  │  │  ├─ harness.mjs           # spawns real server + a MOCK Blockbench scene + an MCP stdio client
@@ -72,7 +72,7 @@ blockbench-mcp/
 ├─ packages/shared/src/
 │  ├─ validation.ts               # validateScene() / buildReport() — pure, unit-testable guardrails
 │  ├─ palettes.ts                 # 13 hue-shifted 5-step pixel-art ramps + getPalette()
-│  ├─ modAssets.ts                # export_bundle: GeckoLib 4/5 folders in assets/<mod_id>, resource-name checks
+│  ├─ modAssets.ts                # export_bundle / import_bundle: GeckoLib 4/5 folders in assets/<mod_id>, resource-name checks
 │  ├─ measure.ts                  # measure: the gap, overlap and side between two world boxes
 │  └─ types.ts                    # ToolType + SceneTree shared types
 ├─ skills/                        # 8 Markdown guides (use / mcp-overview / modeling / texturing /
@@ -174,7 +174,11 @@ its own region, texture sized to fit) → `validate_uv` → `create_texture` (no
   each file where GeckoLib 4 or 5 looks (`modAssets.ts`), compares it with the file already there
   (identical = unchanged; different = refused without `overwrite`), and writes through a temp file +
   rename. So Blockbench shows no file-permission prompt, and the export check (`exportPreflight`,
-  shared with `validate_model for_export`) decides whether anything is written.
+  shared with `validate_model for_export`) decides whether anything is written. `import_bundle` is
+  its reverse: the server finds and reads the files (checking the JSON and the PNG before Blockbench
+  is touched); the plugin opens them through Blockbench's own Bedrock loader — told not to switch to an
+  open tab with the same geometry name, which on Blockbench 5 closed the new project — and converts it
+  with the GeckoLib format's own `convertTo()`.
 - Plugin element creation: `new Cube(...).init()` BEFORE `addTo`; always attach to a parent;
   guarantee `Undo.finishEdit()` runs (else an orphan with no undo entry).
 - Plugin imports `packages/shared` by **relative path** for runtime (vite can't resolve the

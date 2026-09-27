@@ -306,9 +306,10 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   animation_timeline: 20_000,
   animation_graph_editor: 20_000,
   list_animations: 20_000,
-  // Codec compile of the whole project / all animations.
+  // Codec compile of the whole project / all animations; a whole model opened with its texture.
   export_model: 60_000,
   export_animations: 60_000,
+  import_bundle: 60_000,
   // Whole-scene reads / validation that pull the full tree.
   get_scene_tree: 20_000,
   validate_model: 20_000,
@@ -1985,6 +1986,164 @@ server.registerTool(
     } catch (e: any) {
       return fail(e?.message || String(e));
     }
+  }
+);
+
+// One file of a model in a mod's assets/<mod_id>: where GeckoLib's defaulted models keep it, else
+// any file of that name under the folders GeckoLib reads (a mod with its own GeoModel paths).
+function findAsset(assetsDir: string, name: string, preferred: string, roots: string[], suffix: string): { file: string | null; error?: string } {
+  const exact = path.join(assetsDir, ...preferred.split("/"));
+  try { if (statSync(exact).isFile()) return { file: exact }; } catch { /* not there */ }
+  const wanted = `${name.split("/").pop()}${suffix}`.toLowerCase();
+  const found: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    let entries: import("node:fs").Dirent[];
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 8) walk(p, depth + 1);
+      else if (e.isFile() && e.name.toLowerCase() === wanted) found.push(p);
+    }
+  };
+  for (const root of roots) walk(path.join(assetsDir, ...root.split("/")), 0);
+  if (found.length > 1) {
+    return { file: null, error: `there are ${found.length} files named ${wanted}: ${found.map((f) => path.relative(assetsDir, f).split(path.sep).join("/")).join(", ")} — pass the one you mean (geo / animations / texture) or kind.` };
+  }
+  return { file: found[0] ?? null };
+}
+
+// The assets/<mod_id> folder a file sits in, when it sits in one.
+const assetsDirOf = (file: string): string | null => {
+  const parts = path.resolve(file).split(path.sep);
+  const i = parts.map((p) => p.toLowerCase()).lastIndexOf("assets");
+  return i >= 0 && i + 1 < parts.length - 1 ? parts.slice(0, i + 2).join(path.sep) : null;
+};
+
+// A PNG's size from its header (IHDR), or null when it isn't a PNG.
+const pngSize = (data: Buffer): [number, number] | null =>
+  data.length >= 24 && data.readUInt32BE(0) === 0x89504e47 && data.toString("ascii", 12, 16) === "IHDR" ? [data.readUInt32BE(16), data.readUInt32BE(20)] : null;
+
+// A mod's model opened for editing — the counterpart of export_bundle. The server finds and reads
+// the files; the plugin opens a NEW project through Blockbench's own loader, converted to GeckoLib.
+server.registerTool(
+  "import_bundle",
+  {
+    title: "Import Bundle (from a mod)",
+    description:
+      "Open a GeckoLib model from a mod in a NEW Blockbench project to edit it — the counterpart of " +
+      "export_bundle. Finds <name>.geo.json, <name>.animation.json and <name>.png under assets/<mod_id>/: " +
+      "first where GeckoLib's defaulted models keep them (geo/<kind>/…, animations/<kind>/…, textures/<kind>/…; " +
+      "GeckoLib 5: geckolib/models/…, geckolib/animations/…), else anywhere under those folders (a mod with " +
+      "its own GeoModel paths) — or give the files' paths. The geometry opens through Blockbench's own " +
+      "Bedrock loader (as File → Open) and the project is converted to GeckoLib; the animations and the " +
+      "texture follow, the texture embedded — saving in Blockbench writes nothing into the mod. Reads only. " +
+      "dry_run lists the files it would open.",
+    inputSchema: {
+      mod_dir: z.string().optional().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder."),
+      mod_id: z.string().optional().describe("The mod's namespace. Default: from mod_dir, or the only mod folder in its assets."),
+      name: z.string().optional().describe("The model's file name without extension, e.g. 'goblin' (default: the geo file's name)."),
+      kind: z.enum(BUNDLE_KINDS).optional().describe("GeckoLib's sub-folder to look in first: entity (default), item or block."),
+      minecraft_version: z.string().optional().describe(`The mod's Minecraft version; decides GeckoLib 4 or 5 folders (default ${DEFAULT_MC_VERSION}).`),
+      geckolib: z.enum(["4", "5"]).optional().describe("Look in GeckoLib 4 or 5 folders whatever the Minecraft version."),
+      geo: z.string().optional().describe("Absolute path of the .geo.json (skips the search for it)."),
+      animations: z.string().optional().describe("Absolute path of the .animation.json."),
+      texture: z.string().optional().describe("Absolute path of the texture .png."),
+      format: z.enum(["geckolib", "bedrock"]).optional().describe("The new project's format (default geckolib)."),
+      dry_run: z.boolean().optional().describe("Only list the files it would open."),
+    },
+  },
+  async (args) => {
+    const refuse = (why: string) => fail(`import_bundle failed: ${why}`);
+    const mcVersion = args.minecraft_version ?? DEFAULT_MC_VERSION;
+    const geckolib = args.geckolib ? (Number(args.geckolib) as 4 | 5) : geckolibFor(mcVersion);
+    if (!geckolib) return refuse(`minecraft_version must be a version like 1.20.1 or 26.1 (got "${mcVersion}").`);
+    for (const [key, p] of [["geo", args.geo], ["animations", args.animations], ["texture", args.texture]] as const) {
+      if (p !== undefined && !path.isAbsolute(p)) return refuse(`${key} must be an absolute path (got "${p}").`);
+    }
+    const name = args.name ?? (args.geo ? path.basename(args.geo).replace(/\.geo\.json$|\.json$/i, "") : undefined);
+    if (!name) return refuse("say which model — name (e.g. 'goblin') with mod_dir, or geo: the .geo.json's path.");
+    const kind: BundleKind = args.kind ?? "entity";
+    const rel = bundlePaths(geckolib, kind, name);
+
+    // The mod's assets folder: from mod_dir, else from where the given geo sits.
+    let assetsDir: string | null = null;
+    if (args.mod_dir) {
+      const target = resolveModAssets(args.mod_dir, args.mod_id);
+      if ("error" in target) return refuse(target.error);
+      if (target.create) return refuse(`"${target.dir}" does not exist — there is nothing to import from.`);
+      assetsDir = target.dir;
+    } else if (args.geo) assetsDir = assetsDirOf(args.geo);
+    else return refuse("give mod_dir (with name), or geo: the .geo.json's path.");
+
+    const pick = (given: string | undefined, preferred: string, roots: string[], suffix: string): { file: string | null; error?: string } => {
+      if (given) { try { return statSync(given).isFile() ? { file: given } : { file: null, error: `"${given}" is not a file.` }; } catch { return { file: null, error: `"${given}" was not found.` }; } }
+      return assetsDir ? findAsset(assetsDir, name, preferred, roots, suffix) : { file: null };
+    };
+    const models = geckolib === 5 ? ["geckolib/models", "geo"] : ["geo", "geckolib/models"];
+    const anims = geckolib === 5 ? ["geckolib/animations", "animations"] : ["animations", "geckolib/animations"];
+    const geoFile = pick(args.geo, rel.model, models, ".geo.json");
+    const animFile = pick(args.animations, rel.animations, anims, ".animation.json");
+    const texFile = pick(args.texture, rel.texture, ["textures"], ".png");
+    for (const f of [geoFile, animFile, texFile]) if (f.error) return refuse(f.error);
+    if (!geoFile.file) return refuse(`no ${name.split("/").pop()}.geo.json in ${assetsDir ? `"${assetsDir}" (${models.join(", ")})` : "the given folders"} — pass geo: its path.`);
+
+    // Read and check everything before Blockbench is touched.
+    let geoJson: any;
+    try { geoJson = JSON.parse(readFileSync(geoFile.file, "utf8")); } catch (e: any) { return refuse(`"${geoFile.file}" is not valid JSON: ${e?.message || e}`); }
+    const geometries: any[] = Array.isArray(geoJson?.["minecraft:geometry"]) ? geoJson["minecraft:geometry"] : [];
+    if (!geometries.length) return refuse(`"${geoFile.file}" has no "minecraft:geometry" — not a GeckoLib / Bedrock model.`);
+    const idOf = (g: any) => String(g?.description?.identifier || "").replace(/^geometry\./, "");
+    const leaf = name.split("/").pop()!;
+    const geometry = geometries.length === 1 ? geometries[0] : geometries.find((g) => idOf(g) === leaf);
+    if (!geometry) return refuse(`"${geoFile.file}" holds ${geometries.length} geometries (${geometries.map(idOf).join(", ")}) and none is "${leaf}" — pass name to pick one.`);
+    let animText: string | undefined, animNames: string[] = [];
+    if (animFile.file) {
+      animText = readFileSync(animFile.file, "utf8");
+      let anim: any;
+      try { anim = JSON.parse(animText); } catch (e: any) { return refuse(`"${animFile.file}" is not valid JSON: ${e?.message || e}`); }
+      if (!anim || typeof anim.animations !== "object") return refuse(`"${animFile.file}" has no "animations" — not an animation file.`);
+      animNames = Object.keys(anim.animations);
+    }
+    let texData: string | undefined, texSize: [number, number] | null = null;
+    if (texFile.file) {
+      const bytes = readFileSync(texFile.file);
+      texSize = pngSize(bytes);
+      if (!texSize) return refuse(`"${texFile.file}" is not a PNG.`);
+      texData = `data:image/png;base64,${bytes.toString("base64")}`;
+    }
+    const bones = Array.isArray(geometry.bones) ? geometry.bones : [];
+    const cubes = bones.reduce((n: number, b: any) => n + (Array.isArray(b.cubes) ? b.cubes.length : 0), 0);
+    const shown = (f: string) => (assetsDir && path.resolve(f).startsWith(path.resolve(assetsDir)) ? path.relative(assetsDir, f).split(path.sep).join("/") : f);
+    const files = [
+      `  ${shown(geoFile.file)}  (geometry.${idOf(geometry) || "?"}: ${bones.length} bone(s), ${cubes} cube(s)${geometries.length > 1 ? `, 1 of ${geometries.length} geometries` : ""})`,
+      animFile.file ? `  ${shown(animFile.file)}  (${animNames.length} animation(s): ${animNames.join(", ") || "none"})` : `  — no ${leaf}.animation.json found${args.animations ? "" : " (pass animations: its path if it has another name)"}`,
+      texFile.file ? `  ${shown(texFile.file)}  (${texSize![0]}×${texSize![1]})` : `  — no ${leaf}.png found${args.texture ? "" : " (pass texture: its path if it has another name)"}`,
+    ].join("\n");
+    // export_bundle writes GeckoLib's default places; files found elsewhere would not be replaced by it.
+    const defaults = [geoFile.file, animFile.file, texFile.file].every((f, i) => !f || !assetsDir || path.resolve(f) === path.resolve(path.join(assetsDir, ...[rel.model, rel.animations, rel.texture][i].split("/"))));
+    const roundTrip = defaults
+      ? `export_bundle${args.mod_dir ? ` mod_dir="${args.mod_dir}"` : ""} name="${name}" writes it back to the same files (they exist: overwrite: true replaces them — ask the user first).`
+      : "These are not GeckoLib's default places, so export_bundle would write NEW files beside them rather than update these — to update these files, ask the user (export_model / export_animations take a path).";
+    const where = assetsDir ? ` from ${assetsDir}` : "";
+    if (args.dry_run) return ok(`Plan (nothing opened): a new ${args.format === "bedrock" ? "Bedrock" : "GeckoLib"} project "${leaf}"${where}:\n${files}\n${roundTrip}`);
+
+    let r: any;
+    try {
+      r = await sendToBlockbench("import_bundle", {
+        geo: JSON.stringify({ format_version: geoJson.format_version || "1.12.0", "minecraft:geometry": [geometry] }),
+        animations: animText, texture: texData, texture_name: texFile.file ? path.basename(texFile.file) : undefined,
+        name: leaf, format: args.format ?? "geckolib",
+      });
+    } catch (e: any) {
+      return fail(e?.message || String(e));
+    }
+    if (r && r.ok === false) return refuse(r.error);
+    const tex = r.texture ? `texture ${r.texture.name}${r.texture.width ? ` ${r.texture.width}×${r.texture.height}` : " (still loading)"}` : "no texture";
+    return ok(
+      `Opened "${r.project}" as a new ${r.format} project${where}: ${r.groups} bone(s), ${r.cubes} cube(s), ` +
+        `${r.animations.length} animation(s)${r.animations.length ? ` (${r.animations.join(", ")})` : ""}, ${tex}; geometry identifier ${r.model_identifier ?? "(none)"}.\n` +
+        `${files}\nNothing in the mod is linked: saving in Blockbench writes nothing there. ${roundTrip}`
+    );
   }
 );
 

@@ -15,6 +15,16 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Fixed
+- `from_geo_json` loaded nothing while a project with the same geometry name was open: Blockbench 5's
+  loader switches to such a tab and closes the new project (unsaved projects all share the empty
+  path). It now opens the new project anyway, and says so if Blockbench still opened none. Found while
+  building `import_bundle`.
+- A model loaded from a `.geo.json` (`from_geo_json`, now also `import_bundle`) failed `validate_model` and
+  `export_bundle`: Bedrock geometry keeps no cube names, so Blockbench names each cube after its bone and
+  every bone shared its name with its cubes. The cubes now get unique names — `<bone>_cube`,
+  `<bone>_cube_2`, … — which are not exported, so the files come back byte for byte.
+
 ### Added
 - `generate_animation` → `attack`, `hurt` and `death`, one-shots from the rig like the walk:
   - `attack` (0.6 s, plays once): an arm — the right one, or `limb` — is raised overhead and chops down
@@ -30,8 +40,19 @@ section into the new version (see README → Releasing).
   renderer's `getDeathMaxRotation` should return 0, or GeckoLib tips the model over a second time. The
   directions were measured live: keyframe positions move along the world axes and rotations turn the
   right-handed way about them.
+- `import_bundle`: a mod's model opened for editing — the counterpart of `export_bundle`. It finds
+  `<name>.geo.json`, `<name>.animation.json` and `<name>.png` under `assets/<mod_id>/` where GeckoLib's
+  defaulted models keep them (GeckoLib 4 or 5), else by name anywhere under those folders (a mod with its
+  own GeoModel paths), or takes the files' paths; a file holding several geometries is picked by name.
+  The JSON and the PNG are checked before Blockbench is touched. The geometry opens in a NEW project
+  through Blockbench's own Bedrock loader, converted to GeckoLib; the animations and the texture follow,
+  the texture embedded — saving in Blockbench writes nothing into the mod. The reply says whether
+  `export_bundle` would write back to the same files. `dry_run` lists the files.
 - `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
   Bedrock's `hold_on_last_frame`); `true` / `false` still work.
+
+### Changed
+- The `geckolib` profile loads 77 tools (was 76), `full` 127 (was 126).
 
 ## [0.6.0] - 2026-09-27
 

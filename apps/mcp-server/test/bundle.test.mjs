@@ -1,7 +1,8 @@
 // export_bundle: the mod folder layout (packages/shared/src/modAssets.ts, straight from the
 // TypeScript source) and the tool through the server and the mock, writing into real temporary
 // mod folders — GeckoLib 4 and 5, the ways to name the folder, overwrite, the export-check gate.
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { geckolibFor, bundlePaths, bundleName, resourceNameError, pickTexture } from "../../../packages/shared/src/modAssets.ts";
@@ -151,6 +152,65 @@ try {
   r = await h.call("export_bundle", { mod_dir: project, mod_id: "goblinmod", name: "broken", force: true });
   check("force: true writes anyway, and says so", !r.isError && existsSync(inMod("geo", "entity", "broken.geo.json")) && /Written although the export check found 1 error\(s\) \(force\)/.test(r.text), one(r.text));
   h.scene.roots[0].children.pop();
+
+  console.log("\n--- import_bundle (real folders) ---");
+  // A small real PNG (the mock's export texture is the signature alone).
+  const png = (w, h) => {
+    const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+    const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+    const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 6;
+    const raw = Buffer.alloc((w * 4 + 1) * h, 0x7f); for (let y = 0; y < h; y++) raw[y * (w * 4 + 1)] = 0;
+    return Buffer.concat([PNG_SIGNATURE, chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+  };
+  const put = (rel, content) => { const f = inMod(...rel.split("/")); mkdirSync(path.dirname(f), { recursive: true }); writeFileSync(f, content); return f; };
+  const geo = (id, bones) => J({ format_version: "1.12.0", "minecraft:geometry": [{ description: { identifier: `geometry.${id}` }, bones }] });
+  const wolfBones = [{ name: "body", pivot: [0, 8, 0], cubes: [{ origin: [-3, 6, -5], size: [6, 6, 10] }] }, { name: "head", parent: "body", pivot: [0, 10, -5], cubes: [{ origin: [-2, 8, -9], size: [4, 4, 4] }, { origin: [-1, 8, -10], size: [2, 2, 1] }] }];
+  put("geo/entity/wolf.geo.json", geo("wolf", wolfBones));
+  put("animations/entity/wolf.animation.json", J({ format_version: "1.8.0", animations: { "animation.wolf.walk": { loop: true }, "animation.wolf.idle": { loop: true } } }));
+  put("textures/entity/wolf.png", png(4, 2));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "wolf", dry_run: true });
+  check("dry run: the three files where GeckoLib keeps them, what each holds, nothing opened",
+    !r.isError && /^Plan \(nothing opened\): a new GeckoLib project "wolf" from /.test(r.text) && /geo\/entity\/wolf\.geo\.json  \(geometry\.wolf: 2 bone\(s\), 3 cube\(s\)\)/.test(r.text) &&
+    /animations\/entity\/wolf\.animation\.json  \(2 animation\(s\): animation\.wolf\.walk, animation\.wolf\.idle\)/.test(r.text) && /textures\/entity\/wolf\.png  \(4×2\)/.test(r.text) && /writes it back to the same files/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "wolf" });
+  check("import: a new GeckoLib project with the bones, animations and texture; nothing linked",
+    !r.isError && /^Opened "wolf" as a new geckolib_model project from .*: 2 bone\(s\), 3 cube\(s\), 2 animation\(s\) \(animation\.wolf\.walk, animation\.wolf\.idle\), texture wolf\.png 16×16; geometry identifier wolf\./.test(r.text) && /Nothing in the mod is linked/.test(r.text), one(r.text));
+  put("geo/troll.geo.json", geo("troll", wolfBones.slice(0, 1)));
+  put("animations/troll.animation.json", J({ format_version: "1.8.0", animations: { "animation.troll.smash": {} } }));
+  const trollSkin = put("textures/entity/troll_skin.png", png(2, 2));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "troll" });
+  check("a mod with its own GeoModel paths: found by name under geo/ and animations/; a texture with another name is not guessed",
+    !r.isError && /geo\/troll\.geo\.json/.test(r.text) && /animations\/troll\.animation\.json/.test(r.text) && /no troll\.png found \(pass texture: its path/.test(r.text) && /not GeckoLib's default places, so export_bundle would write NEW files/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "troll", texture: trollSkin });
+  check("…texture given by path", !r.isError && /texture troll_skin\.png/.test(r.text), one(r.text));
+  put("geo/a/twin.geo.json", geo("twin", [])); put("geo/b/twin.geo.json", geo("twin", []));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "twin" });
+  check("two files of that name: refused, both listed", r.isError && /there are 2 files named twin\.geo\.json: geo\/a\/twin\.geo\.json, geo\/b\/twin\.geo\.json/.test(r.text), one(r.text));
+  const pack = put("geo/pack.geo.json", J({ format_version: "1.12.0", "minecraft:geometry": [{ description: { identifier: "geometry.alpha" }, bones: [] }, { description: { identifier: "geometry.beta" }, bones: wolfBones }] }));
+  r = await h.call("import_bundle", { geo: pack, name: "beta", dry_run: true });
+  check("a file with several geometries: name picks one", !r.isError && /geometry\.beta: 2 bone\(s\), 3 cube\(s\), 1 of 2 geometries/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { geo: pack, name: "gamma" });
+  check("…none of that name: refused, the identifiers listed", r.isError && /holds 2 geometries \(alpha, beta\) and none is "gamma"/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { geo: put("geo/entity/broken.geo.json", "{nope") });
+  check("a geo file that isn't JSON: refused before Blockbench is touched", r.isError && /broken\.geo\.json" is not valid JSON/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { geo: put("geo/entity/notgeo.geo.json", J({ hello: 1 })) });
+  check("JSON that is no model: refused", r.isError && /has no "minecraft:geometry"/.test(r.text), one(r.text));
+  put("geo/entity/fake.geo.json", geo("fake", [])); put("textures/entity/fake.png", "not a png");
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "fake" });
+  check("a .png that isn't one: refused", r.isError && /fake\.png" is not a PNG/.test(r.text), one(r.text));
+  const loose = path.join(tmp, "loose", "lonely.geo.json"); mkdirSync(path.dirname(loose), { recursive: true }); writeFileSync(loose, geo("lonely", wolfBones));
+  r = await h.call("import_bundle", { geo: loose });
+  check("a geo file outside any mod: the name from the file; no animations or texture looked for", !r.isError && /^Opened "lonely"/.test(r.text) && /no lonely\.animation\.json found/.test(r.text) && /no lonely\.png found/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { mod_dir: inMod(), name: "ghost" });
+  check("no such model: refused, where it looked is named", r.isError && /no ghost\.geo\.json in ".*" \(geo, geckolib\/models\)/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { geo: "relative/wolf.geo.json" });
+  check("a relative path is refused", r.isError && /geo must be an absolute path/.test(r.text), one(r.text));
+  r = await h.call("import_bundle", { name: "wolf" });
+  check("neither mod_dir nor geo: says what is needed", r.isError && /give mod_dir \(with name\), or geo/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), name: "roundtrip", include: ["model", "animations"] });
+  const back = await h.call("import_bundle", { mod_dir: inMod(), name: "roundtrip" });
+  check("export_bundle, then import_bundle, finds the same files", !r.isError && !back.isError && /geo\/entity\/roundtrip\.geo\.json/.test(back.text) && /animations\/entity\/roundtrip\.animation\.json/.test(back.text) && /writes it back to the same files/.test(back.text), one(back.text));
 
   h.mock.setFormat({ id: "java_block", bone_rig: false, rotate_cubes: true, java_block_version: "1.9.0", coordinate_limits: [-16, 32] });
   r = await h.call("export_bundle", { mod_dir: project, mod_id: "goblinmod" });

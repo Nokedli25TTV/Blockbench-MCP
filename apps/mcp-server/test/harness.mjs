@@ -730,6 +730,21 @@ export function createMockScene() {
     emulate_clicks() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
     fill_dialog() { return { ok: true, stack_depth: 0 }; },
     from_geo_json() { return { ok: true, data_url: "data:image/png;base64,iVBORw0KGgo=" }; },
+    // A new project in Blockbench; here only what it would hold, counted from what was sent.
+    import_bundle(input) {
+      let model;
+      try { model = JSON.parse(input.geo || ""); } catch { return { ok: false, error: "The geometry is not valid JSON" }; }
+      const g = model["minecraft:geometry"]?.[0];
+      if (!g) return { ok: false, error: 'Not a geo JSON: "minecraft:geometry" is missing.' };
+      const bones = g.bones || [];
+      return {
+        ok: true, project: input.name, format: input.format === "bedrock" ? "bedrock" : "geckolib_model",
+        model_identifier: String(g.description?.identifier || "").replace(/^geometry\./, "") || null,
+        groups: bones.length, cubes: bones.reduce((n, b) => n + (b.cubes?.length || 0), 0),
+        animations: input.animations ? Object.keys(JSON.parse(input.animations).animations || {}) : [],
+        texture: input.texture ? { name: input.texture_name, width: 16, height: 16 } : null,
+      };
+    },
     list_armatures() { return { ok: true, data: { count: (scene.armatures || []).length, armatures: scene.armatures || [] } }; },
     add_armature(input) { scene.armatures = scene.armatures || []; const a = { uuid: randomUUID(), name: input.name || "armature", bones: [] }; scene.armatures.push(a); return { ok: true, message: `Created armature "${a.name}"`, armature: a }; },
     get_armature(input) { const a = (scene.armatures || []).find((x) => x.name === input.id || x.uuid === input.id); return a ? { ok: true, data: a } : { ok: false, error: "not found" }; },

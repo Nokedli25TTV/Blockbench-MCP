@@ -4265,6 +4265,69 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
       } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
     };
 
+    // A geometry into a NEW project through Blockbench's own Bedrock loader, as File → Open does.
+    // parse() alone assumes the open project is Bedrock and switches its format otherwise, which
+    // throws on Blockbench 5 ("reading 'initEntity'"). And load() by default switches to an open tab
+    // with the same geometry name and closes the new project — unsaved projects all share the empty
+    // path, so importing a model that is open (or was just exported) loaded nothing (seen live, 5.2.1).
+    const loadGeoIntoNewProject = (model: any): { error: string } | { project: any } => {
+      const codec: any = typeof Codecs !== 'undefined' ? (Codecs as any).bedrock : null;
+      if (typeof codec?.load !== 'function') return { error: 'Bedrock codec not available.' };
+      const before = hasProject() ? Project : null;
+      codec.load(model, { path: '' }, { switch_to_existing_tab: false });
+      if (!hasProject() || Project === before) return { error: 'Blockbench did not open a new project for the geometry.' };
+      // Bedrock geometry keeps no cube names, so Blockbench names each cube after its bone and a bone
+      // shares its name with its cubes. Give the cubes unique ones (<bone>_cube, <bone>_cube_2, …): they
+      // are not exported, and the tools and validate_model address cubes by name.
+      const taken = new Set<string>(allGroups().map((g: any) => g.name));
+      const used = new Set<string>();
+      for (const c of allCubes()) {
+        if (!taken.has(c.name) && !used.has(c.name)) { used.add(c.name); continue; }
+        const base = `${c.parent && c.parent.name ? c.parent.name : c.name}_cube`;
+        let name = base;
+        for (let k = 2; taken.has(name) || used.has(name); k++) name = `${base}_${k}`;
+        c.name = name;
+        used.add(name);
+      }
+      return { project: Project };
+    };
+
+    // import_bundle: a mod's model, opened for editing — the geometry through loadGeoIntoNewProject,
+    // converted to GeckoLib (Blockbench's own Convert Project), then its animations (as the importer
+    // reads them) and its texture, embedded rather than linked, so saving never writes into the mod.
+    const importBundle = async (input: any): Promise<any> => {
+      try {
+        let model: any;
+        try { model = JSON.parse(String(input.geo || '')); } catch (e: any) { return { ok: false, error: `The geometry is not valid JSON: ${e?.message || e}` }; }
+        if (!Array.isArray(model?.['minecraft:geometry']) || !model['minecraft:geometry'].length) return { ok: false, error: 'Not a geo JSON: "minecraft:geometry" is missing.' };
+        const loaded = loadGeoIntoNewProject(model);
+        if ('error' in loaded) return { ok: false, error: loaded.error };
+        if (input.format !== 'bedrock' && (Format as any)?.id !== 'geckolib_model') {
+          const gecko: any = typeof Formats !== 'undefined' ? (Formats as any).geckolib_model : null;
+          if (typeof gecko?.convertTo !== 'function') return { ok: false, error: 'The geometry opened as a Bedrock project, but this Blockbench has no GeckoLib format to convert it to — pass format: "bedrock".' };
+          gecko.convertTo();
+        }
+        if (typeof input.name === 'string' && input.name) (Project as any).name = input.name;
+        if (typeof input.animations === 'string' && input.animations) {
+          Animator.loadFile({ content: input.animations, path: '' } as any);
+        }
+        let texture: any = null;
+        if (typeof input.texture === 'string' && input.texture.startsWith('data:image/')) {
+          const tex = new Texture({ name: input.texture_name || 'texture.png' }).fromDataURL(input.texture).add(false);
+          const ok = await textureLoaded(tex);
+          if (!(Format as any).single_texture) allCubes().forEach((c: any) => c.applyTexture?.(tex, true));
+          texture = { name: tex.name, width: ok ? tex.width : null, height: ok ? tex.height : null };
+        }
+        if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
+        const animations = (typeof Animation !== 'undefined' && (Animation as any).all ? (Animation as any).all : []).map((a: any) => a.name);
+        logToHistory(`imported "${(Project as any).name}" (${allGroups().length} bones, ${animations.length} animations)`);
+        return {
+          ok: true, project: (Project as any).name, format: (Format as any)?.id, model_identifier: (Project as any).model_identifier || null,
+          groups: allGroups().length, cubes: allCubes().length, animations, texture,
+        };
+      } catch (e: any) { return { ok: false, error: e?.message || String(e) }; }
+    };
+
     const fromGeoJson = async (input: any): Promise<any> => {
       try {
         let geojson = String(input.geojson || '');
@@ -4276,16 +4339,11 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           if (!res.ok) return { ok: false, error: `Failed to fetch: ${res.status} ${res.statusText}` };
           geojson = await res.text();
         }
-        const codec: any = typeof Codecs !== 'undefined' ? (Codecs as any).bedrock : null;
-        if (!codec?.load && !codec?.parse) return { ok: false, error: 'Bedrock codec not available.' };
         let model: any;
         try { model = JSON.parse(geojson); } catch (e: any) { return { ok: false, error: `The geo JSON is not valid JSON: ${e?.message || e}` }; }
         if (!Array.isArray(model?.['minecraft:geometry'])) return { ok: false, error: 'Not a Bedrock geo JSON: "minecraft:geometry" is missing.' };
-        // load() sets up a new Bedrock project and then parses into it. parse() alone assumes
-        // the open project is already Bedrock and switches its format otherwise, which
-        // throws on Blockbench 5 ("reading 'initEntity'", seen live on 5.2.1).
-        if (typeof codec.load === 'function') codec.load(model, { path: '' });
-        else codec.parse(model, '');
+        const loaded = loadGeoIntoNewProject(model);
+        if ('error' in loaded) return { ok: false, error: loaded.error };
         await new Promise((r) => setTimeout(r, 1500));
         const shot = await captureAppScreenshot();
         return shot.ok ? { ok: true, data_url: shot.data_url } : { ok: true, message: 'Imported GeoJSON.' };
@@ -5061,6 +5119,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
         move_element: moveElement,
         place_relative: placeRelative,
         measure: measure,
+        import_bundle: importBundle,
         rename_element: renameElement,
         find_elements_by_criteria: findElementsByCriteria,
         select_all_of_type: selectAllOfType,
