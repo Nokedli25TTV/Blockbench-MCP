@@ -12,7 +12,7 @@ import { PALETTES, PALETTE_NAMES, PALETTE_INDEX_ROLES, getPalette } from "../../
 import { MATERIALS } from "../../../packages/shared/src/facePainter";
 import { SIDES, ALIGNS, ANCHORS, boxCenter } from "../../../packages/shared/src/placement";
 import type { Box } from "../../../packages/shared/src/placement";
-import { boxRelation, relationText, boxSize } from "../../../packages/shared/src/measure";
+import { boxRelation, relationText, boxSize, looseParts } from "../../../packages/shared/src/measure";
 import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
@@ -978,6 +978,14 @@ async function exportPreflight(tree: SceneTree, known: { info?: any; animations?
     const count = bare.reduce((n, c) => n + c.faces.length, 0);
     findings.push({ severity: "warning", rule: "faces-without-texture", message: `${count} face(s) have no texture: ${bare.slice(0, 6).map((c) => `${c.name} (${c.faces.join(", ")})`).join("; ")}${bare.length > 6 ? "; …" : ""} — apply_texture.` });
   }
+  // Parts that touch nothing of the rest: a warning only — a halo or an orb may float on purpose.
+  const boxes = sceneBoxes(tree);
+  const loose = looseParts(Object.fromEntries(cubes.filter((c) => boxes[c.name]).map((c) => [c.name, boxes[c.name]])));
+  if (loose.length) {
+    const count = loose.reduce((n, l) => n + l.parts.length, 0);
+    const pieces = loose.slice(0, 4).map((l) => `${l.parts.slice(0, 4).join(", ")}${l.parts.length > 4 ? ", …" : ""} (${l.distance} from ${l.nearest})`).join("; ");
+    findings.push({ severity: "warning", rule: "floating-parts", message: `${count} part(s) touch nothing of the rest of the model: ${pieces}${loose.length > 4 ? "; …" : ""} — meant to float (a halo, an orb)? Else move them with place_relative and check with measure.` });
+  }
   // UV layout.
   if (cubes.length) {
     const uv = await ask("validate_uv", {});
@@ -1015,7 +1023,7 @@ server.registerTool(
       "animation (check_animation), the geometry identifier, meshes a cubes-only format would drop — and ends " +
       "with a verdict: ready to export, or what to fix first.",
     inputSchema: {
-      for_export: z.boolean().optional().describe("Also check what the export needs (UV, textures, animations, identifier, meshes) and give a verdict."),
+      for_export: z.boolean().optional().describe("Also check what the export needs (UV, textures, animations, identifier, meshes, parts that touch nothing) and give a verdict."),
     },
   },
   async (args) => {

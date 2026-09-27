@@ -46,6 +46,37 @@ export function boxRelation(a: Box, b: Box): BoxRelation {
   return { gap, state: "overlapping", distance: 0, axis, side: inside ? "inside" : contains ? null : sideAlong, contains, shared: { box: { min, max }, volume } };
 }
 
+/**
+ * Parts that touch nothing of the rest of the model. The parts fall into pieces that touch or overlap
+ * (within `tolerance`); the piece with the most parts is the model, and every other piece comes back
+ * with the model's part nearest to it and how far off it is. Boxes are world bounds, so a part that
+ * touches is never called loose; a rotated one can pass for touching when only its bounds do.
+ */
+export function looseParts(boxes: Record<string, Box>, tolerance = 0.01): { parts: string[]; nearest: string; distance: number }[] {
+  const names = Object.keys(boxes);
+  const root = new Map(names.map((n) => [n, n]));
+  const find = (n: string): string => { let r = n; while (root.get(r) !== r) r = root.get(r)!; root.set(n, r); return r; };
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      if (Math.max(...boxRelation(boxes[names[i]], boxes[names[j]]).gap) <= tolerance) root.set(find(names[i]), find(names[j]));
+    }
+  }
+  const pieces = new Map<string, string[]>();
+  for (const n of names) pieces.set(find(n), [...(pieces.get(find(n)) || []), n]);
+  if (pieces.size < 2) return [];
+  for (const parts of pieces.values()) parts.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); // segment_2 before segment_10
+  const volume = (parts: string[]) => parts.reduce((v, n) => v + boxSize(boxes[n]).reduce((a, b) => a * b, 1), 0);
+  const [model, ...rest] = [...pieces.values()].sort((a, b) => b.length - a.length || volume(b) - volume(a));
+  return rest.map((parts) => {
+    let best = { nearest: "", distance: Infinity };
+    for (const p of parts) for (const m of model) {
+      const d = boxRelation(boxes[p], boxes[m]).distance;
+      if (d < best.distance) best = { nearest: m, distance: d };
+    }
+    return { parts, ...best };
+  });
+}
+
 const vec = (v: number[]) => `[${v.map(round).join(", ")}]`;
 
 /** "a → b: left, touching on x" — where `a` is relative to `b`, as one line. */

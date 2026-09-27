@@ -1,6 +1,6 @@
 // measure: the box relations (packages/shared/src/measure.ts, straight from the TypeScript
 // source) and the tool through the server and the mock — a humanoid measured part by part.
-import { boxRelation, relationText, boxSize } from "../../../packages/shared/src/measure.ts";
+import { boxRelation, relationText, boxSize, looseParts } from "../../../packages/shared/src/measure.ts";
 import { startHarness } from "./harness.mjs";
 
 let failures = 0;
@@ -33,6 +33,18 @@ check("one line per pair",
   relationText("far", "body", boxRelation(B([6, 26, 3], [8, 28, 5]), body)) === "far → body: right, apart — distance 3 (2 on x, 2 on y, 1 on z)" &&
   relationText("body", "core", boxRelation(body, core)).startsWith("body → core: contains it — core is within body"));
 check("boxSize", J(boxSize(body)) === J([8, 12, 4]));
+
+console.log("\n--- loose parts ---");
+const humanoid = { body_cube: body, head_cube: head, arm_left_cube: B([-8, 12, -2], [-4, 24, 2]), arm_right_cube: B([4, 12, -2], [8, 24, 2]), leg_left_cube: B([-4, 0, -2], [0, 12, 2]), leg_right_cube: B([0, 0, -2], [4, 12, 2]) };
+check("a model whose parts all touch: nothing loose", looseParts(humanoid).length === 0);
+const tail = { seg_1: B([-1, 21, 4], [1, 23, 8]), seg_2: B([-1, 21, 8], [1, 23, 12]), seg_3: B([-1, 21, 12], [1, 23, 16]) };
+let loose = looseParts({ ...humanoid, ...tail });
+check("a tail 2 behind the torso (its segments touching each other): one loose piece, the nearest part and the distance",
+  loose.length === 1 && J(loose[0].parts) === J(["seg_1", "seg_2", "seg_3"]) && loose[0].nearest === "head_cube" && loose[0].distance === 1, J(loose));
+loose = looseParts({ ...humanoid, halo: B([-3, 34, -3], [3, 35, 3]), orb: B([10, 20, 0], [11, 21, 1]) });
+check("two separate loose pieces, each reported", loose.length === 2 && loose.some((l) => l.parts[0] === "halo" && l.distance === 2) && loose.some((l) => l.parts[0] === "orb"), J(loose));
+check("a hair's gap (0.005) still counts as touching", looseParts({ ...humanoid, hat: B([-4, 32.005, -4], [4, 34, 4]) }).length === 0);
+check("the piece with the most parts is the model, even if another is bigger", J(looseParts({ a: B([0, 0, 0], [1, 1, 1]), b: B([1, 0, 0], [2, 1, 1]), big: B([10, 0, 0], [30, 20, 20]) }).map((l) => l.parts)) === J([["big"]]));
 
 console.log("\n--- through the server (mock Blockbench) ---");
 // No rotations, so every box is exact. The model faces north: front = −Z, its own left = −X.

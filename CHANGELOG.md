@@ -55,6 +55,11 @@ section into the new version (see README → Releasing).
   file that would change only with `overwrite: true`. A part the import did not bring goes to GeckoLib's
   default place, and the reply says so. `get_project_info` shows where an imported project came from
   (`imported_from`); `mod_dir` is optional when the paths or the import say where.
+- `validate_model for_export` (and so `export_bundle`'s check) warns about parts that touch nothing of the
+  rest of the model: the cubes that touch or overlap (by their world boxes, within 0.01) form pieces, the
+  one with the most parts is the model, and each other piece is named with the model's nearest part and
+  the gap — a tail placed 2 units behind the back showed up nowhere before. A warning only: a halo or an
+  orb may float on purpose. The grouping is `looseParts` in `packages/shared/src/measure.ts`.
 - `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
   Bedrock's `hold_on_last_frame`); `true` / `false` still work.
 

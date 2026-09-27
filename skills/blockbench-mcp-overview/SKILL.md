@@ -65,7 +65,7 @@ create_texture: name="atlas"                             # no size → uses the 
 apply_texture: target="root", texture="atlas"
 shade_cubes: items=[{cube_id:"blade", color:"#b9c2cb", material:"metal", edge_color:"#5f6b75", sheen:true},
                     {cube_id:"guard", color:"#d6b13a", material:"metal"}, {cube_id:"grip", color:"#5b3a1d", material:"leather"}]   # exact colours + materials, one call
-validate_model: for_export=true      # structure, UV, textures, animations, identifier → READY or what to fix
+validate_model: for_export=true      # structure, UV, textures, animations, identifier, floating parts → READY or what to fix
 capture_screenshot
 export_bundle: mod_dir="C:/mods/daggermod", kind="item"   # .geo.json + .animation.json + .png into assets/<mod_id>
                                                          # (loose files: export_model + export_animations)

@@ -49,6 +49,11 @@ try {
   await h.call("set_keyframes", { keyframes: [{ bone: "body", channel: "rotation", time: 0, values: [0, 0, 0] }, { bone: "body", channel: "rotation", time: 0.5, values: [120, 0, 0] }] });
   r = await h.call("validate_model", { for_export: true });
   check("animation problems are reported per animation, warnings still READY", !r.isError && /READY ✅/.test(r.text) && /\(animation animation\.walk\) body\.rotation turns 120°/.test(r.text), one(r.text));
+  check("a model in one piece: no floating-parts warning", !/floating-parts/.test(r.text), one(r.text));
+  await h.call("create_cubes", { groups: [{ name: "halo", parent: "head", origin: [0, 34, 0] }], cubes: [{ name: "halo_cube", parent: "halo", from: [-3, 34, -3], to: [3, 35, 3] }] });
+  const floating = await h.call("validate_model", { for_export: true });
+  check("a part that touches nothing: a warning naming it, the nearest part and the gap — still READY",
+    !floating.isError && /READY ✅/.test(floating.text) && /\[warn \] \(floating-parts\) 1 part\(s\) touch nothing of the rest of the model: halo_cube \(2 from head_cube\) — meant to float/.test(floating.text), one(floating.text));
   check("…with the next step: export_bundle (or the single-file exports)", /Next: export_bundle — the model, its animations and texture into the mod's folders in one call \(export_model \+ export_animations for loose files\)\./.test(r.text), one(r.text));
 } finally {
   h.stop();

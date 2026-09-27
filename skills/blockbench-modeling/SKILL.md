@@ -104,6 +104,8 @@ measure: targets=["arm_left_cube", "body_cube", "hat_cube", "head_cube"]
 ```
 
 A group's box holds everything inside it, so compare cubes (or sibling bones) to see how parts meet.
+`validate_model for_export: true` also names every part that touches nothing of the rest of the model
+(with the nearest part and the gap) — a tail placed a little off shows up there.
 
 ### Pivots from the geometry
 
