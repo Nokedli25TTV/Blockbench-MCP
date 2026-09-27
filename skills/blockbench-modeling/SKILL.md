@@ -68,7 +68,8 @@ create_from_spec: template="humanoid", scale=1.25, parts=[
 
 Templates: `humanoid`, `quadruped`, `sword`, `chain` (`dry_run` lists their parts). A chain
 (`segments`: 2–16) is a tail or tentacle — each segment inside the one before, pivoting at its front;
-then `place_relative target:"segment_1" ref:"body" side:"back"` moves the whole chain onto the body.
+then `place_relative target:"segment_1" ref:"body_cube" side:"back" align:{y:"min"}` moves the whole chain
+to the lower back.
 Every part becomes a bone with one cube; `mirror: "x"` adds arm_right / leg_right. Parts are placed in
 order (attach targets first), at rest; `dry_run: true` shows the plan. Then `pack_uv`.
 
@@ -83,15 +84,16 @@ create_cubes: groups=[{name: "body", origin: [0, 12, 0]}, {name: "head", parent:
 ### Place parts instead of computing coordinates
 
 ```
-place_relative: target="head", ref="body", side="on_top"                    # centred on top
-place_relative: target="arm_left", ref="body", side="left", align="max"     # beside it, flush with its top
-place_relative: target="tail", ref="body", side="back", gap=-1              # sunk 1 unit in
+place_relative: target="head", ref="body_cube", side="on_top"                    # centred on top
+place_relative: target="arm_left", ref="body_cube", side="left", align="max"     # beside it, flush with its top
+place_relative: target="tail", ref="body_cube", side="back", gap=-1              # sunk 1 unit in
 move_element: target="arm_left", offset=[0, -1, 0]                          # nudge a whole part
 ```
 
 Sides are world axes and the model faces north (−Z): `front` = −Z, `left` = −X (its own left).
-Groups move with everything inside and keep their pivots; bounds include rotations. Add
-`dry_run: true` to see where it would go first.
+Groups move with everything inside and keep their pivots; bounds include rotations. A group as `ref`
+counts with everything inside it — a humanoid's `body` bone holds the head and arms too — so to meet
+the torso itself, give its cube (`body_cube`). Add `dry_run: true` to see where it would go first.
 
 Check the fit by number instead of a screenshot — `measure` reports each pair in the same words:
 

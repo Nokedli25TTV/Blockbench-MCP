@@ -20,7 +20,7 @@ section into the new version (see README → Releasing).
   shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail), `sword`
   (grip, guard, blade, pommel; pivot at the grip) or `chain` (`segments`, 2–16, default 4: pieces one
   behind the other, each inside the one before and pivoting at its front — a tail, tentacle or snake;
-  `place_relative` on `segment_1` puts it on a body) — sized by `scale` (1 = Minecraft proportions,
+  `place_relative` on `segment_1`, with the torso cube as `ref`, puts it on a body) — sized by `scale` (1 = Minecraft proportions,
   whole units), with `parts` added on top (e.g. horns attached to the head). The templates are part
   lists (`packages/shared/src/templates.ts`), so `dry_run` shows them for tweaking.
 - `measure`: parts by number instead of from a screenshot. Each target's world box (min→max, size,
@@ -49,11 +49,18 @@ section into the new version (see README → Releasing).
   file, then moved into place), so Blockbench shows no file-permission prompt.
 
 ### Fixed
+- `validate_model for_export` (and so `export_bundle`) warned that every face of a GeckoLib model had
+  no texture. GeckoLib and Bedrock entity models use one texture: their faces keep none of their own and
+  show the project's. `get_scene_tree` now reports the texture Blockbench draws on each face, so the
+  check — and `export_bundle`'s choice of texture — see it. Found by the live test.
 - A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
   plugin's connection, and the call timed out. The bridge now takes replies up to 64 MB, like the
   relay endpoint.
 
 ### Changed
+- `place_relative` and the modeling skill: a group as `ref` counts with everything inside it (a
+  humanoid's `body` bone holds the head and arms too), so the examples now use the torso cube
+  (`body_cube`) — against the bone, a tail ended up 2 units behind the back.
 - `validate_model for_export` names `export_bundle` as the next step for GeckoLib and Bedrock models.
 - The `geckolib` profile loads 76 tools (was 74), `full` 126 (was 124).
 

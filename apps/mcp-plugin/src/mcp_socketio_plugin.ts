@@ -827,8 +827,13 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
             const faces: Record<string, { texture: string | null }> = {};
             if (node.faces) {
               for (const f of Object.keys(node.faces)) {
-                const t = node.faces[f] ? node.faces[f].texture : null;
-                faces[f] = { texture: t ? String(t) : null };
+                // The texture Blockbench draws on the face: in single-texture formats (GeckoLib,
+                // Bedrock entity) faces keep none of their own and show the project's default.
+                // A uuid that resolves to nothing stays, so validate_model reports it as missing.
+                const face = node.faces[f];
+                const shown = face && typeof face.getTexture === 'function' ? face.getTexture() : null;
+                const raw = face ? face.texture : null;
+                faces[f] = { texture: shown && shown.uuid ? String(shown.uuid) : (typeof raw === 'string' && raw ? raw : null) };
               }
             }
             cube.faces = faces;

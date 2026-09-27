@@ -2248,8 +2248,9 @@ server.registerTool(
       "centred\"): `side` on_top | below | left | right | front | back | inside, `gap` between them " +
       "(negative sinks it in), `align` on the other two axes center (default) | min | max | keep. Works " +
       "on cubes and whole groups — moved with everything inside, pivots included — using their world " +
-      "bounds, rotations included. The model faces north (−Z): front = −Z, left = −X (its own left). " +
-      "One undo step; `dry_run` only reports.",
+      "bounds, rotations included — a group counts with everything inside it, so to meet one part (the " +
+      "torso, not the body bone with its head and arms) give that cube as `ref`. The model faces north " +
+      "(−Z): front = −Z, left = −X (its own left). One undo step; `dry_run` only reports.",
     inputSchema: {
       target: z.string().describe("The element or group to move."),
       ref: z.string().describe("The element or group to place it against (stays where it is)."),
