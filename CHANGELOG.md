@@ -15,6 +15,8 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
 ### Fixed
 - `validate_model for_export` (and so `export_bundle`) warned that every face of a GeckoLib model had
   no texture. GeckoLib and Bedrock entity models use one texture: their faces keep none of their own and
