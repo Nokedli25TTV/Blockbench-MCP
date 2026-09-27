@@ -405,7 +405,7 @@ export function createMockScene() {
     },
     get_project_info() {
       const r = rules();
-      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null }, format: { id: scene.format?.id || "bedrock", animation_mode: true }, rules: { summary: r.summary, coordinate_limits: r.coordinateLimits }, counts: { animations: scene.animations?.length || 0 } } };
+      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null, imported_from: scene.imported_from || null }, format: { id: scene.format?.id || "bedrock", animation_mode: true }, rules: { summary: r.summary, coordinate_limits: r.coordinateLimits }, counts: { animations: scene.animations?.length || 0 } } };
     },
     set_project(input) {
       const changed = [];
@@ -737,6 +737,7 @@ export function createMockScene() {
       const g = model["minecraft:geometry"]?.[0];
       if (!g) return { ok: false, error: 'Not a geo JSON: "minecraft:geometry" is missing.' };
       const bones = g.bones || [];
+      scene.imported_from = input.source || null;
       return {
         ok: true, project: input.name, format: input.format === "bedrock" ? "bedrock" : "geckolib_model",
         model_identifier: String(g.description?.identifier || "").replace(/^geometry\./, "") || null,

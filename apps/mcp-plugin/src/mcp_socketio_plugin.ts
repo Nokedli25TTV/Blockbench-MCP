@@ -2312,6 +2312,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
               uuid: (Project as any).uuid,
               model_identifier: (Project as any).model_identifier || null,
               save_path: (Project as any).save_path || null,
+              imported_from: (Project as any).mcp_imported_from || null,
             },
             plugin_build: PLUGIN_BUILD, // bump on each plugin change to confirm the loaded build
             tool_count: pluginToolCount,
@@ -4308,6 +4309,8 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           gecko.convertTo();
         }
         if (typeof input.name === 'string' && input.name) (Project as any).name = input.name;
+        // Where the files came from, for export_bundle to_source (kept while the project is open).
+        (Project as any).mcp_imported_from = input.source && typeof input.source === 'object' ? input.source : null;
         if (typeof input.animations === 'string' && input.animations) {
           Animator.loadFile({ content: input.animations, path: '' } as any);
         }

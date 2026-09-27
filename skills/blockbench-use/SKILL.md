@@ -50,7 +50,8 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
    `.geo.json`, `.animation.json` and texture into `assets/<mod_id>` where GeckoLib looks (runs the
    same check first; `dry_run` to preview). When a file there would change it writes nothing and lists
    them — ask the user before `overwrite: true`. Loose files: `export_model` + `export_animations`.
-   To edit a model the mod already has: `import_bundle mod_dir:"<the mod>" name:"<model>"` opens it.
+   To edit a model the mod already has: `import_bundle mod_dir:"<the mod>" name:"<model>"` opens it;
+   `export_bundle to_source:true` saves it back to the same files (ask before `overwrite: true`).
    (`validate_uv` before painting, `check_animation` while animating.)
 6. **Real tools over `risky_eval`.** Use it only when no tool exists — it bypasses validation.
 

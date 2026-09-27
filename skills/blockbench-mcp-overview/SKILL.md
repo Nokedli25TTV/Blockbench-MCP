@@ -98,6 +98,7 @@ undo: steps=2
 export_bundle: mod_dir="C:/mods/daggermod", dry_run=true   # where each file would go, what exists
 export_bundle: mod_dir="C:/mods/daggermod", minecraft_version="1.21.5"   # GeckoLib 5: geckolib/models/…
 import_bundle: mod_dir="C:/mods/daggermod", name="goblin"   # its .geo.json + .animation.json + .png, opened to edit
+export_bundle: to_source=true, dry_run=true   # …edited, then back to the files it came from (overwrite: true once the user agrees)
 list_export_formats: only_current_format=true
 export_model: codec_id="bedrock", path="C:/models/dagger.geo.json", max_content_length=0
 ```
@@ -108,7 +109,10 @@ nothing when the export check finds an error, or when a file already there would
 the user before `overwrite: true` (`force: true` only if they accept the check's errors).
 `import_bundle` looks where GeckoLib's defaulted models keep the files, then for the name anywhere
 under those folders (a mod with its own GeoModel paths); `geo` / `animations` / `texture` take paths.
-It says whether `export_bundle` would write back to the same files — if they are not in GeckoLib's
-default places it would not, so ask the user how to save them.
+Save the edited model back with `export_bundle to_source: true` — the same files, wherever the mod
+keeps them (they exist, so it takes `overwrite: true`: ask the user first). A part the import did not
+bring (a new animation file) goes to GeckoLib's default place, and the reply says the mod's GeoModel
+has to point at it. `paths` (per part, relative to `assets/<mod_id>` or absolute) puts a new model at
+a mod's own paths. Both write only `.geo.json` / `.animation.json` / `.png` inside `assets/<mod_id>/`.
 `export_model` content is truncated at `max_content_length` (default 100,000 chars); `byte_length`
 gives the real size.

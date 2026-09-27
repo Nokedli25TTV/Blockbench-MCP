@@ -172,7 +172,7 @@ try {
   r = await h.call("import_bundle", { mod_dir: inMod(), name: "wolf", dry_run: true });
   check("dry run: the three files where GeckoLib keeps them, what each holds, nothing opened",
     !r.isError && /^Plan \(nothing opened\): a new GeckoLib project "wolf" from /.test(r.text) && /geo\/entity\/wolf\.geo\.json  \(geometry\.wolf: 2 bone\(s\), 3 cube\(s\)\)/.test(r.text) &&
-    /animations\/entity\/wolf\.animation\.json  \(2 animation\(s\): animation\.wolf\.walk, animation\.wolf\.idle\)/.test(r.text) && /textures\/entity\/wolf\.png  \(4×2\)/.test(r.text) && /writes it back to the same files/.test(r.text), one(r.text));
+    /animations\/entity\/wolf\.animation\.json  \(2 animation\(s\): animation\.wolf\.walk, animation\.wolf\.idle\)/.test(r.text) && /textures\/entity\/wolf\.png  \(4×2\)/.test(r.text) && /To save it back: export_bundle to_source: true — the same files/.test(r.text), one(r.text));
   r = await h.call("import_bundle", { mod_dir: inMod(), name: "wolf" });
   check("import: a new GeckoLib project with the bones, animations and texture; nothing linked",
     !r.isError && /^Opened "wolf" as a new geckolib_model project from .*: 2 bone\(s\), 3 cube\(s\), 2 animation\(s\) \(animation\.wolf\.walk, animation\.wolf\.idle\), texture wolf\.png 16×16; geometry identifier wolf\./.test(r.text) && /Nothing in the mod is linked/.test(r.text), one(r.text));
@@ -181,7 +181,7 @@ try {
   const trollSkin = put("textures/entity/troll_skin.png", png(2, 2));
   r = await h.call("import_bundle", { mod_dir: inMod(), name: "troll" });
   check("a mod with its own GeoModel paths: found by name under geo/ and animations/; a texture with another name is not guessed",
-    !r.isError && /geo\/troll\.geo\.json/.test(r.text) && /animations\/troll\.animation\.json/.test(r.text) && /no troll\.png found \(pass texture: its path/.test(r.text) && /not GeckoLib's default places, so export_bundle would write NEW files/.test(r.text), one(r.text));
+    !r.isError && /geo\/troll\.geo\.json/.test(r.text) && /animations\/troll\.animation\.json/.test(r.text) && /no troll\.png found \(pass texture: its path/.test(r.text) && /to_source: true/.test(r.text) && /not GeckoLib's default places: export_bundle with mod_dir would write new files/.test(r.text), one(r.text));
   r = await h.call("import_bundle", { mod_dir: inMod(), name: "troll", texture: trollSkin });
   check("…texture given by path", !r.isError && /texture troll_skin\.png/.test(r.text), one(r.text));
   put("geo/a/twin.geo.json", geo("twin", [])); put("geo/b/twin.geo.json", geo("twin", []));
@@ -210,7 +210,44 @@ try {
   check("neither mod_dir nor geo: says what is needed", r.isError && /give mod_dir \(with name\), or geo/.test(r.text), one(r.text));
   r = await h.call("export_bundle", { mod_dir: inMod(), name: "roundtrip", include: ["model", "animations"] });
   const back = await h.call("import_bundle", { mod_dir: inMod(), name: "roundtrip" });
-  check("export_bundle, then import_bundle, finds the same files", !r.isError && !back.isError && /geo\/entity\/roundtrip\.geo\.json/.test(back.text) && /animations\/entity\/roundtrip\.animation\.json/.test(back.text) && /writes it back to the same files/.test(back.text), one(back.text));
+  check("export_bundle, then import_bundle, finds the same files", !r.isError && !back.isError && /geo\/entity\/roundtrip\.geo\.json/.test(back.text) && /animations\/entity\/roundtrip\.animation\.json/.test(back.text) && /To save it back: export_bundle to_source: true/.test(back.text), one(back.text));
+
+  console.log("\n--- export_bundle back to the imported files, and paths ---");
+  await h.call("import_bundle", { mod_dir: inMod(), name: "troll", texture: trollSkin });
+  const trollBefore = text(inMod("geo", "troll.geo.json"));
+  r = await h.call("export_bundle", { to_source: true, dry_run: true });
+  check("to_source, dry run: the three files the import came from, each would change",
+    !r.isError && /^Plan \(nothing written\): "troll" for GeckoLib 4 \(as imported\) into /.test(r.text) && /geo\/troll\.geo\.json  — EXISTS and differs/.test(r.text) &&
+    /animations\/troll\.animation\.json  — EXISTS and differs/.test(r.text) && /textures\/entity\/troll_skin\.png  — EXISTS and differs/.test(r.text) && /would write nothing: 3 existing file\(s\)/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { to_source: true });
+  check("to_source without overwrite: nothing written, the files listed", r.isError && /\[DUPLICATE_NAME\]/.test(r.text) && r.text.includes(inMod("geo", "troll.geo.json")) && text(inMod("geo", "troll.geo.json")) === trollBefore, one(r.text));
+  r = await h.call("export_bundle", { to_source: true, overwrite: true });
+  check("to_source, overwrite: written back to the same three files",
+    !r.isError && /geo\/troll\.geo\.json  \(\d+ B, replaced\)/.test(r.text) && /textures\/entity\/troll_skin\.png  \(\d+ B, replaced\)/.test(r.text) && /Written back to the files the model was imported from/.test(r.text) && text(inMod("geo", "troll.geo.json")) !== trollBefore, one(r.text));
+  r = await h.call("export_bundle", { to_source: true, mod_dir: inMod() });
+  check("to_source with mod_dir: refused (it writes back where the import came from)", r.isError && /leave out mod_dir and paths/.test(r.text), one(r.text));
+  put("geo/solo.geo.json", geo("solo", wolfBones));
+  await h.call("import_bundle", { mod_dir: inMod(), name: "solo" });
+  r = await h.call("export_bundle", { to_source: true, dry_run: true });
+  check("to_source, parts the import did not bring: at GeckoLib's default place, and said so",
+    !r.isError && /geo\/solo\.geo\.json  — EXISTS and differs/.test(r.text) && /animations\/entity\/solo\.animation\.json  — new/.test(r.text) && /did not come with the import: written at GeckoLib's default place/.test(r.text), one(r.text));
+  await h.call("import_bundle", { geo: loose });
+  r = await h.call("export_bundle", { to_source: true, include: ["model"] });
+  check("to_source for a file outside any mod's assets: refused", r.isError && /is not inside an assets\/<mod_id> folder/.test(r.text), one(r.text));
+  h.scene.imported_from = null;
+  r = await h.call("export_bundle", { to_source: true });
+  check("to_source on a project that was not imported: refused, what to give instead", r.isError && /was not opened with import_bundle/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), name: "custom", include: ["model"], paths: { model: "geo/custom/custom.geo.json" } });
+  check("paths, relative to assets/<mod_id>: the part goes there; the reply says the mod's GeoModel must point at it",
+    !r.isError && existsSync(inMod("geo", "custom", "custom.geo.json")) && /geo\/custom\/custom\.geo\.json  \(\d+ B, new\)/.test(r.text) && /the mod's own GeoModel has to point at them/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { include: ["model"], paths: { model: inMod("geo", "absolute.geo.json") } });
+  check("paths, absolute, without mod_dir: the assets folder is taken from the path", !r.isError && existsSync(inMod("geo", "absolute.geo.json")) && r.text.includes(inMod()), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), include: ["model"], paths: { model: "geo/custom.json" } });
+  check("a path with the wrong extension: refused", r.isError && /paths\.model must end in \.geo\.json/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { include: ["model"], paths: { model: path.join(tmp, "outside.geo.json") } });
+  check("a path outside any assets/<mod_id>: refused", r.isError && /is not inside an assets\/<mod_id> folder/.test(r.text) && !existsSync(path.join(tmp, "outside.geo.json")), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), include: ["model"], paths: { model: "geo/Custom.geo.json" } });
+  check("a path Minecraft would refuse (a capital): refused", r.isError && /must be lowercase/.test(r.text), one(r.text));
 
   h.mock.setFormat({ id: "java_block", bone_rig: false, rotate_cubes: true, java_block_version: "1.9.0", coordinate_limits: [-16, 32] });
   r = await h.call("export_bundle", { mod_dir: project, mod_id: "goblinmod" });

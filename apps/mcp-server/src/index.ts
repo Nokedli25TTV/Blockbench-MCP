@@ -1846,12 +1846,14 @@ server.registerTool(
       "Export a GeckoLib model into a mod in ONE call: the geometry (.geo.json), the animations (.animation.json) " +
       "and the texture (.png), each where GeckoLib's defaulted models (DefaultedEntityGeoModel …) load it, under " +
       "assets/<mod_id>/ — GeckoLib 4 (Minecraft up to 1.21.4): geo/<kind>/, animations/<kind>/, textures/<kind>/; " +
-      "GeckoLib 5 (1.21.5+): geckolib/models/<kind>/, geckolib/animations/<kind>/, textures/<kind>/. Runs the " +
-      "export check first (as validate_model for_export) and writes NOTHING when it finds an error, or when a " +
-      "file already there would change — ask the user, then pass overwrite: true. Identical files count as " +
-      "unchanged. dry_run shows the plan. GeckoLib and Bedrock projects.",
+      "GeckoLib 5 (1.21.5+): geckolib/models/<kind>/, geckolib/animations/<kind>/, textures/<kind>/. For a mod whose " +
+      "GeoModel names its own paths: `paths` puts a part elsewhere under assets/<mod_id>/, and `to_source` writes a " +
+      "model opened with import_bundle back to the files it came from. Runs the export check first (as " +
+      "validate_model for_export) and writes NOTHING when it finds an error, or when a file already there would " +
+      "change — ask the user, then pass overwrite: true. Identical files count as unchanged. dry_run shows the " +
+      "plan. GeckoLib and Bedrock projects.",
     inputSchema: {
-      mod_dir: z.string().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder."),
+      mod_dir: z.string().optional().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder (not needed with to_source, or with absolute paths)."),
       mod_id: z.string().optional().describe("The mod's namespace. Default: from mod_dir, or the only mod folder in its assets."),
       name: z.string().optional().describe("File name without extension; may include folders ('boss/goblin'). Default: the geometry identifier."),
       kind: z.enum(BUNDLE_KINDS).optional().describe("GeckoLib's sub-folder: entity (default), item or block."),
@@ -1859,6 +1861,11 @@ server.registerTool(
       geckolib: z.enum(["4", "5"]).optional().describe("Use GeckoLib 4 or 5 folders whatever the Minecraft version."),
       texture: z.string().optional().describe("Which texture, when the project has several (default: the one on the most faces)."),
       include: z.array(z.enum(BUNDLE_PARTS)).min(1).optional().describe("Only these parts: model, animations, texture (default: all the project has)."),
+      paths: z
+        .object({ model: z.string().optional(), animations: z.string().optional(), texture: z.string().optional() })
+        .optional()
+        .describe("Where a part goes instead of GeckoLib's default place: relative to assets/<mod_id> (e.g. 'geo/goblin.geo.json') or absolute inside an assets/<mod_id> folder."),
+      to_source: z.boolean().optional().describe("Write back to the files import_bundle opened (a part it did not come with goes to GeckoLib's default place beside them)."),
       overwrite: z.boolean().optional().describe("Replace existing files that differ (default false: write nothing and list them)."),
       force: z.boolean().optional().describe("Write although the export check found errors — only when the user accepts them."),
       dry_run: z.boolean().optional().describe("Only show what would be written."),
@@ -1876,22 +1883,61 @@ server.registerTool(
       const info = (await ask("get_project_info", {})).info || {};
       const formatId = info.format?.id;
       if (!BUNDLE_FORMATS.has(formatId)) return refuse(`the "${formatId}" format is unsupported — it writes GeckoLib models (a GeckoLib or Bedrock project); use export_model.`);
-      const name = bundleName(args.name, info.project?.model_identifier);
-      if (!name) return refuse("a name is required — pass name, or set_project model_identifier (it names the geometry too).");
-      const badName = resourceNameError(name, "name");
-      if (badName) return refuse(badName);
+      // to_source: the files import_bundle opened this project from, as it recorded them.
+      const source: any = args.to_source ? info.project?.imported_from : null;
+      if (args.to_source) {
+        if (!source) return refuse("this project was not opened with import_bundle (or has been closed and reopened since) — give mod_dir, or paths.");
+        if (args.mod_dir || args.paths) return refuse("to_source writes back to the imported files — leave out mod_dir and paths.");
+      }
+      const given: Partial<Record<BundlePart, string>> = source ? { model: source.geo || undefined, animations: source.animations || undefined, texture: source.texture || undefined } : { ...(args.paths ?? {}) };
+      const include = new Set<BundlePart>(args.include ?? BUNDLE_PARTS);
+      // A part without a path goes to GeckoLib's default place, which the name decides.
+      const needsName = BUNDLE_PARTS.some((p) => include.has(p) && !given[p]);
+      const name = bundleName(args.name ?? source?.name, info.project?.model_identifier);
+      if (needsName) {
+        if (!name) return refuse("a name is required — pass name, or set_project model_identifier (it names the geometry too).");
+        const badName = resourceNameError(name, "name");
+        if (badName) return refuse(badName);
+      }
       const mcVersion = args.minecraft_version ?? DEFAULT_MC_VERSION;
-      const geckolib = args.geckolib ? (Number(args.geckolib) as 4 | 5) : geckolibFor(mcVersion);
+      const geckolib = source?.geckolib ?? (args.geckolib ? (Number(args.geckolib) as 4 | 5) : geckolibFor(mcVersion));
       if (!geckolib) return refuse(`minecraft_version must be a version like 1.20.1 or 26.1 (got "${mcVersion}").`);
-      const target = resolveModAssets(args.mod_dir, args.mod_id);
-      if ("error" in target) return refuse(target.error);
-      const kind: BundleKind = args.kind ?? "entity";
-      const rel = bundlePaths(geckolib, kind, name);
+      // The assets/<mod_id> folder: mod_dir's, the source's, or the one the first absolute path sits in.
+      let target: { dir: string; modId: string; create: boolean } | null = null;
+      if (args.mod_dir) {
+        const resolved = resolveModAssets(args.mod_dir, args.mod_id);
+        if ("error" in resolved) return refuse(resolved.error);
+        target = resolved;
+      } else {
+        const dir = source?.assets_dir || Object.values(given).map((p) => (p && path.isAbsolute(p) ? assetsDirOf(p) : null)).find(Boolean);
+        if (dir) target = { dir, modId: path.basename(dir), create: false };
+      }
+      if (needsName && !target) return refuse("give mod_dir (the mod project, its src/main/resources or its assets/<mod_id>), or paths for every part, or to_source.");
+      const kind: BundleKind = source?.kind ?? args.kind ?? "entity";
+      const rel = bundlePaths(geckolib, kind, name ?? "");
+      // Each part's file, and it must be a file GeckoLib would read: the right extension, under assets/<mod_id>.
+      const EXT: Record<BundlePart, string> = { model: ".geo.json", animations: ".animation.json", texture: ".png" };
+      const fileOf: Partial<Record<BundlePart, string>> = {};
+      for (const part of BUNDLE_PARTS) {
+        if (!include.has(part)) continue;
+        const want = given[part];
+        if (!want) { fileOf[part] = path.join(target!.dir, ...rel[part].split("/")); continue; }
+        if (!path.isAbsolute(want) && !target) return refuse(`paths.${part} "${want}" is relative — give mod_dir too, or an absolute path.`);
+        const file = path.isAbsolute(want) ? path.resolve(want) : path.resolve(target!.dir, want);
+        if (!file.toLowerCase().endsWith(EXT[part])) return refuse(`paths.${part} must end in ${EXT[part]} (got "${want}").`);
+        const root = assetsDirOf(file);
+        const inside = root ? path.relative(root, file).split(path.sep).join("/") : "";
+        if (!root || !inside || inside.startsWith("..")) return refuse(`paths.${part} "${want}" is not inside an assets/<mod_id> folder — export_bundle writes only there.`);
+        const bad = resourceNameError(inside, `paths.${part}`);
+        if (bad) return refuse(bad);
+        fileOf[part] = file;
+      }
+      const atDefault = (part: BundlePart) => !given[part];
+      const shown = (file: string) => (target && path.resolve(file).startsWith(path.resolve(target.dir) + path.sep) ? path.relative(target.dir, file).split(path.sep).join("/") : file);
 
       // What there is to ship, and the export check.
       const tree = (await ask("get_scene_tree", {})).tree as SceneTree;
       const animations: any[] = (await ask("list_animations", {})).animations || [];
-      const include = new Set<BundlePart>(args.include ?? BUNDLE_PARTS);
       const notes: string[] = [];
       let texture: SceneTexture | null = null;
       if (include.has("texture")) {
@@ -1905,13 +1951,13 @@ server.registerTool(
       const pre = await exportPreflight(tree, { info, animations });
 
       // Compile in Blockbench — whole, since the result is written, not shown.
-      type Planned = { rel: string; file: string; data: Buffer; status: "new" | "unchanged" | "changed" };
+      type Planned = { part: BundlePart; rel: string; file: string; data: Buffer; status: "new" | "unchanged" | "changed" };
       const planned: Planned[] = [];
       const add = (part: BundlePart, data: Buffer) => {
-        const file = path.join(target.dir, ...rel[part].split("/"));
+        const file = fileOf[part]!;
         let old: Buffer | null = null;
         try { old = readFileSync(file); } catch { /* not there yet */ }
-        planned.push({ rel: rel[part], file, data, status: !old ? "new" : old.equals(data) ? "unchanged" : "changed" });
+        planned.push({ part, rel: shown(file), file, data, status: !old ? "new" : old.equals(data) ? "unchanged" : "changed" });
       };
       const whole = { max_content_length: Number.MAX_SAFE_INTEGER };
       if (include.has("model")) {
@@ -1935,10 +1981,14 @@ server.registerTool(
       if (!planned.length) return refuse(`there is nothing to export. ${notes.join(" ")}`);
 
       const changed = planned.filter((p) => p.status === "changed");
-      const layout = `GeckoLib ${geckolib} (${args.geckolib ? "as asked" : `for Minecraft ${mcVersion}`})`;
+      const layout = `GeckoLib ${geckolib} (${source ? "as imported" : args.geckolib ? "as asked" : `for Minecraft ${mcVersion}`})`;
       const size = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
       const report = [preflightVerdict(pre), ...pre.findings.map(findingLine)].join("\n");
       const noteLines = notes.map((n) => `\n⚠️  ${n}`).join("");
+      const title = `"${name ?? path.basename(planned[0].file).replace(/\.(geo\.json|animation\.json|png)$/, "")}" for ${layout} into ${target ? target.dir : "the paths given"}`;
+      // A part at a place the mod's code does not know about yet (to_source: one the import did not bring).
+      const fresh = source ? planned.filter((p) => atDefault(p.part) && p.status === "new").map((p) => p.rel) : [];
+      const freshNote = fresh.length ? `\n⚠️  ${fresh.join(", ")} did not come with the import: written at GeckoLib's default place — the mod's GeoModel has to point at it.` : "";
       if (args.dry_run) {
         const blockers = [
           pre.errors && !args.force ? "the export check's errors" : null,
@@ -1946,9 +1996,9 @@ server.registerTool(
         ].filter(Boolean);
         const state = (p: Planned) => (p.status === "changed" ? (args.overwrite ? "replaces the existing file" : "EXISTS and differs") : p.status);
         return ok(
-          `Plan (nothing written): "${name}" for ${layout} into ${target.dir}${target.create ? " (to be created)" : ""}:\n` +
+          `Plan (nothing written): ${title}${target?.create ? " (to be created)" : ""}:\n` +
             planned.map((p) => `  ${p.rel}  — ${state(p)}, ${size(p.data.length)}`).join("\n") +
-            `\n${report}${noteLines}\n` +
+            `\n${report}${noteLines}${freshNote}\n` +
             (blockers.length ? `The real call would write nothing: ${blockers.join("; ")}.` : "The real call would write these files.")
         );
       }
@@ -1975,13 +2025,16 @@ server.registerTool(
         for (const [tmp, file] of temps) { renameSync(tmp, file); moved++; }
       } catch (e: any) {
         for (const [tmp] of temps.slice(moved)) { try { unlinkSync(tmp); } catch { /* already gone */ } }
-        return refuse(`writing into "${target.dir}" failed: ${e?.message || e}${moved ? ` — already written: ${toWrite.slice(0, moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
+        return refuse(`writing into "${target ? target.dir : "the paths given"}" failed: ${e?.message || e}${moved ? ` — already written: ${toWrite.slice(0, moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
       }
       const forced = pre.errors ? `\n⚠️  Written although the export check found ${pre.errors} error(s) (force).` : "";
+      const finder = planned.every((p) => atDefault(p.part)) && target && name
+        ? `In the mod, ${DEFAULTED_MODEL[kind]} finds these files from "${target.modId}:${name}".`
+        : source ? "Written back to the files the model was imported from — the mod's GeoModel already points at them." : "These are not GeckoLib's default places — the mod's own GeoModel has to point at them.";
       return ok(
-        `Exported "${name}" for ${layout} into ${target.dir}${target.create ? " (created)" : ""}:\n` +
+        `Exported ${title}${target?.create ? " (created)" : ""}:\n` +
           planned.map((p) => `  ${p.rel}  (${size(p.data.length)}, ${p.status === "changed" ? "replaced" : p.status})`).join("\n") +
-          `\n${report}${forced}${noteLines}\nIn the mod, ${DEFAULTED_MODEL[kind]} finds these files from "${target.modId}:${name}".`
+          `\n${report}${forced}${noteLines}${freshNote}\n${finder}`
       );
     } catch (e: any) {
       return fail(e?.message || String(e));
@@ -2036,8 +2089,8 @@ server.registerTool(
       "GeckoLib 5: geckolib/models/…, geckolib/animations/…), else anywhere under those folders (a mod with " +
       "its own GeoModel paths) — or give the files' paths. The geometry opens through Blockbench's own " +
       "Bedrock loader (as File → Open) and the project is converted to GeckoLib; the animations and the " +
-      "texture follow, the texture embedded — saving in Blockbench writes nothing into the mod. Reads only. " +
-      "dry_run lists the files it would open.",
+      "texture follow, the texture embedded — saving in Blockbench writes nothing into the mod. Reads only; " +
+      "export_bundle to_source: true writes the edited model back to these files. dry_run lists the files it would open.",
     inputSchema: {
       mod_dir: z.string().optional().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder."),
       mod_id: z.string().optional().describe("The mod's namespace. Default: from mod_dir, or the only mod folder in its assets."),
@@ -2121,9 +2174,10 @@ server.registerTool(
     ].join("\n");
     // export_bundle writes GeckoLib's default places; files found elsewhere would not be replaced by it.
     const defaults = [geoFile.file, animFile.file, texFile.file].every((f, i) => !f || !assetsDir || path.resolve(f) === path.resolve(path.join(assetsDir, ...[rel.model, rel.animations, rel.texture][i].split("/"))));
-    const roundTrip = defaults
-      ? `export_bundle${args.mod_dir ? ` mod_dir="${args.mod_dir}"` : ""} name="${name}" writes it back to the same files (they exist: overwrite: true replaces them — ask the user first).`
-      : "These are not GeckoLib's default places, so export_bundle would write NEW files beside them rather than update these — to update these files, ask the user (export_model / export_animations take a path).";
+    const roundTrip = !assetsDir
+      ? "It is not in a mod's assets folder, so export_bundle cannot write it back there — export_model / export_animations take a path."
+      : `To save it back: export_bundle to_source: true — the same files (they exist: overwrite: true replaces them; ask the user first).` +
+        (defaults ? "" : " These are not GeckoLib's default places: export_bundle with mod_dir would write new files at the default places instead.");
     const where = assetsDir ? ` from ${assetsDir}` : "";
     if (args.dry_run) return ok(`Plan (nothing opened): a new ${args.format === "bedrock" ? "Bedrock" : "GeckoLib"} project "${leaf}"${where}:\n${files}\n${roundTrip}`);
 
@@ -2133,6 +2187,8 @@ server.registerTool(
         geo: JSON.stringify({ format_version: geoJson.format_version || "1.12.0", "minecraft:geometry": [geometry] }),
         animations: animText, texture: texData, texture_name: texFile.file ? path.basename(texFile.file) : undefined,
         name: leaf, format: args.format ?? "geckolib",
+        // Remembered on the project, so export_bundle to_source can write back to these files.
+        source: { assets_dir: assetsDir, geo: geoFile.file, animations: animFile.file, texture: texFile.file, name, kind, geckolib },
       });
     } catch (e: any) {
       return fail(e?.message || String(e));

@@ -48,6 +48,13 @@ section into the new version (see README → Releasing).
   through Blockbench's own Bedrock loader, converted to GeckoLib; the animations and the texture follow,
   the texture embedded — saving in Blockbench writes nothing into the mod. The reply says whether
   `export_bundle` would write back to the same files. `dry_run` lists the files.
+- `export_bundle` → `to_source` and `paths`: write a model opened with `import_bundle` back to the files it
+  came from — wherever the mod keeps them — or put a part at a path of the mod's own (`paths.model`,
+  `.animations`, `.texture`: relative to `assets/<mod_id>` or absolute). Still only `.geo.json`,
+  `.animation.json` and `.png` files inside an `assets/<mod_id>/` folder, after the export check, and a
+  file that would change only with `overwrite: true`. A part the import did not bring goes to GeckoLib's
+  default place, and the reply says so. `get_project_info` shows where an imported project came from
+  (`imported_from`); `mod_dir` is optional when the paths or the import say where.
 - `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
   Bedrock's `hold_on_last_frame`); `true` / `false` still work.
 

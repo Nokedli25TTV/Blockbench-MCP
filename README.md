@@ -73,7 +73,8 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
   straight into your mod's `assets/<mod_id>` folders (GeckoLib 4 or 5 layout) in one call, after the
   export check and without overwriting anything unless asked; `export_model` / `export_animations` give
   single files. `import_bundle` goes the other way: a model's files from the mod open in a new GeckoLib
-  project to edit (read only — nothing in the mod is linked).
+  project to edit (read only — nothing in the mod is linked), and `export_bundle to_source` writes the
+  edited model back to those files — also for a mod whose own GeoModel classes name other paths.
 - **Stay safe** — edits are normal Blockbench undo steps; `save_checkpoint` / `undo` / `redo`;
   `validate_model` checks the rules in [MODELING_CONSTRAINTS.md](MODELING_CONSTRAINTS.md) before export.
 - **Guide the AI** — eight bundled skill guides (modeling, texturing, animation, pixel shading, …)
