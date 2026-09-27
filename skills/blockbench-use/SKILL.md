@@ -46,7 +46,7 @@ Read this before touching the scene, then load the domain skill(s) with `get_ski
    angles or frames into ONE contact-sheet image.
 5. **Validate before export.** `validate_model for_export:true` checks everything the export needs in
    one report (structure, UV, faces without texture, every animation, the geometry identifier,
-   meshes, parts that touch nothing of the rest) and says READY or what to fix. Into a mod: `export_bundle mod_dir:"<the mod>"` writes the
+   meshes, parts that touch nothing of the rest) and says READY or what to fix. Into a mod: `export_bundle mod_dir:"<the mod>"` (a Java item or block: with `kind`) writes the
    `.geo.json`, `.animation.json` and texture into `assets/<mod_id>` where GeckoLib looks (runs the
    same check first; `dry_run` to preview). When a file there would change it writes nothing and lists
    them — ask the user before `overwrite: true`. Loose files: `export_model` + `export_animations`.

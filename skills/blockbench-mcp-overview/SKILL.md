@@ -99,6 +99,8 @@ export_bundle: mod_dir="C:/mods/daggermod", dry_run=true   # where each file wou
 export_bundle: mod_dir="C:/mods/daggermod", minecraft_version="1.21.5"   # GeckoLib 5: geckolib/models/…
 import_bundle: mod_dir="C:/mods/daggermod", name="goblin"   # its .geo.json + .animation.json + .png, opened to edit
 export_bundle: to_source=true, dry_run=true   # …edited, then back to the files it came from (overwrite: true once the user agrees)
+export_bundle: mod_dir="C:/mods/daggermod", kind="item", name="ruby_sword"   # Java project: models/item/ + textures/item/
+export_bundle: mod_dir="C:/mods/daggermod", kind="block", name="ruby_ore", extras=true   # + a missing blockstate / item model
 list_export_formats: only_current_format=true
 export_model: codec_id="bedrock", path="C:/models/dagger.geo.json", max_content_length=0
 ```

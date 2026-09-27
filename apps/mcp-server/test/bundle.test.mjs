@@ -251,7 +251,55 @@ try {
 
   h.mock.setFormat({ id: "java_block", bone_rig: false, rotate_cubes: true, java_block_version: "1.9.0", coordinate_limits: [-16, 32] });
   r = await h.call("export_bundle", { mod_dir: project, mod_id: "goblinmod" });
-  check("a Java block/item project is refused: export_model is the tool there", r.isError && /^\[FORMAT_UNSUPPORTED\] .*"java_block" format is unsupported/.test(r.text), one(r.text));
+  check("a Java block/item project needs kind: item or block", r.isError && /a Java model is an item or a block/.test(r.text), one(r.text));
+
+  console.log("\n--- Java item / block ---");
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "entity" });
+  check("…and not entity", r.isError && /a Java model is an item or a block/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "ruby_sword", dry_run: true });
+  check("Java item, dry run: the model under models/item/, its texture under textures/item/, how the item finds it",
+    !r.isError && /^Plan \(nothing written\): "ruby_sword" as a Java item model for Minecraft 1\.20\.1 into /.test(r.text) && /models\/item\/ruby_sword\.json  — new/.test(r.text) &&
+    /textures\/item\/ruby_sword\.png  — new/.test(r.text) && /The item "goblinmod:ruby_sword" uses models\/item\/ruby_sword\.json by its registry name/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "ruby_sword" });
+  const sword = JSON.parse(text(inMod("models", "item", "ruby_sword.json")));
+  check("the texture reference points at the mod, a particle is added, the faces keep #0",
+    !r.isError && J(sword.textures) === J({ 0: "goblinmod:item/ruby_sword", particle: "goblinmod:item/ruby_sword" }) && sword.elements.some((e) => e.faces?.north?.texture === "#0") && existsSync(inMod("textures", "item", "ruby_sword.png")), J(sword.textures));
+  check("…written as Blockbench writes models: short arrays on one line", /"from": \[-?[\d.]+, -?[\d.]+, -?[\d.]+\]/.test(text(inMod("models", "item", "ruby_sword.json"))));
+  await h.call("create_cubes", { cubes: [{ name: "gem_cube", from: [0, 24, 0], to: [1, 25, 1] }] });
+  await h.call("create_texture", { name: "gem" });
+  await h.call("apply_texture", { target: "gem_cube", texture: "gem", apply_mode: "all" });
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "gem_sword" });
+  const gemSword = JSON.parse(text(inMod("models", "item", "gem_sword.json")));
+  check("two textures: one file each, <name>_<texture>, each reference pointed at its own",
+    !r.isError && existsSync(inMod("textures", "item", "gem_sword_goblin.png")) && existsSync(inMod("textures", "item", "gem_sword_gem.png")) &&
+    Object.values(gemSword.textures).includes("goblinmod:item/gem_sword_goblin") && Object.values(gemSword.textures).includes("goblinmod:item/gem_sword_gem"), J(gemSword.textures));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "block", name: "goblin_block", extras: true });
+  check("a block with extras: models/block/, textures/block/, the blockstate and the block's item model (before 1.21.4)",
+    !r.isError && existsSync(inMod("models", "block", "goblin_block.json")) && JSON.parse(text(inMod("blockstates", "goblin_block.json"))).variants[""].model === "goblinmod:block/goblin_block" &&
+    JSON.parse(text(inMod("models", "item", "goblin_block.json"))).parent === "goblinmod:block/goblin_block" && /finds this model through blockstates\/goblin_block\.json/.test(r.text), one(r.text));
+  writeFileSync(inMod("blockstates", "goblin_block.json"), J({ variants: { "facing=north": { model: "goblinmod:block/goblin_block" } } }));
+  const handMade = text(inMod("blockstates", "goblin_block.json"));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "block", name: "goblin_block", extras: true, overwrite: true });
+  check("extras never change an existing blockstate — not even with overwrite: kept", !r.isError && /blockstates\/goblin_block\.json  \(\d+ B, kept — already there\)/.test(r.text) && text(inMod("blockstates", "goblin_block.json")) === handMade, one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "block", name: "plain_block" });
+  check("without extras: the missing blockstate and item model are named, not written",
+    !r.isError && /Missing: blockstates\/plain_block\.json, models\/item\/plain_block\.json — extras: true creates them/.test(r.text) && !existsSync(inMod("blockstates", "plain_block.json")), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "new_sword", minecraft_version: "1.21.4", extras: true });
+  check("Minecraft 1.21.4: items/new_sword.json points at the model",
+    !r.isError && J(JSON.parse(text(inMod("items", "new_sword.json")))) === J({ model: { type: "minecraft:model", model: "goblinmod:item/new_sword" } }) && /finds its model through items\/new_sword\.json/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "late_sword", minecraft_version: "26.3", dry_run: true });
+  check("the project's rotation rules and the mod's Minecraft version differ: said so", /the mod is Minecraft 26\.3 — its rotations may not load there/.test(r.text), one(r.text));
+  await h.call("create_texture", { name: "block/stone" });
+  const stone = h.scene.textures.find((t) => t.name === "block/stone");
+  h.scene.roots.push({ type: "cube", uuid: "stone-cube", name: "stone_base", from: [0, 0, 0], to: [16, 1, 16], origin: [0, 0, 0], rotation: [0, 0, 0], faces: { up: { texture: stone.uuid } } });
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "block", name: "stone_base_block", dry_run: true });
+  check("a reference that already is a resource location (block/stone) is kept, its image not shipped",
+    !r.isError && /Kept as they are — already resource locations, their images not shipped: block\/stone/.test(r.text) && !/stone_base_block_block/.test(r.text), one(r.text));
+  h.scene.roots.pop();
+  r = await h.call("export_bundle", { mod_dir: inMod(), kind: "item", name: "x", paths: { model: "models/item/x.json" } });
+  check("paths / to_source are refused for a Java model", r.isError && /to_source and paths are for GeckoLib models/.test(r.text), one(r.text));
+  r = await h.call("export_bundle", { kind: "item", name: "x" });
+  check("no mod_dir: asks for it", r.isError && /give mod_dir/.test(r.text), one(r.text));
 } finally {
   h.stop();
   rmSync(tmp, { recursive: true, force: true });

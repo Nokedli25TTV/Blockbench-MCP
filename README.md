@@ -75,6 +75,10 @@ This fork is tuned for **Minecraft / GeckoLib** cube models.
   single files. `import_bundle` goes the other way: a model's files from the mod open in a new GeckoLib
   project to edit (read only — nothing in the mod is linked), and `export_bundle to_source` writes the
   edited model back to those files — also for a mod whose own GeoModel classes name other paths.
+- **Export Java items and blocks** — in a Java block/item project, `export_bundle kind:"item"` (or
+  `"block"`) writes `models/<kind>/<name>.json` and its textures under `textures/<kind>/`, with the
+  texture references pointed at `<mod_id>:<kind>/<file>` (Blockbench's own texture names would read as
+  `minecraft:…`); `extras` creates a missing blockstate / item definition.
 - **Stay safe** — edits are normal Blockbench undo steps; `save_checkpoint` / `undo` / `redo`;
   `validate_model` checks the rules in [MODELING_CONSTRAINTS.md](MODELING_CONSTRAINTS.md) before export.
 - **Guide the AI** — eight bundled skill guides (modeling, texturing, animation, pixel shading, …)
@@ -175,7 +179,7 @@ see [Troubleshooting](#-troubleshooting).
 | Environment variable | Default | Meaning |
 |---|---|---|
 | `BLOCKBENCH_MCP_PROFILE` | `geckolib` | `geckolib` loads 77 tools and skips 50 that don't apply to cube models (mesh editing, armatures/vertex weights, Bedrock PBR/material instances, brush emulation) — the tool list the AI reads shrinks from ~24k to ~16k tokens. `full` loads all 127. |
-| `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | The Minecraft version your mod targets. A new Java block/item project takes its rotation rules from it (`create_project` can override it): up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. `export_bundle` picks GeckoLib's folders from it: GeckoLib 4 up to 1.21.4, GeckoLib 5 from 1.21.5. |
+| `BLOCKBENCH_MCP_MC_VERSION` | `1.20.1` | The Minecraft version your mod targets. A new Java block/item project takes its rotation rules from it (`create_project` can override it): up to 1.21.5 one axis at 22.5° steps, 1.21.6–1.21.10 one axis at any angle, from 1.21.11 any axes. `export_bundle` picks GeckoLib's folders from it: GeckoLib 4 up to 1.21.4, GeckoLib 5 from 1.21.5 — and for a Java item or block, whether it needs `items/<name>.json` (1.21.4 and newer). |
 | `MCP_BRIDGE_PORT` | `9999` | Bridge port. **For tests only** — the plugin always connects to 9999. |
 
 To set the profile, add `"env": { "BLOCKBENCH_MCP_PROFILE": "full" }` next to `"args"` in the Claude
@@ -194,7 +198,7 @@ Desktop config, or pass `-e BLOCKBENCH_MCP_PROFILE=full` to `claude mcp add`.
 | Camera | `capture_screenshot` (`views` / `times`: several angles or frames in one image), `set_camera_angle`, `capture_app_screenshot` |
 | History | `save_checkpoint`, `undo`, `redo`, `get_undo_stack` |
 | Sequences | `run_batch` (several different calls in one round trip; stop, continue or roll back on an error) |
-| Export | `export_bundle` (model + animations + texture into the mod's folders), `import_bundle` (a mod's model back into a new project to edit), `list_export_formats`, `export_model`, `export_animations` |
+| Export | `export_bundle` (model + animations + texture into the mod's folders; Java items and blocks too), `import_bundle` (a mod's model back into a new project to edit), `list_export_formats`, `export_model`, `export_animations` |
 | Guides | `list_skills`, `get_skill` (also readable as `skill://…` resources) |
 | Escape hatches | `list_actions` + `trigger_action`, `fill_dialog`, `emulate_clicks`, `from_geo_json`, `risky_eval` |
 
@@ -325,8 +329,9 @@ To preview a release package without releasing, run the Release workflow by hand
   `127.0.0.1`/`localhost` Host. Other programs running on your own machine can still connect.
 - `export_model` / `export_animations` can write files to the path you give (Blockbench asks for file
   system permission). `export_bundle` writes from the server process, so Blockbench does not ask: it
-  writes only `.geo.json`, `.animation.json` and `.png` files inside the `assets/<mod_id>` folder it
-  resolved from `mod_dir`, and never replaces a file whose content differs unless `overwrite: true`.
+  writes only model, animation and `.png` files (for Java, also a missing blockstate / item definition)
+  inside the `assets/<mod_id>` folder it resolved from `mod_dir`, and never replaces a file whose content
+  differs unless `overwrite: true`.
   `import_bundle` only reads the mod's files; the texture is embedded in the new project, not linked.
 - GeckoLib renders cubes only — mesh elements are dropped on export (`validate_model` warns about it).
 - Always save your work before large AI-driven edits; most tool edits are undoable, but a crash is not.

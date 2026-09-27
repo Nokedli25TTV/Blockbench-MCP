@@ -37,6 +37,9 @@ try {
   h.mock.handlers.validate_uv = () => ({ ok: true, valid: false, overlaps: 2, out_of_bounds: 1, null_uv: 0, zero_size_uv: 0 });
   r = await h.call("validate_model", { for_export: true });
   check("an invalid UV layout is an error (run pack_uv)", r.isError && /\(uv\) UV layout is not valid — overlaps 2, out of bounds 1/.test(r.text), one(r.text));
+  h.mock.handlers.validate_uv = () => ({ ok: true, valid: false, overlaps: 3, out_of_bounds: 0, null_uv: 0, zero_size_uv: 0, uv_mode: "per_face" });
+  r = await h.call("validate_model", { for_export: true });
+  check("per-face UV sharing an area: a warning, not an error", /\[warn \] \(uv\) The UV areas of 3 pair\(s\) of cubes overlap/.test(r.text) && !/\[ERROR\] \(uv\)/.test(r.text), one(r.text));
   h.mock.handlers.validate_uv = realUv;
 
   h.scene.format = { ...h.scene.format, meshes: false };

@@ -399,13 +399,23 @@ export function createMockScene() {
       return { ok: true, current_format_codec: "bedrock", count: 1, codecs: [{ id: "bedrock", name: "Bedrock", extension: "geo.json", has_compile: true, belongs_to_current_format: true }] };
     },
     export_model(input) {
-      const id = input.codec_id || "bedrock";
-      const content = JSON.stringify({ format_version: "1.12.0", "minecraft:geometry": [{ description: { identifier: "geometry.mock" } }] });
+      const id = input.codec_id || (scene.format?.id === "java_block" ? "java_block" : "bedrock");
+      let content = JSON.stringify({ format_version: "1.12.0", "minecraft:geometry": [{ description: { identifier: "geometry.mock" } }] });
+      if (id === "java_block") {
+        // As Blockbench's Java codec: the used textures by id, named as the project names them; faces as #id.
+        const cubes = []; const walk = (ns) => ns.forEach((n) => (n.type === "cube" ? cubes.push(n) : walk(n.children || [])));
+        walk(scene.roots);
+        const used = new Set(cubes.flatMap((c) => Object.values(c.faces || {}).map((f) => f && f.texture).filter(Boolean)));
+        const textures = Object.fromEntries(scene.textures.filter((t) => used.has(t.uuid)).map((t) => [t.id, t.name.replace(/\.png$/, "")]));
+        const idOf = (uuid) => scene.textures.find((t) => t.uuid === uuid)?.id;
+        const elements = cubes.map((c) => ({ name: c.name, from: c.from, to: c.to, faces: Object.fromEntries(Object.entries(c.faces || {}).map(([k, f]) => [k, { uv: [0, 0, 1, 1], ...(f && f.texture ? { texture: "#" + idOf(f.texture) } : {}) }])) }));
+        content = JSON.stringify({ format_version: scene.format.java_block_version || "1.9.0", credit: "Made with Blockbench", textures, elements }, null, "\t");
+      }
       return { ok: true, codec: { id, name: id, extension: "geo.json" }, file_name: "mock.geo.json", byte_length: content.length, encoding: "utf-8", wrote_to_path: input.path || null, truncated: false, content: input.max_content_length === 0 ? null : content };
     },
     get_project_info() {
       const r = rules();
-      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null, imported_from: scene.imported_from || null }, format: { id: scene.format?.id || "bedrock", animation_mode: true }, rules: { summary: r.summary, coordinate_limits: r.coordinateLimits }, counts: { animations: scene.animations?.length || 0 } } };
+      return { ok: true, info: { project: { name: "mock", uuid: "u", model_identifier: scene.model_identifier || null, imported_from: scene.imported_from || null }, format: { id: scene.format?.id || "bedrock", animation_mode: scene.format?.id !== "java_block", ...(scene.format?.java_block_version ? { java_block_version: scene.format.java_block_version } : {}) }, rules: { summary: r.summary, coordinate_limits: r.coordinateLimits }, counts: { animations: scene.animations?.length || 0 } } };
     },
     set_project(input) {
       const changed = [];

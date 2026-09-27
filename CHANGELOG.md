@@ -60,10 +60,22 @@ section into the new version (see README → Releasing).
   one with the most parts is the model, and each other piece is named with the model's nearest part and
   the gap — a tail placed 2 units behind the back showed up nowhere before. A warning only: a halo or an
   orb may float on purpose. The grouping is `looseParts` in `packages/shared/src/measure.ts`.
+- `export_bundle` for Java block/item projects: `kind: "item"` or `"block"` writes `models/<kind>/<name>.json`
+  and its textures under `textures/<kind>/` — one texture as `<name>.png`, several as `<name>_<texture>.png`.
+  Blockbench writes its own texture names into a Java model (`"0": "steel"`), which Minecraft reads as
+  `minecraft:steel`; each is pointed at `<mod_id>:<kind>/<file>` instead, and a particle texture is added
+  when there is none. A reference that already is a resource location (`block/stone`) is kept and its
+  image not shipped. `extras: true` creates what the model needs where it is missing — a block's
+  blockstate and item model, or `items/<name>.json` from Minecraft 1.21.4 — never changing an existing
+  one (a mod that makes them with datagen has its own). It says when the project's rotation rules are for
+  another Minecraft version than the mod's. The export check, the overwrite gate and `dry_run` as before.
 - `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
   Bedrock's `hold_on_last_frame`); `true` / `false` still work.
 
 ### Changed
+- The export check (`validate_model for_export`) counts overlapping UV areas as an error only for box
+  UV. With per-face UV (every Java model) faces may share an area on purpose — and cubes on different
+  textures don't clash at all — so it is a warning there; UV outside the texture is still an error.
 - The `geckolib` profile loads 77 tools (was 76), `full` 127 (was 126).
 
 ## [0.6.0] - 2026-09-27

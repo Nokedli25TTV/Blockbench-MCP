@@ -20,6 +20,7 @@ import { findRig, planWalk, planIdle, rigFrame, planAttack, planHurt, planDeath 
 import { TEMPLATES, templateParts } from "../../../packages/shared/src/templates";
 import { BUNDLE_KINDS, BUNDLE_PARTS, DEFAULTED_MODEL, geckolibFor, bundlePaths, bundleName, resourceNameError, pickTexture } from "../../../packages/shared/src/modAssets";
 import type { BundleKind, BundlePart } from "../../../packages/shared/src/modAssets";
+import { javaBlockVersionFor, versionParts, versionBefore } from "../../../packages/shared/src/formatRules";
 import { loadSkills, buildInstructions, getSkillContent } from "./skills";
 
 // The Blockbench plugin connects to 9999 by default; tests override this with
@@ -990,7 +991,13 @@ async function exportPreflight(tree: SceneTree, known: { info?: any; animations?
   if (cubes.length) {
     const uv = await ask("validate_uv", {});
     if (uv && uv.valid === false) {
-      findings.push({ severity: "error", rule: "uv", message: `UV layout is not valid — overlaps ${uv.overlaps}, out of bounds ${uv.out_of_bounds}, missing ${uv.null_uv}, zero-size ${uv.zero_size_uv}. Run pack_uv, then validate_uv.` });
+      // Per-face UV may share an area on purpose, and cubes on different textures don't clash at all:
+      // overlaps are an error only for box UV. UV outside the texture always is one.
+      if (uv.uv_mode && uv.uv_mode !== "box_uv" && !uv.out_of_bounds) {
+        findings.push({ severity: "warning", rule: "uv", message: `The UV areas of ${uv.overlaps} pair(s) of cubes overlap — fine where faces share texture on purpose or use different textures; else pack_uv.` });
+      } else {
+        findings.push({ severity: "error", rule: "uv", message: `UV layout is not valid — overlaps ${uv.overlaps}, out of bounds ${uv.out_of_bounds}, missing ${uv.null_uv}, zero-size ${uv.zero_size_uv}. Run pack_uv, then validate_uv.` });
+      }
     }
   }
   // Every animation.
@@ -1005,7 +1012,7 @@ async function exportPreflight(tree: SceneTree, known: { info?: any; animations?
 
 const nextExportStep = (formatId: string | undefined, animations: number): string =>
   formatId === "java_block"
-    ? "Next: export_model (codec java_block)."
+    ? 'Next: export_bundle kind: "item" or "block" — the model and its textures into the mod\'s folders (export_model for a loose file).'
     : BUNDLE_FORMATS.has(formatId || "")
       ? `Next: export_bundle — the model${animations ? ", its animations" : ""} and texture into the mod's folders in one call (export_model${animations ? " + export_animations" : ""} for loose files).`
       : `Next: export_model (the format's codec)${animations ? " and export_animations" : ""}.`;
@@ -1842,6 +1849,162 @@ function resolveModAssets(modDir: string, modId?: string): { dir: string; modId:
   return { error: `mod_id is required: "${assets}" holds ${mods.length ? `several mods' assets (${mods.join(", ")})` : "no mod folder yet"}.` };
 }
 
+// Every file to a temp file first, then all moved into place: a write that fails (disk full, no
+// permission) replaces nothing, and a failed move says how many were already moved.
+function writeFilesSafely(files: { file: string; data: Buffer }[]): { moved: number; error?: string } {
+  const temps: Array<[string, string]> = [];
+  let moved = 0;
+  try {
+    for (const f of files) {
+      mkdirSync(path.dirname(f.file), { recursive: true });
+      const tmp = `${f.file}.${process.pid}.tmp`;
+      writeFileSync(tmp, f.data);
+      temps.push([tmp, f.file]);
+    }
+    for (const [tmp, file] of temps) { renameSync(tmp, file); moved++; }
+    return { moved };
+  } catch (e: any) {
+    for (const [tmp] of temps.slice(moved)) { try { unlinkSync(tmp); } catch { /* already gone */ } }
+    return { moved, error: String(e?.message || e) };
+  }
+}
+
+// JSON as Blockbench writes models: tabs, and short arrays ([7, 4, 7.5]) on one line.
+const modelJson = (value: any): string =>
+  JSON.stringify(value, null, "\t").replace(/\[\s+([^[\]{}]*?)\s+\]/g, (_, inner: string) => `[${inner.split(/,\s*/).join(", ")}]`) + "\n";
+
+// A Java block/item model into a mod: models/<kind>/<name>.json and its textures under
+// textures/<kind>/. Blockbench writes its own texture names into the model ("steel"), which
+// Minecraft reads as minecraft:steel — so each is pointed at <mod_id>:<kind>/<file> and the image
+// shipped there; a reference that already is a resource location (block/stone, minecraft:…) is
+// kept and its image not shipped. extras: the blockstate / item files the model needs, created
+// only where missing — a mod that makes them with datagen has its own.
+async function exportJavaBundle(args: any, info: any, ask: (tool: ToolType, input: Record<string, any>) => Promise<any>, refuse: (why: string) => any) {
+  if (args.to_source || args.paths) return refuse("to_source and paths are for GeckoLib models — a Java model goes to mod_dir, under its name.");
+  const kind = args.kind;
+  if (kind !== "item" && kind !== "block") return refuse('a Java model is an item or a block — pass kind: "item" or "block".');
+  const name: string | undefined = args.name ?? info.project?.name;
+  if (!name) return refuse("a name is required — pass name (the item's or block's registry name).");
+  const badName = resourceNameError(name, "name");
+  if (badName) return refuse(`${badName} Pass name: the registry name.`);
+  const mcVersion = args.minecraft_version ?? DEFAULT_MC_VERSION;
+  const mc = versionParts(mcVersion);
+  if (!mc) return refuse(`minecraft_version must be a version like 1.20.1 or 26.1 (got "${mcVersion}").`);
+  if (!args.mod_dir) return refuse("give mod_dir: the mod project, its src/main/resources or its assets/<mod_id>.");
+  const target = resolveModAssets(args.mod_dir, args.mod_id);
+  if ("error" in target) return refuse(target.error);
+  const itemsFiles = !versionBefore(mc, [1, 21, 4]); // 1.21.4 reads items/<name>.json to find an item's model
+  const notes: string[] = [];
+  const rules = javaBlockVersionFor(mcVersion);
+  if (rules && info.format?.java_block_version && info.format.java_block_version !== rules) {
+    notes.push(`The project follows ${info.format.minecraft ?? `Java block version ${info.format.java_block_version}`}, the mod is Minecraft ${mcVersion} — its rotations may not load there: set_project minecraft_version "${mcVersion}" and check again.`);
+  }
+
+  // Compile, then point every texture at the mod.
+  const m = await ask("export_model", { max_content_length: Number.MAX_SAFE_INTEGER });
+  let model: any = null;
+  try { model = m.encoding === "utf-8" && !m.truncated ? JSON.parse(m.content) : null; } catch { /* checked below */ }
+  if (!model || !Array.isArray(model.elements)) return refuse(`the ${m.codec?.id ?? "format's"} codec did not produce a Java model (no "elements") — nothing was written.`);
+  const textures: any[] = (await ask("list_textures", {})).textures || [];
+  const refs: Record<string, string> = Object.fromEntries(Object.entries(model.textures || {}).map(([k, v]) => [k, String(v)]));
+  const isLocation = (link: string) => /[:/]/.test(link);
+  const slug = (s: string) => s.replace(/\.png$/i, "").toLowerCase().replace(/[^a-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "texture";
+  const own = Object.entries(refs)
+    .filter(([key, link]) => key !== "particle" && !isLocation(link))
+    .map(([key, link]) => ({ key, link, texture: textures.find((t) => String(t.id) === key) }))
+    .filter((s) => s.texture);
+  const files: { key: string; link: string; base: string; uuid: string }[] = [];
+  for (const s of own) {
+    let base = own.length === 1 ? name : `${name}_${slug(s.texture.name)}`;
+    for (let k = 2; files.some((f) => f.base === base); k++) base = `${name}_${slug(s.texture.name)}_${k}`;
+    files.push({ key: s.key, link: s.link, base, uuid: s.texture.uuid });
+  }
+  const linkOf = (base: string) => `${target.modId}:${kind}/${base}`;
+  const pointed: Record<string, string> = {};
+  for (const [key, link] of Object.entries(refs)) {
+    if (key === "particle") continue;
+    const f = files.find((x) => x.key === key);
+    pointed[key] = f ? linkOf(f.base) : link;
+  }
+  // The particle texture (breaking a block, dropping an item): where it pointed, else the first.
+  const particle = refs.particle;
+  const particleFile = particle !== undefined ? files.find((f) => f.link === particle) : undefined;
+  if (particleFile) pointed.particle = linkOf(particleFile.base);
+  else if (particle !== undefined && isLocation(particle)) pointed.particle = particle;
+  else if (files[0]) pointed.particle = linkOf(files[0].base);
+  else if (particle !== undefined) pointed.particle = particle;
+  model.textures = pointed;
+  const kept = [...new Set(Object.entries(refs).filter(([k, l]) => k !== "particle" && isLocation(l)).map(([, l]) => l))];
+  if (kept.length) notes.push(`Kept as they are — already resource locations, their images not shipped: ${kept.join(", ")}.`);
+  if (!files.length && !kept.length) notes.push("The project has no texture — the model references none.");
+
+  const pre = await exportPreflight((await ask("get_scene_tree", {})).tree as SceneTree, { info, animations: [] });
+  type Planned = { rel: string; file: string; data: Buffer; status: "new" | "unchanged" | "changed" | "kept" };
+  const planned: Planned[] = [];
+  const plan = (rel: string, data: Buffer, onlyIfMissing = false) => {
+    const file = path.join(target.dir, ...rel.split("/"));
+    let old: Buffer | null = null;
+    try { old = readFileSync(file); } catch { /* not there yet */ }
+    planned.push({ rel, file, data, status: !old ? "new" : onlyIfMissing ? "kept" : old.equals(data) ? "unchanged" : "changed" });
+  };
+  plan(`models/${kind}/${name}.json`, Buffer.from(modelJson(model), "utf8"));
+  const prefix = "data:image/png;base64,";
+  for (const f of files) {
+    const t = await ask("get_texture", { texture: f.uuid });
+    if (typeof t.data_url !== "string" || !t.data_url.startsWith(prefix)) return refuse(`texture "${t.name ?? f.uuid}" did not come back as a PNG — nothing was written.`);
+    plan(`textures/${kind}/${f.base}.png`, Buffer.from(t.data_url.slice(prefix.length), "base64"));
+  }
+  const ref = `${target.modId}:${kind}/${name}`;
+  const needs = [
+    ...(kind === "block" ? [{ rel: `blockstates/${name}.json`, json: { variants: { "": { model: ref } } } }] : []),
+    ...(kind === "block" && !itemsFiles ? [{ rel: `models/item/${name}.json`, json: { parent: ref } }] : []),
+    ...(itemsFiles ? [{ rel: `items/${name}.json`, json: { model: { type: "minecraft:model", model: ref } } }] : []),
+  ];
+  if (args.extras) for (const n of needs) plan(n.rel, Buffer.from(modelJson(n.json), "utf8"), true);
+
+  const changed = planned.filter((p) => p.status === "changed");
+  const size = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+  const report = [preflightVerdict(pre), ...pre.findings.map(findingLine)].join("\n");
+  const noteLines = notes.map((n) => `\n⚠️  ${n}`).join("");
+  const title = `"${name}" as a Java ${kind} model for Minecraft ${mcVersion} into ${target.dir}`;
+  const exists = (rel: string) => { try { return statSync(path.join(target.dir, ...rel.split("/"))).isFile(); } catch { return false; } };
+  const missing = args.extras ? [] : needs.filter((n) => !exists(n.rel));
+  const id = `${target.modId}:${name}`;
+  const hint = (kind === "item"
+      ? (itemsFiles ? `The item "${id}" finds its model through items/${name}.json.` : `The item "${id}" uses models/item/${name}.json by its registry name.`)
+      : `The block "${id}" finds this model through blockstates/${name}.json; its item through ${itemsFiles ? `items/${name}.json` : `models/item/${name}.json (parent ${ref})`}.`) +
+    (missing.length ? ` Missing: ${missing.map((n) => n.rel).join(", ")} — extras: true creates ${missing.length > 1 ? "them" : "it"} (not if the mod makes ${missing.length > 1 ? "them" : "it"} with datagen).` : "");
+  if (args.dry_run) {
+    const blockers = [
+      pre.errors && !args.force ? "the export check's errors" : null,
+      changed.length && !args.overwrite ? `${changed.length} existing file(s) that would change (overwrite: true replaces them)` : null,
+    ].filter(Boolean);
+    const state = (p: Planned) => (p.status === "changed" ? (args.overwrite ? "replaces the existing file" : "EXISTS and differs") : p.status === "kept" ? "kept — already there" : p.status);
+    return ok(
+      `Plan (nothing written): ${title}${target.create ? " (to be created)" : ""}:\n` +
+        planned.map((p) => `  ${p.rel}  — ${state(p)}, ${size(p.data.length)}`).join("\n") +
+        `\n${report}${noteLines}\n${hint}\n` +
+        (blockers.length ? `The real call would write nothing: ${blockers.join("; ")}.` : "The real call would write these files.")
+    );
+  }
+  if (pre.errors && !args.force) {
+    const alsoChanged = changed.length && !args.overwrite ? ` Then ${changed.length} existing file(s) would change: overwrite: true replaces them.` : "";
+    return { isError: true, content: [{ type: "text" as const, text: `${report}\nNothing was written. Fix the errors first, or pass force: true if the user accepts them.${alsoChanged}` }] };
+  }
+  if (changed.length && !args.overwrite) {
+    return refuse(`nothing was written — each of these already exists with different content:\n${changed.map((p) => `  ${p.file}`).join("\n")}\nAsk the user, then pass overwrite: true to replace them (or choose another name).`);
+  }
+  const toWrite = planned.filter((p) => p.status === "new" || p.status === "changed");
+  const written = writeFilesSafely(toWrite);
+  if (written.error) return refuse(`writing into "${target.dir}" failed: ${written.error}${written.moved ? ` — already written: ${toWrite.slice(0, written.moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
+  const forced = pre.errors ? `\n⚠️  Written although the export check found ${pre.errors} error(s) (force).` : "";
+  return ok(
+    `Exported ${title}${target.create ? " (created)" : ""}:\n` +
+      planned.map((p) => `  ${p.rel}  (${size(p.data.length)}, ${p.status === "changed" ? "replaced" : p.status === "kept" ? "kept — already there" : p.status})`).join("\n") +
+      `\n${report}${forced}${noteLines}\n${hint}`
+  );
+}
+
 // A GeckoLib model into a mod in ONE call. The plugin compiles, with the calls export_model /
 // export_animations / get_texture make; the server writes the files where GeckoLib's defaulted
 // models look (packages/shared/src/modAssets.ts) — so Blockbench asks for no file permission, and
@@ -1859,12 +2022,14 @@ server.registerTool(
       "model opened with import_bundle back to the files it came from. Runs the export check first (as " +
       "validate_model for_export) and writes NOTHING when it finds an error, or when a file already there would " +
       "change — ask the user, then pass overwrite: true. Identical files count as unchanged. dry_run shows the " +
-      "plan. GeckoLib and Bedrock projects.",
+      "plan. GeckoLib and Bedrock projects — and Java block/item ones (kind: item or block): models/<kind>/<name>.json " +
+      "and its textures under textures/<kind>/, the texture references pointed at <mod_id>:<kind>/<file>; extras " +
+      "creates a missing blockstate / item definition.",
     inputSchema: {
       mod_dir: z.string().optional().describe("Absolute path: the mod project, its src/main/resources, or its assets/<mod_id> folder (not needed with to_source, or with absolute paths)."),
       mod_id: z.string().optional().describe("The mod's namespace. Default: from mod_dir, or the only mod folder in its assets."),
       name: z.string().optional().describe("File name without extension; may include folders ('boss/goblin'). Default: the geometry identifier."),
-      kind: z.enum(BUNDLE_KINDS).optional().describe("GeckoLib's sub-folder: entity (default), item or block."),
+      kind: z.enum(BUNDLE_KINDS).optional().describe("GeckoLib: the sub-folder — entity (default), item or block. Java: item or block (required)."),
       minecraft_version: z.string().optional().describe(`The mod's Minecraft version; decides GeckoLib 4 or 5 folders (default ${DEFAULT_MC_VERSION}).`),
       geckolib: z.enum(["4", "5"]).optional().describe("Use GeckoLib 4 or 5 folders whatever the Minecraft version."),
       texture: z.string().optional().describe("Which texture, when the project has several (default: the one on the most faces)."),
@@ -1874,6 +2039,7 @@ server.registerTool(
         .optional()
         .describe("Where a part goes instead of GeckoLib's default place: relative to assets/<mod_id> (e.g. 'geo/goblin.geo.json') or absolute inside an assets/<mod_id> folder."),
       to_source: z.boolean().optional().describe("Write back to the files import_bundle opened (a part it did not come with goes to GeckoLib's default place beside them)."),
+      extras: z.boolean().optional().describe("Java: also create what the model needs where it is missing — a block's blockstate (and its item model before 1.21.4), items/<name>.json from 1.21.4. Never changes existing ones; not for a mod that makes them with datagen."),
       overwrite: z.boolean().optional().describe("Replace existing files that differ (default false: write nothing and list them)."),
       force: z.boolean().optional().describe("Write although the export check found errors — only when the user accepts them."),
       dry_run: z.boolean().optional().describe("Only show what would be written."),
@@ -1890,6 +2056,7 @@ server.registerTool(
       // The project, the file names and the folder — before anything is compiled.
       const info = (await ask("get_project_info", {})).info || {};
       const formatId = info.format?.id;
+      if (formatId === "java_block") return await exportJavaBundle(args, info, ask, refuse);
       if (!BUNDLE_FORMATS.has(formatId)) return refuse(`the "${formatId}" format is unsupported — it writes GeckoLib models (a GeckoLib or Bedrock project); use export_model.`);
       // to_source: the files import_bundle opened this project from, as it recorded them.
       const source: any = args.to_source ? info.project?.imported_from : null;
@@ -2018,23 +2185,9 @@ server.registerTool(
         return refuse(`nothing was written — each of these already exists with different content:\n${changed.map((p) => `  ${p.file}`).join("\n")}\nAsk the user, then pass overwrite: true to replace them (or choose another name).`);
       }
 
-      // Every file to a temp file first, then all moved into place: a write that fails (disk full,
-      // no permission) replaces nothing, and a failed move names what was already moved.
       const toWrite = planned.filter((p) => p.status !== "unchanged");
-      const temps: Array<[string, string]> = [];
-      let moved = 0;
-      try {
-        for (const p of toWrite) {
-          mkdirSync(path.dirname(p.file), { recursive: true });
-          const tmp = `${p.file}.${process.pid}.tmp`;
-          writeFileSync(tmp, p.data);
-          temps.push([tmp, p.file]);
-        }
-        for (const [tmp, file] of temps) { renameSync(tmp, file); moved++; }
-      } catch (e: any) {
-        for (const [tmp] of temps.slice(moved)) { try { unlinkSync(tmp); } catch { /* already gone */ } }
-        return refuse(`writing into "${target ? target.dir : "the paths given"}" failed: ${e?.message || e}${moved ? ` — already written: ${toWrite.slice(0, moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
-      }
+      const written = writeFilesSafely(toWrite);
+      if (written.error) return refuse(`writing into "${target ? target.dir : "the paths given"}" failed: ${written.error}${written.moved ? ` — already written: ${toWrite.slice(0, written.moved).map((p) => p.rel).join(", ")}` : " — nothing was written"}.`);
       const forced = pre.errors ? `\n⚠️  Written although the export check found ${pre.errors} error(s) (force).` : "";
       const finder = planned.every((p) => atDefault(p.part)) && target && name
         ? `In the mod, ${DEFAULTED_MODEL[kind]} finds these files from "${target.modId}:${name}".`
