@@ -113,9 +113,10 @@ export function createMockScene() {
       const missing = Object.keys(input.bones || {}).filter((b) => !findGroup(b));
       if (missing.length) return { ok: false, error: `Bone(s) not found: ${missing.join(", ")}` };
       if (findAnim(input.name)) return { ok: false, error: `Animation "${input.name}" already exists` };
-      const a = { uuid: randomUUID(), name: animName(input.name) };
+      const loop = input.loop === "hold" ? "hold" : input.loop === true || input.loop === "loop" ? "loop" : "once"; // as Blockbench imports it
+      const a = { uuid: randomUUID(), name: animName(input.name), loop };
       animations.push(a);
-      return { ok: true, name: a.name, uuid: a.uuid, selected: true, bones: Object.keys(input.bones || {}).length };
+      return { ok: true, name: a.name, uuid: a.uuid, selected: true, bones: Object.keys(input.bones || {}).length, loop };
     },
     list_animations() { return { ok: true, animations: animations.map((a) => ({ uuid: a.uuid, name: a.name })) }; },
     manage_animation(input) {

@@ -16,7 +16,7 @@ import { boxRelation, relationText, boxSize } from "../../../packages/shared/src
 import { VIEWS } from "../../../packages/shared/src/views";
 import { outlineText } from "../../../packages/shared/src/outline";
 import { planSpec, sceneBoxes } from "../../../packages/shared/src/spec";
-import { findRig, planWalk, planIdle } from "../../../packages/shared/src/gaits";
+import { findRig, planWalk, planIdle, rigFrame, planAttack, planHurt, planDeath } from "../../../packages/shared/src/gaits";
 import { TEMPLATES, templateParts } from "../../../packages/shared/src/templates";
 import { BUNDLE_KINDS, BUNDLE_PARTS, DEFAULTED_MODEL, geckolibFor, bundlePaths, bundleName, resourceNameError, pickTexture } from "../../../packages/shared/src/modAssets";
 import type { BundleKind, BundlePart } from "../../../packages/shared/src/modAssets";
@@ -1106,7 +1106,7 @@ server.registerTool(
       "Rotations ADD to each bone's rest rotation.",
     inputSchema: {
       name: z.string().describe("Animation name (without the 'animation.' prefix). Must be unique."),
-      loop: z.boolean().optional().describe("Whether the animation loops. Default false."),
+      loop: z.union([z.boolean(), z.enum(["loop", "once", "hold"])]).optional().describe("loop (or true): repeats; once (or false, the default): plays once; hold: plays once and stays on its last frame (a death)."),
       animation_length: z.number().optional().describe("Length in seconds."),
       bones: z
         .record(
@@ -1138,7 +1138,8 @@ server.registerTool(
       "create_animation",
       args,
       (r) =>
-        `Created animation "${r.name}" (uuid ${r.uuid}) animating ${r.bones} bone(s). ` +
+        `Created animation "${r.name}" (uuid ${r.uuid}) animating ${r.bones} bone(s)` +
+        (r.loop ? `, ${r.loop === "hold" ? "holds its last frame" : r.loop === "loop" ? "loops" : "plays once"}. ` : ". ") +
         (r.selected
           ? "It is now selected and ready for animation_timeline play."
           : "WARNING: it could not be auto-selected — pass animation_id to animation_timeline.")
@@ -1419,22 +1420,27 @@ server.registerTool(
   {
     title: "Generate Animation",
     description:
-      "Create a looping walk or idle animation for the rig in ONE call. The bones are found by name — " +
-      "legs and arms (left = −X), body / torso / chest (else the root bone), head — or given explicitly. " +
-      "walk: legs swing in opposite phase (4 legs trot: diagonal pairs together), arms swing against the " +
-      "legs, the body bobs (highest as the legs pass) and leans over the stance leg, the head stays level. " +
-      "idle: slow breathing, a slight arm drift and a small head nod. The last keyframe repeats the first, " +
-      "so the loop has no seam. Legs and arms swing about their pivots: set them at the hips / shoulders " +
-      "first (set_origin anchor \"top\"); the reply warns when they aren't. Values are what Blockbench " +
-      "shows. The new animation is checked with check_animation.",
+      "Create a walk, idle, attack, hurt or death animation for the rig in ONE call. The bones are found by " +
+      "name — legs and arms (left = −X), body / torso / chest (else the root bone), head — or given explicitly. " +
+      "walk (loops): legs swing in opposite phase (4 legs trot: diagonal pairs together), arms against the " +
+      "legs, the body bobs and leans over the stance leg, the head stays level. idle (loops): slow breathing, " +
+      "a slight arm drift, a small nod. attack (plays once): an arm — the right one, or `limb` — is raised " +
+      "overhead and chops down to the front as the body twists into it; with no arms (or limb = the head) the " +
+      "head bites while the body lunges. hurt (plays once): the body and head jolt back, the arms fly out. " +
+      "death (plays once, holds its last frame): a stagger, then the whole model tips over to its left and " +
+      "lies on the ground. Loops end where they begin (no seam). Legs and arms swing about their pivots: set " +
+      "them at the hips / shoulders first (set_origin anchor \"top\"); the reply warns when they aren't. " +
+      "Values are what Blockbench shows. The new animation is checked with check_animation (death also " +
+      "against the floor).",
     inputSchema: {
-      kind: z.enum(["walk", "idle"]).describe("walk or idle."),
+      kind: z.enum(["walk", "idle", "attack", "hurt", "death"]).describe("walk / idle loop; attack / hurt play once; death plays once and holds its last frame."),
       name: z.string().optional().describe("Animation name (default: the kind)."),
-      length: z.number().min(0.1).max(30).optional().describe("Seconds per loop (walk 1, idle 3)."),
+      length: z.number().min(0.1).max(30).optional().describe("Seconds (walk 1, idle 3, attack 0.6, hurt 0.3, death 1)."),
       legs: z.array(z.string()).min(2).max(4).optional().describe("Leg bones: [left, right], or [front-left, front-right, back-left, back-right]. Default: found by name."),
       arms: z.array(z.string()).length(2).optional().describe("Arm bones [left, right]. Default: found by name."),
-      body: z.string().optional().describe("Body bone for the bob / breathing. Default: body / torso / chest, else the root bone."),
+      body: z.string().optional().describe("Body bone for the bob / breathing / twist. Default: body / torso / chest, else the root bone."),
       head: z.string().optional().describe("Head bone. Default: found by name."),
+      limb: z.string().optional().describe("attack: the bone that strikes — an arm swings a chop (default the right arm), the head bites (default when there are no arms)."),
       stride: z.number().min(0).max(90).optional().describe("walk: leg swing each way in degrees (default 30)."),
       arm_swing: z.number().min(0).max(90).optional().describe("walk: arm swing each way in degrees (default 25)."),
       bob: z.number().min(0).max(8).optional().describe("Body rise in units (walk 0.5, idle breathing 0.3)."),
@@ -1452,41 +1458,65 @@ server.registerTool(
       return fail(e?.message || String(e));
     }
     const rig = findRig(tree || { roots: [] }, { legs: args.legs, arms: args.arms, body: args.body, head: args.head });
-    if (args.kind === "walk" && !rig.legs.length) {
-      return fail('generate_animation failed: no legs found — name the leg bones with "leg" (e.g. leg_left / leg_right) or pass legs: [left, right].');
+    const frame = rigFrame(tree || { roots: [] });
+    if (args.limb !== undefined && frame.x[args.limb] === undefined) return fail(`generate_animation failed: limb "${args.limb}" is not a bone of this model.`);
+    const kind = args.kind;
+    const length = args.length ?? { walk: 1, idle: 3, attack: 0.6, hurt: 0.3, death: 1 }[kind];
+    const mode = ({ walk: "loop", idle: "loop", attack: "once", hurt: "once", death: "hold" } as const)[kind];
+    let bones: Record<string, any[]>;
+    let planNotes: string[] = [];
+    if (kind === "walk" || kind === "idle") {
+      if (kind === "walk" && !rig.legs.length) {
+        return fail('generate_animation failed: no legs found — name the leg bones with "leg" (e.g. leg_left / leg_right) or pass legs: [left, right].');
+      }
+      const opts = { length: args.length, stride: args.stride, arm_swing: args.arm_swing, bob: args.bob, sway: args.sway };
+      bones = kind === "walk" ? planWalk(rig, opts) : planIdle(rig, opts);
+    } else {
+      const plan = kind === "attack" ? planAttack(rig, frame, { length: args.length, limb: args.limb })
+        : kind === "hurt" ? planHurt(rig, { length: args.length })
+        : planDeath(rig, frame, { length: args.length });
+      if ("error" in plan) return fail(`generate_animation failed: ${plan.error}`);
+      bones = plan.bones;
+      planNotes = plan.notes;
     }
-    const opts = { length: args.length, stride: args.stride, arm_swing: args.arm_swing, bob: args.bob, sway: args.sway };
-    const bones = args.kind === "walk" ? planWalk(rig, opts) : planIdle(rig, opts);
     if (!Object.keys(bones).length) return fail("generate_animation failed: no bones to animate — pass body / arms / head.");
-    const length = args.length ?? (args.kind === "walk" ? 1 : 3);
-    const name = args.name || args.kind;
-    // Name only the bones this animation moves (idle leaves the legs alone).
+    const name = args.name || kind;
+    const timing = mode === "loop" ? `${length}s loop` : mode === "once" ? `${length}s, plays once` : `${length}s, holds its last frame`;
+    // Name the bones this animation moves: the rig's by role, then any other (a fall moves every root bone).
     const moved = (names: string[]) => names.filter((n) => bones[n]);
+    const roles = new Set([...rig.legs, ...rig.arms, rig.body, rig.head].filter(Boolean) as string[]);
+    const others = Object.keys(bones).filter((n) => !roles.has(n));
     const used = [
       moved(rig.legs).length ? `legs ${moved(rig.legs).join(" / ")}` : null,
       moved(rig.arms).length ? `arms ${moved(rig.arms).join(" / ")}` : null,
       rig.body && bones[rig.body] ? `body ${rig.body}` : null,
       rig.head && rig.head !== rig.body && bones[rig.head] ? `head ${rig.head}` : null,
+      others.length ? `also ${others.join(" / ")}` : null,
     ].filter(Boolean).join(", ");
-    const notes = rig.warnings.map((w) => `\n⚠️  ${w}`).join("");
+    const notes = [...rig.warnings, ...planNotes].map((w) => `\n⚠️  ${w}`).join("");
     if (args.dry_run) {
       const keys = Object.values(bones).reduce((n, k) => n + k.length, 0);
-      return ok(`Plan (nothing created): ${args.kind} "${name}", ${length}s loop, ${Object.keys(bones).length} bone(s), ${keys} keyframe(s) — ${used}.${notes}`);
+      return ok(`Plan (nothing created): ${kind} "${name}", ${timing}, ${Object.keys(bones).length} bone(s), ${keys} keyframe(s) — ${used}.${notes}`);
     }
     let created: any;
     try {
-      created = await sendToBlockbench("create_animation", { name, animation_length: length, loop: true, bones });
+      created = await sendToBlockbench("create_animation", { name, animation_length: length, loop: mode, bones });
     } catch (e: any) {
       return fail(e?.message || String(e));
     }
     if (created && created.ok === false) return fail(`generate_animation failed: ${created.error}`);
+    const animationName = created?.name || name;
     let lint = "";
     try {
-      const c: any = await sendToBlockbench("check_animation", { animation_id: created?.name || name });
+      const floor = kind === "death" && frame.box ? { floor_y: frame.box.min[1] } : {};
+      const c: any = await sendToBlockbench("check_animation", { animation_id: animationName, ...floor });
       const issues: any[] = c?.issues || [];
       lint = issues.length ? `\ncheck_animation: ${issues.length} issue(s) — ${issues.slice(0, 4).map((i) => i.message).join(" · ")}` : "\ncheck_animation: no issues.";
     } catch { /* the lint is a bonus */ }
-    return ok(`Created ${created?.name || name} (${args.kind}, ${length}s loop, seamless) on ${used}.${notes}${lint}`);
+    const play = { loop: "thenLoop", once: "thenPlay", hold: "thenPlayAndHold" }[mode];
+    const gecko = `\nIn GeckoLib: RawAnimation.begin().${play}("${animationName}")` +
+      (kind === "death" ? " — and return 0 from the renderer's getDeathMaxRotation, or GeckoLib tips the model over a second time." : ".");
+    return ok(`Created ${animationName} (${kind}, ${timing}${mode === "loop" ? ", seamless" : ""}) on ${used}.${notes}${lint}${gecko}`);
   }
 );
 

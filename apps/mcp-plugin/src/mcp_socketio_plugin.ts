@@ -1104,8 +1104,9 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           return { ok: false, error: `Animation "${input.name}" already exists (rule #4: unique names).` };
         }
 
+        // A Bedrock file keeps the mode as loop: true (loop), "hold_on_last_frame" (hold) or false (once).
         const animationData: any = {
-          loop: !!input.loop,
+          loop: input.loop === 'hold' ? 'hold_on_last_frame' : input.loop === true || input.loop === 'loop',
           ...(input.animation_length ? { animation_length: input.animation_length } : {}),
           bones: Object.fromEntries(
             Object.entries(input.bones as Record<string, any[]>).map(([boneName, keyframes]) => {
@@ -1148,6 +1149,7 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
           uuid: created ? created.uuid : undefined,
           selected,
           bones: Object.keys(input.bones).length,
+          loop: created ? created.loop : undefined,
         };
       } catch (err: any) {
         console.error('[MCP Plugin] createAnimation failed:', err);

@@ -15,6 +15,24 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Added
+- `generate_animation` → `attack`, `hurt` and `death`, one-shots from the rig like the walk:
+  - `attack` (0.6 s, plays once): an arm — the right one, or `limb` — is raised overhead and chops down
+    to the front as the body winds up and twists into it, the other arm swinging back; with no arms,
+    or `limb` = the head, the head rears up and bites as the body lunges (four legs reach and push);
+  - `hurt` (0.3 s, plays once): the body and head jolt back, the arms fly out, a small rebound;
+  - `death` (1 s, holds its last frame): a stagger, then the whole model tips over to its left about its
+    left bottom edge — every root bone turns and shifts so it falls as one piece and lies on the ground —
+    the limbs on top lift and the head droops. It is checked against the floor, and a cube outside every
+    bone (which would stay standing) is named.
+
+  The reply gives the GeckoLib call (`thenLoop` / `thenPlay` / `thenPlayAndHold`); for a death, the
+  renderer's `getDeathMaxRotation` should return 0, or GeckoLib tips the model over a second time. The
+  directions were measured live: keyframe positions move along the world axes and rotations turn the
+  right-handed way about them.
+- `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
+  Bedrock's `hold_on_last_frame`); `true` / `false` still work.
+
 ## [0.6.0] - 2026-09-27
 
 ### Fixed

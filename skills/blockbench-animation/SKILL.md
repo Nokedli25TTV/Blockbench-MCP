@@ -56,7 +56,7 @@ Create animations for 3D models using Blockbench MCP tools.
 
 | Tool | Purpose |
 |------|---------|
-| `generate_animation` | **A walk or idle loop in one call** — bones found by name, legs opposite, arms against legs, body bob/lean, seamless loop, checked with check_animation |
+| `generate_animation` | **A walk / idle loop or an attack / hurt / death in one call** — bones found by name, legs opposite, arms against legs, body bob/lean, seamless loops, one-shots that play once (death holds its last frame), checked with check_animation |
 | `create_animation` | Create animation with keyframes for bones |
 | `set_keyframes` | **Batch**: many bones × channels × times in one call (upsert, echoes stored values) |
 | `manage_keyframes` | Create/edit/delete keyframes per bone and channel (echoes stored values) |
@@ -117,6 +117,19 @@ create_animation: name="walk", animation_length=1.0, loop=true, bones={
   ]
 }
 ```
+
+### Attack, hurt, death (one-shots)
+
+`generate_animation kind="attack"` — the right arm (or `limb`) is raised overhead and chops down to the
+front while the body twists into it; with no arms, or `limb` = the head, it bites while the body lunges.
+`kind="hurt"` — a short flinch back. `kind="death"` — a stagger, then the whole model tips over to its
+left and lies on the ground (every root bone turns and shifts together; checked against the floor).
+Attack and hurt play once, death plays once and holds its last frame — in GeckoLib
+`RawAnimation.begin().thenPlay("animation.attack")` / `.thenPlayAndHold("animation.death")`, and a death
+animation wants the renderer's `getDeathMaxRotation` to return 0 (else GeckoLib tips it over again).
+
+By hand, `create_animation` takes the same modes: `loop: "loop"` (or true), `"once"` (or false, the
+default), `"hold"` (plays once, stays on the last frame).
 
 ### Smooth Curves
 
