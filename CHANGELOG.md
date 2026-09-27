@@ -15,22 +15,20 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+### Fixed
+- `validate_model for_export` (and so `export_bundle`) warned that every face of a GeckoLib model had
+  no texture. GeckoLib and Bedrock entity models use one texture: their faces keep none of their own and
+  show the project's. `get_scene_tree` now reports the texture Blockbench draws on each face, so the
+  check — and `export_bundle`'s choice of texture — see it. Found by the live test.
+- `create_texture` from a file named the texture after the file ("noise.png"), so the next call with
+  the name it was given found nothing; and it reported the placeholder size (16×16) because the image
+  was still loading. It keeps the given name and waits for the image: the reply has its real size, or
+  a warning when it could not be loaded. Found by the live test.
+- A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
+  plugin's connection, and the call timed out. The bridge now takes replies up to 64 MB, like the
+  relay endpoint.
+
 ### Added
-- `create_from_spec` → `template`: start from a ready rig — `humanoid` (body, head, arms, legs; hips,
-  shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail), `sword`
-  (grip, guard, blade, pommel; pivot at the grip) or `chain` (`segments`, 2–16, default 4: pieces one
-  behind the other, each inside the one before and pivoting at its front — a tail, tentacle or snake;
-  `place_relative` on `segment_1`, with the torso cube as `ref`, puts it on a body) — sized by `scale` (1 = Minecraft proportions,
-  whole units), with `parts` added on top (e.g. horns attached to the head). The templates are part
-  lists (`packages/shared/src/templates.ts`), so `dry_run` shows them for tweaking.
-- `measure`: parts by number instead of from a screenshot. Each target's world box (min→max, size,
-  centre) and, for every pair, where the first is relative to the second in `place_relative`'s words
-  (on_top, below, left = −X, right, front = −Z, back, inside) and whether they are apart (the gap on
-  each axis, the distance), touching or OVERLAPPING (how deep, the shared box and its volume). Targets
-  are cubes or groups (a group's box holds everything inside it); none = the whole model. At rest it
-  uses the math `place_relative` uses; with `time` (and `animation_id`) it measures the animated pose
-  at that moment and puts the timeline back — does a leg pass through the body at 0.5 s? The relations
-  live in `packages/shared/src/measure.ts` (`test:measure`).
 - `export_bundle`: a GeckoLib model into a mod in ONE call — the geometry (`.geo.json`), the animations
   (`.animation.json`) and the texture (`.png`), each where GeckoLib's defaulted models
   (`DefaultedEntityGeoModel`, `…ItemGeoModel`, `…BlockGeoModel`) load it, under `assets/<mod_id>/`:
@@ -47,19 +45,22 @@ section into the new version (see README → Releasing).
   overrides — or when a file already there would change: identical files count as unchanged, and
   `overwrite: true` replaces the rest. `dry_run` shows the plan. The server writes the files (temp
   file, then moved into place), so Blockbench shows no file-permission prompt.
-
-### Fixed
-- `validate_model for_export` (and so `export_bundle`) warned that every face of a GeckoLib model had
-  no texture. GeckoLib and Bedrock entity models use one texture: their faces keep none of their own and
-  show the project's. `get_scene_tree` now reports the texture Blockbench draws on each face, so the
-  check — and `export_bundle`'s choice of texture — see it. Found by the live test.
-- `create_texture` from a file named the texture after the file ("noise.png"), so the next call with
-  the name it was given found nothing; and it reported the placeholder size (16×16) because the image
-  was still loading. It keeps the given name and waits for the image: the reply has its real size, or
-  a warning when it could not be loaded. Found by the live test.
-- A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
-  plugin's connection, and the call timed out. The bridge now takes replies up to 64 MB, like the
-  relay endpoint.
+- `create_from_spec` → `template`: start from a ready rig — `humanoid` (body, head, arms, legs; hips,
+  shoulders and neck as pivots), `quadruped` (body, head, four legs at the corners, tail), `sword`
+  (grip, guard, blade, pommel; pivot at the grip) or `chain` (`segments`, 2–16, default 4: pieces one
+  behind the other, each inside the one before and pivoting at its front — a tail, tentacle or snake;
+  `place_relative` on `segment_1`, with the torso cube as `ref`, puts it on a body) — sized by
+  `scale` (1 = Minecraft proportions, whole units), with `parts` added on top (e.g. horns attached to
+  the head). The templates are part lists (`packages/shared/src/templates.ts`), so `dry_run` shows
+  them for tweaking.
+- `measure`: parts by number instead of from a screenshot. Each target's world box (min→max, size,
+  centre) and, for every pair, where the first is relative to the second in `place_relative`'s words
+  (on_top, below, left = −X, right, front = −Z, back, inside) and whether they are apart (the gap on
+  each axis, the distance), touching or OVERLAPPING (how deep, the shared box and its volume). Targets
+  are cubes or groups (a group's box holds everything inside it); none = the whole model. At rest it
+  uses the math `place_relative` uses; with `time` (and `animation_id`) it measures the animated pose
+  at that moment and puts the timeline back — does a leg pass through the body at 0.5 s? The relations
+  live in `packages/shared/src/measure.ts` (`test:measure`).
 
 ### Changed
 - `place_relative` and the modeling skill: a group as `ref` counts with everything inside it (a
