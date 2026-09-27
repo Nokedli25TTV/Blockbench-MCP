@@ -2485,7 +2485,21 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
     };
 
     // Richer texture creation than register_texture: data URL, file path, fill color, or blank.
-    const createTexture = (input: any): any => {
+    // A texture from a file or data URL loads asynchronously; wait briefly so the reply carries
+    // its real size, not the placeholder one (false: it failed or did not load in time).
+    const textureLoaded = (tex: any, timeoutMs = 5000): Promise<boolean> =>
+      new Promise((resolve) => {
+        const t0 = Date.now();
+        const poll = () => {
+          // naturalWidth is set before Blockbench's own onload updates tex.width — wait for both.
+          if (tex.img && tex.img.naturalWidth > 0 && tex.width === tex.img.naturalWidth) return resolve(true);
+          if (tex.error || Date.now() - t0 > timeoutMs) return resolve(false);
+          setTimeout(poll, 25);
+        };
+        poll();
+      });
+
+    const createTexture = async (input: any): Promise<any> => {
       try {
         if (!hasProject()) return { ok: false, error: 'No project open.' };
         if (!input.name) return { ok: false, error: 'A unique texture name is required.' };
@@ -2507,7 +2521,10 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
             tex = new Texture({ name: input.name, width: w, height: h }).fromDataURL(input.data).add(false);
           } else {
             const path = input.data.replace(/^file:\/\//, '');
-            tex = new Texture({ name: input.name }).fromFile({ name: path.split(/[\\/]/).pop() || path, path } as any).add(false);
+            // fromFile names the texture after the file; keep the name the caller asked for.
+            tex = new Texture({ name: input.name }).fromFile({ name: path.split(/[\\/]/).pop() || path, path } as any);
+            tex.name = input.name;
+            tex.add(false);
           }
         } else {
           const canvas = document.createElement('canvas');
@@ -2530,7 +2547,16 @@ const options: Parameters<typeof BBPlugin.register>[1] = {
 
         if (typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
         logToHistory(`created texture "${tex.name}"${tex.layers_enabled ? ' (layers on)' : ''}`);
-        return { ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name, width: tex.width || w, height: tex.height || h, layers_enabled: !!tex.layers_enabled };
+        const fromImage = !!(input.data && typeof input.data === 'string');
+        const loaded = fromImage ? await textureLoaded(tex) : true;
+        const warning = loaded ? undefined
+          : tex.error ? `the image could not be loaded from ${input.data.startsWith('data:') ? 'the data URL' : input.data}.`
+          : 'the image had not finished loading — check its size with list_textures.';
+        return {
+          ok: true, id: tex.uuid, uuid: tex.uuid, name: tex.name,
+          width: loaded ? tex.width || w : null, height: loaded ? tex.height || h : null,
+          layers_enabled: !!tex.layers_enabled, ...(warning ? { warning } : {}),
+        };
       } catch (err: any) {
         console.error('[MCP Plugin] createTexture failed:', err);
         return { ok: false, error: err?.message || String(err) };

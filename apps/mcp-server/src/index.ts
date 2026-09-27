@@ -2054,7 +2054,7 @@ server.registerTool(
       layers: z.boolean().optional().describe("Enable texture layers so paint passes can be non-destructive (target them with the paint tools' `layer` arg)."),
     },
   },
-  async (args) => forward("create_texture", args, (r) => `Created texture "${r.name}" (${r.width}x${r.height}, id ${r.id}).`)
+  async (args) => forward("create_texture", args, (r) => `Created texture "${r.name}" (${r.width != null ? `${r.width}x${r.height}` : "size once it loads"}, id ${r.id}).${warningLines(r)}`)
 );
 
 server.registerTool(

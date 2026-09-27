@@ -53,6 +53,10 @@ section into the new version (see README → Releasing).
   no texture. GeckoLib and Bedrock entity models use one texture: their faces keep none of their own and
   show the project's. `get_scene_tree` now reports the texture Blockbench draws on each face, so the
   check — and `export_bundle`'s choice of texture — see it. Found by the live test.
+- `create_texture` from a file named the texture after the file ("noise.png"), so the next call with
+  the name it was given found nothing; and it reported the placeholder size (16×16) because the image
+  was still loading. It keeps the given name and waits for the image: the reply has its real size, or
+  a warning when it could not be loaded. Found by the live test.
 - A plugin reply over 1 MB — e.g. a large texture, or a screenshot at `max_size: 0` — closed the
   plugin's connection, and the call timed out. The bridge now takes replies up to 64 MB, like the
   relay endpoint.
