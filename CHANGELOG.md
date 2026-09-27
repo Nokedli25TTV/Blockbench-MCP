@@ -26,20 +26,7 @@ section into the new version (see README → Releasing).
   `<bone>_cube_2`, … — which are not exported, so the files come back byte for byte.
 
 ### Added
-- `generate_animation` → `attack`, `hurt` and `death`, one-shots from the rig like the walk:
-  - `attack` (0.6 s, plays once): an arm — the right one, or `limb` — is raised overhead and chops down
-    to the front as the body winds up and twists into it, the other arm swinging back; with no arms,
-    or `limb` = the head, the head rears up and bites as the body lunges (four legs reach and push);
-  - `hurt` (0.3 s, plays once): the body and head jolt back, the arms fly out, a small rebound;
-  - `death` (1 s, holds its last frame): a stagger, then the whole model tips over to its left about its
-    left bottom edge — every root bone turns and shifts so it falls as one piece and lies on the ground —
-    the limbs on top lift and the head droops. It is checked against the floor, and a cube outside every
-    bone (which would stay standing) is named.
-
-  The reply gives the GeckoLib call (`thenLoop` / `thenPlay` / `thenPlayAndHold`); for a death, the
-  renderer's `getDeathMaxRotation` should return 0, or GeckoLib tips the model over a second time. The
-  directions were measured live: keyframe positions move along the world axes and rotations turn the
-  right-handed way about them.
+Working with a mod's files:
 - `import_bundle`: a mod's model opened for editing — the counterpart of `export_bundle`. It finds
   `<name>.geo.json`, `<name>.animation.json` and `<name>.png` under `assets/<mod_id>/` where GeckoLib's
   defaulted models keep them (GeckoLib 4 or 5), else by name anywhere under those folders (a mod with its
@@ -55,11 +42,6 @@ section into the new version (see README → Releasing).
   file that would change only with `overwrite: true`. A part the import did not bring goes to GeckoLib's
   default place, and the reply says so. `get_project_info` shows where an imported project came from
   (`imported_from`); `mod_dir` is optional when the paths or the import say where.
-- `validate_model for_export` (and so `export_bundle`'s check) warns about parts that touch nothing of the
-  rest of the model: the cubes that touch or overlap (by their world boxes, within 0.01) form pieces, the
-  one with the most parts is the model, and each other piece is named with the model's nearest part and
-  the gap — a tail placed 2 units behind the back showed up nowhere before. A warning only: a halo or an
-  orb may float on purpose. The grouping is `looseParts` in `packages/shared/src/measure.ts`.
 - `export_bundle` for Java block/item projects: `kind: "item"` or `"block"` writes `models/<kind>/<name>.json`
   and its textures under `textures/<kind>/` — one texture as `<name>.png`, several as `<name>_<texture>.png`.
   Blockbench writes its own texture names into a Java model (`"0": "steel"`), which Minecraft reads as
@@ -69,8 +51,31 @@ section into the new version (see README → Releasing).
   blockstate and item model, or `items/<name>.json` from Minecraft 1.21.4 — never changing an existing
   one (a mod that makes them with datagen has its own). It says when the project's rotation rules are for
   another Minecraft version than the mod's. The export check, the overwrite gate and `dry_run` as before.
+
+Animation:
+- `generate_animation` → `attack`, `hurt` and `death`, one-shots from the rig like the walk:
+  - `attack` (0.6 s, plays once): an arm — the right one, or `limb` — is raised overhead and chops down
+    to the front as the body winds up and twists into it, the other arm swinging back; with no arms,
+    or `limb` = the head, the head rears up and bites as the body lunges (four legs reach and push);
+  - `hurt` (0.3 s, plays once): the body and head jolt back, the arms fly out, a small rebound;
+  - `death` (1 s, holds its last frame): a stagger, then the whole model tips over to its left about its
+    left bottom edge — every root bone turns and shifts so it falls as one piece and lies on the ground —
+    the limbs on top lift and the head droops. It is checked against the floor, and a cube outside every
+    bone (which would stay standing) is named.
+
+  The reply gives the GeckoLib call (`thenLoop` / `thenPlay` / `thenPlayAndHold`); for a death, the
+  renderer's `getDeathMaxRotation` should return 0, or GeckoLib tips the model over a second time. The
+  directions were measured live: keyframe positions move along the world axes and rotations turn the
+  right-handed way about them.
 - `create_animation` → `loop`: `"loop"`, `"once"` or `"hold"` (plays once and stays on its last frame —
   Bedrock's `hold_on_last_frame`); `true` / `false` still work.
+
+Checking before export:
+- `validate_model for_export` (and so `export_bundle`'s check) warns about parts that touch nothing of the
+  rest of the model: the cubes that touch or overlap (by their world boxes, within 0.01) form pieces, the
+  one with the most parts is the model, and each other piece is named with the model's nearest part and
+  the gap — a tail placed 2 units behind the back showed up nowhere before. A warning only: a halo or an
+  orb may float on purpose. The grouping is `looseParts` in `packages/shared/src/measure.ts`.
 
 ### Changed
 - The export check (`validate_model for_export`) counts overlapping UV areas as an error only for box
