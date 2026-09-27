@@ -15,6 +15,8 @@ section into the new version (see README → Releasing).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-27
+
 ### Fixed
 - `from_geo_json` loaded nothing while a project with the same geometry name was open: Blockbench 5's
   loader switches to such a tab and closes the new project (unsaved projects all share the empty
